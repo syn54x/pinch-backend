@@ -1,0 +1,198 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_only:
+        description: Skip cz bump; publish current version on main (failed-publish recovery)
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-groups
+
+      - name: Prepare prek hooks
+        run: uv run prek install --prepare-hooks
+
+      - name: Run prek on all files
+        run: uv run prek run --all-files
+
+      - name: Run tests
+        run: uv run pytest
+
+  release:
+    needs: gate
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Verify release app is configured
+        run: |
+          if [ -z "${{ vars.RELEASE_APP_ID }}" ]; then
+            echo "::error::RELEASE_APP_ID is not set. Add the GitHub App ID as an org or repo variable."
+            exit 1
+          fi
+          if [ -z "${{ secrets.RELEASE_APP_PRIVATE_KEY }}" ]; then
+            echo "::error::RELEASE_APP_PRIVATE_KEY is not available."
+            exit 1
+          fi
+
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: syn54x
+          repositories: pinch-backend
+
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-groups
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump version and changelog
+        if: ${{ !inputs.publish_only }}
+        run: uv run cz bump --yes --check-consistency --changelog --changelog-to-stdout > release-body.md
+
+      - name: Prepare release body (publish-only recovery)
+        if: ${{ inputs.publish_only }}
+        run: |
+          python3 - <<'EOF'
+          import re
+          import sys
+          from pathlib import Path
+
+          version = re.search(
+              r'^version = "([^"]+)"',
+              Path("pyproject.toml").read_text(),
+              re.MULTILINE,
+          )
+          if not version:
+              sys.exit("missing [project].version in pyproject.toml")
+          version = version.group(1)
+          changelog = Path("CHANGELOG.md").read_text()
+          match = re.search(
+              rf"^## v{re.escape(version)} \(.*?\)\n(?P<body>(?:\n(?!## ).*)*)",
+              changelog,
+              re.MULTILINE,
+          )
+          if not match:
+              sys.exit(f"no CHANGELOG section for v{version}")
+          Path("release-body.md").write_text(match.group("body").strip() + "\n")
+          EOF
+
+      - name: Verify release body
+        run: test -s release-body.md
+
+      - name: Push release commit and tag
+        if: ${{ !inputs.publish_only }}
+        run: |
+          TAG=$(git describe --tags --abbrev=0 --match 'v*')
+          git push origin main
+          git push origin "${TAG}"
+
+      - id: tag
+        run: echo "tag=$(git describe --tags --abbrev=0 --match 'v*')" >> "$GITHUB_OUTPUT"
+
+      - name: Build package (public CLI only; pinch-backend is never published)
+        run: uv build --package pinch-cli
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-dist
+          path: dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-body
+          path: release-body.md
+
+  publish:
+    needs: release
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/pinch-cli
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: [release, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: syn54x
+          repositories: pinch-backend
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-dist
+          path: dist/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-body
+          path: .
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          gh release create "${{ needs.release.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --title "${{ needs.release.outputs.tag }}" \
+            --notes-file release-body.md \
+            --verify-tag \
+            dist/*.tar.gz dist/*.whl
+
+  docs:
+    needs: release
+    uses: ./.github/workflows/docs.yml
+    with:
+      ref: main
+    permissions:
+      contents: read
+      pages: write
+      id-token: write

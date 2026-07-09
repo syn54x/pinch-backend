@@ -1,0 +1,21 @@
+[project]
+name = "pinch-cli"
+version = "0.1.0"
+description = "Pinch CLI — a pure API client for the Pinch developer API"
+readme = "README.md"
+authors = [{ name = "Taylor", email = "taylor@x54.sh" }]
+requires-python = ">=3.13"
+dependencies = [
+    "cyclopts>=4",
+    "httpx>=0.28",
+]
+
+[project.scripts]
+pinch = "pinch_cli.app:main"
+
+[build-system]
+requires = ["uv_build>=0.11.16,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "pinch_cli"

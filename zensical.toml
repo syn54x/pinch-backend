@@ -1,0 +1,35 @@
+[project]
+site_name = "pinch-backend"
+site_url = "https://syn54x.github.io/pinch-backend/"
+site_description = "Pinch backend: Litestar API, Penny (pydantic-ai) agents, and a private developer CLI"
+docs_dir = "docs/pages"
+site_dir = "site"
+watch = ["src", "README.md"]
+
+nav = [
+  { "Home" = "index.md" },
+  { "Getting started" = [
+    { "Installation" = "getting-started/installation.md" },
+  ] },
+  { "Reference" = [
+    { "CLI" = "reference/cli/index.md" },
+  ] },
+]
+
+[project.plugins.mkdocstrings.handlers.python]
+paths = ["src"]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+docstring_style = "google"
+show_source = true
+show_root_heading = true
+
+[project.markdown_extensions.admonition]
+[project.markdown_extensions.tables]
+[project.markdown_extensions.toc]
+permalink = true
+
+[project.markdown_extensions.pymdownx.highlight]
+anchor_linenums = true
+
+[project.markdown_extensions.pymdownx.superfences]

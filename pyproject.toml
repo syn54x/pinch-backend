@@ -1,0 +1,87 @@
+[project]
+name = "pinch-backend"
+version = "0.1.0"
+description = "Pinch backend: Litestar API, Penny (pydantic-ai) agents, and a private developer CLI"
+classifiers = ["Private :: Do Not Upload"]
+readme = "README.md"
+authors = [{ name = "Taylor", email = "taylor@x54.sh" }]
+requires-python = ">=3.13"
+dependencies = [
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "structlog>=24",
+    "cyclopts>=4",
+    "litestar[standard]>=2",
+    "pydantic-ai>=2,<3",
+    "logfire>=4,<5",
+]
+
+[project.scripts]
+pinch-dev = "pinch_backend.cli.app:main"
+
+[build-system]
+requires = ["uv_build>=0.11.16,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "pinch_backend"
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.uv.workspace]
+members = ["packages/pinch-cli"]
+
+[tool.uv.sources]
+pinch-cli = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pinch-cli",
+    "prek>=0.4",
+    "ruff>=0.11",
+    "ty>=0.0.1a0",
+    "pytest>=8",
+    "pytest-cov>=6",
+    "pytest-asyncio>=1.0",
+    "commitizen>=4",
+    "zensical>=0.0.45",
+    "mkdocstrings-python>=1.16",
+    "pymdown-extensions>=10.7",
+    "httpx>=0.28",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "TC", "PTH"]
+
+[tool.ty.environment]
+python-version = "3.13"
+
+[tool.ty.src]
+include = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = ["--cov=pinch_backend", "--cov-report=term-missing"]
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+tag_format = "v$version"
+version_scheme = "pep440"
+major_version_zero = true
+version_provider = "uv"
+version_files = [
+    "src/pinch_backend/__init__.py:__version__",
+    "packages/pinch-cli/pyproject.toml:^version",
+    "packages/pinch-cli/src/pinch_cli/__init__.py:__version__",
+]
+update_changelog_on_bump = true
+changelog_file = "CHANGELOG.md"

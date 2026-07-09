@@ -1,0 +1,57 @@
+name: Docs
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to build and deploy (branch, tag, or SHA)
+        type: string
+        default: main
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to build and deploy (branch, tag, or SHA)
+        type: string
+        default: main
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-groups
+
+      - name: Generate CLI reference docs
+        run: uv run python scripts/gen_cli_docs.py
+
+      - name: Build documentation
+        run: uv run zensical build --clean
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
