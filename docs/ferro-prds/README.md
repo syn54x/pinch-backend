@@ -1,11 +1,11 @@
-# Ferro PDRs
+# Ferro PRDs
 
 Per ADR 0003, Pinch never works around ferro-orm gaps in domain data access —
-it blocks and files a PDR (product design requirement) on ferro's issue
+it blocks and files a PRD (product requirements document) on ferro's issue
 board instead. This directory holds the drafts, each motivated by concrete
 Pinch queries. File them upstream, then link the issue back here.
 
-| PDR | Capability | Status |
+| PRD | Capability | Status |
 |---|---|---|
 | 0001 | Table joins | filed: [ferro-orm#259](https://github.com/syn54x/ferro-orm/issues/259) |
 | 0002 | Aggregations & group-by | filed as workloads on existing [Epic F-6 (ferro-orm#225)](https://github.com/syn54x/ferro-orm/issues/225#issuecomment-4928762474) |

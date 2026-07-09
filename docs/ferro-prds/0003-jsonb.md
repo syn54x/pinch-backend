@@ -1,4 +1,4 @@
-# PDR 0003: JSONB columns
+# PRD 0003: JSONB columns
 
 **Requested by:** Pinch • **Blocks:** provider payload storage (Plaid raw
 transactions/accounts), AI proposal metadata, import profiles.

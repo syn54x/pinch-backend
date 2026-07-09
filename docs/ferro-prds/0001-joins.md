@@ -1,4 +1,4 @@
-# PDR 0001: Table joins
+# PRD 0001: Table joins
 
 **Requested by:** Pinch • **Blocks:** transaction list endpoints, review
 inbox, transfer detection — i.e. the MVP spine.

@@ -1,4 +1,4 @@
-# PDR 0002: Aggregations and group-by
+# PRD 0002: Aggregations and group-by
 
 > **Filed:** ferro already tracks this as
 > [Epic F-6 (ferro-orm#225)](https://github.com/syn54x/ferro-orm/issues/225);
@@ -55,9 +55,9 @@ GROUP BY month ORDER BY month;
 - [ ] `GROUP BY` one or more columns/expressions (incl. `date_trunc`)
 - [ ] `HAVING`
 - [ ] Results hydrate into caller-supplied Pydantic models
-- [ ] Composes with joins (PDR 0001) and filters
+- [ ] Composes with joins (PRD 0001) and filters
 
 ## Notes
 
-Depends on PDR 0001 for the joined variants; the single-table forms
+Depends on PRD 0001 for the joined variants; the single-table forms
 (net worth query) are independently useful and could land first.

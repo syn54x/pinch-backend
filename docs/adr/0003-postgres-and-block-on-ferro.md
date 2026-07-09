@@ -10,9 +10,9 @@ B-tree on `(ledger_id, date)`.
 
 All domain data access goes through **ferro-orm**, with a deliberate policy:
 when ferro lacks a capability Pinch needs (joins, aggregations, JSONB, …),
-**Pinch blocks and files a PDR on ferro's issue board** rather than working
+**Pinch blocks and files a PRD on ferro's issue board** rather than working
 around it. Pinch is ferro's forcing function; drafts live in
-`docs/ferro-pdrs/`. Third-party infrastructure that manages its own tables
+`docs/ferro-prds/`. Third-party infrastructure that manages its own tables
 (e.g. the job queue, alembic) is exempt — the policy governs Pinch's domain
 data only.
 
