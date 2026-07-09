@@ -3,7 +3,8 @@
 Per ADR 0003, Pinch never works around ferro-orm gaps in domain data access —
 it blocks and files a PRD (product requirements document) on ferro's issue
 board instead. This directory holds the drafts, each motivated by concrete
-Pinch queries. File them upstream, then link the issue back here.
+Pinch queries. File them upstream, then link the issue back here. Once filed, the
+upstream issue body is the canonical PRD; the drafts here are historical.
 
 | PRD | Capability | Status |
 |---|---|---|
