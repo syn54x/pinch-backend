@@ -1,5 +1,10 @@
 # PDR 0002: Aggregations and group-by
 
+> **Filed:** ferro already tracks this as
+> [Epic F-6 (ferro-orm#225)](https://github.com/syn54x/ferro-orm/issues/225);
+> Pinch's workloads were added as a comment there rather than a duplicate
+> issue.
+
 **Requested by:** Pinch • **Blocks:** net worth history, spending reports,
 loan payoff projection inputs, budgets (future).
 
