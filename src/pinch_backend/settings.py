@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     """Base for links in outbound mail (verification, reset)."""
     mailer_backend: str = "console"
     """v0 ships console delivery; SMTP is config later, never a fork."""
+    turnstile_enabled: bool = False
+    """Reserved (PRD M2): bot challenge integration is deferred to the
+    hosted-deploy milestone. The flag exists so hosted config is additive;
+    nothing reads it yet."""
     auth_rate_limit_per_email: int = 10
     """Attempts per email per window on credentialed endpoints."""
     auth_rate_limit_per_ip: int = 30
