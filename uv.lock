@@ -563,6 +563,21 @@ client = [
 ]
 
 [[package]]
+name = "ferro-orm"
+version = "0.15.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ea/21/c0381a04af85e6883cf07955d432fbe357454c4329a8a5051fa27911e721/ferro_orm-0.15.0.tar.gz", hash = "sha256:b474b4c0d7db29c3d043ddb60c36578158a8a82b2cbc3decf39e95263bf7ddd0", size = 1097800, upload-time = "2026-07-11T22:06:16.164Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a3/5c/8187c18bb124ab2fbdc234f0702f93f5e7d88e1ca8802cae31495e35355d/ferro_orm-0.15.0-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:1abe3aafcec54211e8dffc67754ab39bc030bdb4c160106b5d3adfcbc3a9bcd1", size = 5047474, upload-time = "2026-07-11T22:06:06.764Z" },
+    { url = "https://files.pythonhosted.org/packages/6f/e9/cb211ad6a31fed26aec8755c51104eaa5ab2c4834cc7813677366d30c102/ferro_orm-0.15.0-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:b7ecd2ab6eb2ab2e068aec836fec8dae44a267bae5386d6414ea26a6806ef220", size = 5422796, upload-time = "2026-07-11T22:06:09.151Z" },
+    { url = "https://files.pythonhosted.org/packages/c4/b5/687f62eefd6fafca863cb1cadac950dace31e6bea3e428d5daa75a0a4f9c/ferro_orm-0.15.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:e27edbeeb82601752345d90a05ab29e492a0354deb6592eab8e725a59c95ce78", size = 5467946, upload-time = "2026-07-11T22:06:11.978Z" },
+    { url = "https://files.pythonhosted.org/packages/24/5c/b5274097fdf474f7d0af5e6708caab21178fa992b312c86b08717610da97/ferro_orm-0.15.0-cp39-abi3-win_amd64.whl", hash = "sha256:a67e5bc7e98da2bcda0b65b1a92976d14432c7fdab9d6b958122b26f59106489", size = 4983665, upload-time = "2026-07-11T22:06:14.582Z" },
+]
+
+[[package]]
 name = "genai-prices"
 version = "0.0.70"
 source = { registry = "https://pypi.org/simple" }
@@ -1506,6 +1521,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "cyclopts" },
+    { name = "ferro-orm" },
     { name = "litestar", extra = ["standard"] },
     { name = "logfire" },
     { name = "pydantic" },
@@ -1533,6 +1549,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "cyclopts", specifier = ">=4" },
+    { name = "ferro-orm", specifier = ">=0.15" },
     { name = "litestar", extras = ["standard"], specifier = ">=2" },
     { name = "logfire", specifier = ">=4,<5" },
     { name = "pydantic", specifier = ">=2.0" },
