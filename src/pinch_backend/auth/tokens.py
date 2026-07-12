@@ -24,8 +24,11 @@ class IssuedToken:
     """The only form that touches the database."""
 
 
-def generate_token() -> IssuedToken:
-    secret = secrets.token_urlsafe(32)
+def generate_token(*, prefix: str = "") -> IssuedToken:
+    """``prefix`` brands the secret for scanners and human triage (e.g.
+    ``pinch_pat_``); the hash always covers the whole prefixed string, so
+    the format stays cosmetic to verification."""
+    secret = prefix + secrets.token_urlsafe(32)
     return IssuedToken(secret=secret, token_hash=hash_token(secret))
 
 
