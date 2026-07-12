@@ -86,6 +86,9 @@ class User(TimestampMixin, Model):
     password_hash: str | None = Field(default=None, repr=False)
     """argon2id via pinch_backend.auth.passwords (M2, ADR-0005); None means
     no password login (e.g. a future social-only account)."""
+    email_verified_at: datetime | None = None
+    """Set once by the M2 verification flow; hosted instances may require
+    it before domain data access (config, never a fork — ADR-0002)."""
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 

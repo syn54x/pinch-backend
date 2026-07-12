@@ -3,7 +3,11 @@ from litestar.config.csrf import CSRFConfig
 from litestar.di import Provide
 
 from pinch_backend import __version__
-from pinch_backend.auth.guards import provide_current_ledger, provide_current_user
+from pinch_backend.auth.guards import (
+    provide_current_ledger,
+    provide_current_session,
+    provide_current_user,
+)
 from pinch_backend.auth.routes import auth_router
 from pinch_backend.db import connect_database, disconnect_database
 from pinch_backend.observability import configure_observability
@@ -32,6 +36,7 @@ def create_app(*, manage_database: bool = True) -> Litestar:
         # Every router gets the acting user and ledger by declaring the
         # parameter (M2 story 13; M3 consumes this).
         dependencies={
+            "current_session": Provide(provide_current_session),
             "current_user": Provide(provide_current_user),
             "current_ledger": Provide(provide_current_ledger),
         },

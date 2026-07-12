@@ -66,7 +66,14 @@ async def test_full_lifecycle_login_me_logout_me(client) -> None:
 async def test_me_exposes_exactly_the_allowlisted_fields(client) -> None:
     await _signup(client)
     body = (await client.get(ME)).json()
-    assert set(body) == {"id", "email", "display_name", "primary_currency", "created_at"}
+    assert set(body) == {
+        "id",
+        "email",
+        "display_name",
+        "primary_currency",
+        "email_verified",
+        "created_at",
+    }
 
 
 async def test_no_response_ever_carries_password_material(client) -> None:
