@@ -60,14 +60,14 @@ async def test_session_list_shows_created_last_seen_and_client_hint(client) -> N
     await _signup(client)
     response = await client.get(SESSIONS)
     assert response.status_code == 200
-    (session,) = response.json()
+    (session,) = response.json()["items"]
     assert set(session) == {"id", "created_at", "last_seen_at", "client_hint", "current"}
     assert session["current"] is True
 
 
 async def test_each_login_is_its_own_revocable_session(client) -> None:
     await _signup(client)
-    first_id = (await client.get(SESSIONS)).json()[0]["id"]
+    first_id = (await client.get(SESSIONS)).json()["items"][0]["id"]
 
     # A "second device" logs in: same account, new session.
     await client.post(
@@ -75,7 +75,7 @@ async def test_each_login_is_its_own_revocable_session(client) -> None:
         json={"email": "taylor@example.com", "password": PASSWORD},
         headers={**await _csrf(client), "user-agent": "Penny on iOS"},
     )
-    sessions = (await client.get(SESSIONS)).json()
+    sessions = (await client.get(SESSIONS)).json()["items"]
     assert len(sessions) == 2
     current = [s for s in sessions if s["current"]]
     assert len(current) == 1
@@ -94,7 +94,7 @@ async def test_revoking_a_session_kills_it_server_side(client) -> None:
         .split(";")[0]
         .split("=", 1)[1]
     )
-    first_id = (await client.get(SESSIONS)).json()[0]["id"]
+    first_id = (await client.get(SESSIONS)).json()["items"][0]["id"]
 
     await client.post(
         LOGIN,
@@ -130,7 +130,7 @@ async def test_expired_sessions_do_not_appear_in_the_list(client) -> None:
     stale.last_seen_at = utcnow() - settings.session_idle_ttl - timedelta(seconds=1)
     await stale.save()
 
-    sessions = (await client.get(SESSIONS)).json()
+    sessions = (await client.get(SESSIONS)).json()["items"]
     assert [s["current"] for s in sessions] == [True]
 
 
