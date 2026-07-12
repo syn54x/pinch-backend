@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     session_absolute_ttl: timedelta = timedelta(days=90)
     """Hard session lifetime; activity never extends it."""
 
+    signup_enabled: bool = True
+    """Self-hosters may close signup after user #1 (PRD M2 story 11)."""
+    auth_rate_limit_per_email: int = 10
+    """Attempts per email per window on credentialed endpoints."""
+    auth_rate_limit_per_ip: int = 30
+    """Attempts per client IP per window on auth endpoints."""
+    auth_rate_limit_window: timedelta = timedelta(minutes=15)
+
     @model_validator(mode="after")
     def _resolve_secret_key(self) -> "Settings":
         if not self.secret_key:

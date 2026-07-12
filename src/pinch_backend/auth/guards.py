@@ -5,9 +5,10 @@ Registered as app-level dependencies so every later router gets
 authorization one dependency away, everywhere (M3 consumes this).
 """
 
-# Runtime import despite TC002: Litestar resolves dependency signatures at
-# runtime, so `Request` must be importable when the annotation is evaluated.
+# Runtime imports despite TC002: Litestar resolves dependency signatures at
+# runtime, so these must be importable when annotations are evaluated.
 from litestar import Request  # noqa: TC002
+from litestar.di import NamedDependency  # noqa: TC002
 from litestar.exceptions import NotAuthorizedException
 
 from pinch_backend.auth.sessions import resolve_session
@@ -30,7 +31,7 @@ async def provide_current_user(request: Request) -> User:
     raise NotAuthorizedException(detail="Not authenticated")
 
 
-async def provide_current_ledger(current_user: User) -> Ledger:
+async def provide_current_ledger(current_user: NamedDependency[User]) -> Ledger:
     """The user's active ledger — in v0, their single provisioned one.
 
     Chains on ``current_user`` by parameter name (Litestar DI). A user with
