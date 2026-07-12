@@ -15,6 +15,7 @@ dependencies = [
     "pydantic-ai>=2,<3",
     "logfire>=4,<5",
     "ferro-orm>=0.15",
+    "argon2-cffi>=25",
 ]
 
 [project.scripts]
