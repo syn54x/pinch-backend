@@ -11,6 +11,7 @@ are excluded from ``repr`` so no log or error message can carry them.
 
 import uuid
 from datetime import datetime, timedelta
+from enum import StrEnum
 from typing import Annotated
 
 from ferro import Field, ForeignKey, Model
@@ -42,6 +43,41 @@ class Session(TimestampMixin, Model):
     def is_active(self, *, idle_ttl: timedelta, now: datetime) -> bool:
         """Both expiries must hold: recently used and inside the hard deadline."""
         return now < self.absolute_expires_at and now < self.last_seen_at + idle_ttl
+
+
+class PatScope(StrEnum):
+    """v0 scopes, exactly two (PRD M3): a rank, not a set — write implies
+    read, so one column holds the whole truth and a guard check is a single
+    comparison. Per-resource scopes later are new machinery, not new values
+    here (deliberately deferred in #8)."""
+
+    READ = "read"
+    WRITE = "write"
+
+
+class PersonalAccessToken(TimestampMixin, Model):
+    """A named, scoped, revocable bearer credential (PRD M3, issue #10) —
+    the second credential after the session cookie, reusing its discipline:
+    opaque 256-bit secret shown exactly once, SHA-256 hash at rest,
+    revocation deletes the row (dead = gone, same as Session; the audit
+    trail is the structured ``auth.pat.revoked`` event).
+    """
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    user: Annotated[User, ForeignKey(related_name="personal_access_tokens", index=True)]
+    token_hash: str = Field(unique=True, repr=False)
+    name: str
+    """User-chosen label ("ci-script"); display-only, never unique."""
+    scope: PatScope
+    display_prefix: str
+    """Plaintext head of the secret (``pinch_pat_`` + a few characters) so
+    the list view lets a user match a leaked token to a row. Far too short
+    to help an attacker; the secret itself is never stored."""
+    last_used_at: datetime | None = None
+    """Touched when the PAT authenticates a request; the list view's
+    "is this token still alive?" signal."""
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class AuthAttempt(TimestampMixin, Model):

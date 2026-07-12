@@ -16,7 +16,12 @@ from ferro import BackRef, Field, ForeignKey, Model, Relation, transaction
 from pydantic import field_validator
 
 if TYPE_CHECKING:
-    from pinch_backend.auth.models import EmailVerificationToken, PasswordResetToken, Session
+    from pinch_backend.auth.models import (
+        EmailVerificationToken,
+        PasswordResetToken,
+        PersonalAccessToken,
+        Session,
+    )
 
 
 def utcnow() -> datetime:
@@ -98,6 +103,7 @@ class User(TimestampMixin, Model):
     sessions: Relation[list["Session"]] = BackRef()
     email_verification_tokens: Relation[list["EmailVerificationToken"]] = BackRef()
     password_reset_tokens: Relation[list["PasswordResetToken"]] = BackRef()
+    personal_access_tokens: Relation[list["PersonalAccessToken"]] = BackRef()
 
     @field_validator("email")
     @classmethod
