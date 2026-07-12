@@ -198,7 +198,7 @@ async def test_the_full_journey_logs_events_and_never_a_secret(client, monkeypat
         LOGIN, json={"email": "taylor@example.com", "password": new_password}, headers=headers
     )
     secrets_seen.add(cookie_secret(first))
-    first_id = (await client.get(SESSIONS)).json()[0]["id"]
+    first_id = (await client.get(SESSIONS)).json()["items"][0]["id"]
     second = await client.post(
         LOGIN, json={"email": "taylor@example.com", "password": new_password}, headers=headers
     )

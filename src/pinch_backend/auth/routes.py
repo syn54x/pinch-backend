@@ -29,6 +29,13 @@ from litestar.status_codes import (
 )
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr
 
+from pinch_backend.api.pagination import (
+    DEFAULT_PAGE_LIMIT,
+    CursorParam,
+    LimitParam,
+    Page,
+    paginate,
+)
 from pinch_backend.auth import flows, methods
 from pinch_backend.auth.breach import password_is_breached
 from pinch_backend.auth.models import Session
@@ -197,23 +204,39 @@ async def me(current_user: NamedDependency[User]) -> UserOut:
 
 
 @get("/sessions")
-async def list_sessions(current_session: NamedDependency[Session]) -> list[SessionOut]:
+async def list_sessions(
+    current_session: NamedDependency[Session],
+    cursor: CursorParam = None,
+    limit: LimitParam = DEFAULT_PAGE_LIMIT,
+) -> Page[SessionOut]:
+    """The first consumer of the M3 pagination convention (issue #9).
+
+    Liveness is filtered in SQL — the same checks as ``Session.is_active`` —
+    so pages stay full; filtering after the query would let dead rows eat
+    page slots.
+    """
     now = utcnow()
-    rows = await Session.where(
-        lambda s: s.user_id == current_session.user_id  # ty: ignore[unresolved-attribute]
-    ).all()
-    live = [s for s in rows if s.is_active(idle_ttl=settings.session_idle_ttl, now=now)]
-    live.sort(key=lambda s: s.last_seen_at, reverse=True)
-    return [
-        SessionOut(
-            id=s.id,
-            created_at=s.created_at,
-            last_seen_at=s.last_seen_at,
-            client_hint=s.client_hint,
-            current=s.id == current_session.id,
+    idle_cutoff = now - settings.session_idle_ttl
+    user_id = current_session.user_id  # ty: ignore[unresolved-attribute]
+    query = Session.where(
+        lambda s: (
+            (s.user_id == user_id) & (s.absolute_expires_at > now) & (s.last_seen_at > idle_cutoff)
         )
-        for s in live
-    ]
+    )
+    rows, next_cursor = await paginate(query, cursor=cursor, limit=limit)
+    return Page(
+        items=[
+            SessionOut(
+                id=s.id,
+                created_at=s.created_at,
+                last_seen_at=s.last_seen_at,
+                client_hint=s.client_hint,
+                current=s.id == current_session.id,
+            )
+            for s in rows
+        ],
+        next_cursor=next_cursor,
+    )
 
 
 @delete("/sessions/{session_id:uuid}")
