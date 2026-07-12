@@ -11,6 +11,21 @@ def pytest_configure() -> None:
 
 
 @pytest.fixture
+async def client(db):
+    """The public HTTP seam (PRD M2 onward): the app over the per-test
+    database. manage_database=False — the db fixture owns the connection.
+    https base_url so the Secure session cookie survives the client's jar."""
+    from litestar.testing import AsyncTestClient
+
+    from pinch_backend.api.app import create_app
+
+    async with AsyncTestClient(
+        create_app(manage_database=False), base_url="https://testserver.local"
+    ) as c:
+        yield c
+
+
+@pytest.fixture
 async def db(tmp_path):
     """The model-layer seam: a real database per test.
 

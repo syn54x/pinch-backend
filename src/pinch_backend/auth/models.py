@@ -10,10 +10,7 @@ are excluded from ``repr`` so no log or error message can carry them.
 """
 
 import uuid
-
-# Runtime import despite TC003: ferro's metaclass evaluates model annotations
-# eagerly at class definition (same constraint as the UP037 ignore in pyproject).
-from datetime import datetime, timedelta  # noqa: TC003
+from datetime import datetime, timedelta
 from typing import Annotated
 
 from ferro import Field, ForeignKey, Model
@@ -45,6 +42,22 @@ class Session(TimestampMixin, Model):
     def is_active(self, *, idle_ttl: timedelta, now: datetime) -> bool:
         """Both expiries must hold: recently used and inside the hard deadline."""
         return now < self.absolute_expires_at and now < self.last_seen_at + idle_ttl
+
+
+class AuthAttempt(TimestampMixin, Model):
+    """One row per guarded hit on an auth endpoint (PRD M2: in-Postgres
+    rate limiting, no new infrastructure — ADR-0003).
+
+    Limiting counts rows per key in a sliding window; stale rows are pruned
+    as they age out. Keys are opaque strings ("login:email:a@b.c",
+    "signup:ip:1.2.3.4") — no user FK, because the principal being limited
+    (an email probe, an IP) usually isn't a user.
+    """
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    key: str = Field(index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class EmailVerificationToken(TimestampMixin, Model):
