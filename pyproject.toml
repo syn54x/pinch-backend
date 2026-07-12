@@ -5,7 +5,7 @@ description = "Pinch backend: Litestar API, Penny (pydantic-ai) agents, and a pr
 classifiers = ["Private :: Do Not Upload"]
 readme = "README.md"
 authors = [{ name = "Taylor", email = "taylor@x54.sh" }]
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 dependencies = [
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
@@ -53,15 +53,18 @@ dev = [
 ]
 
 [tool.ruff]
-target-version = "py313"
+target-version = "py314"
 line-length = 100
 src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "TC", "PTH"]
+# UP037: ferro's metaclass evaluates model annotations eagerly at class
+# definition, so quoted forward references (BackRef cycles) are load-bearing.
+ignore = ["UP037"]
 
 [tool.ty.environment]
-python-version = "3.13"
+python-version = "3.14"
 
 [tool.ty.src]
 include = ["src"]
