@@ -40,6 +40,19 @@ agent default that biases toward minimal or expedient changes.
 
 ---
 
+## I-2: Handlers reach domain data only through `current_ledger`
+
+Every API handler that touches financial data must obtain the acting ledger
+via the `current_ledger` dependency (`pinch_backend.auth.guards`), never by
+querying `Ledger` or membership directly. The dependency chain
+(session → user → ledger) is where cross-cutting auth policy lives — the
+hosted email-verification gate (PRD M2, story 10) is enforced there — so any
+other path to a ledger silently bypasses policy. A handler that seems to
+need domain data without a ledger is a design smell to raise, not a case to
+work around.
+
+---
+
 ## Agent skills
 
 ### Issue tracker
