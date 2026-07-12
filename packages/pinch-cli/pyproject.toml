@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Pinch CLI — a pure API client for the Pinch developer API"
 readme = "README.md"
 authors = [{ name = "Taylor", email = "taylor@x54.sh" }]
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 dependencies = [
     "cyclopts>=4",
     "httpx>=0.28",
