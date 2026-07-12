@@ -8,6 +8,9 @@ from ferro import connect, engines, execute, reset_engine
 def pytest_configure() -> None:
     os.environ.setdefault("LOGFIRE_SEND_TO_LOGFIRE", "false")
     os.environ.setdefault("PINCH_DATABASE_URL", "sqlite::memory:")
+    # No live network calls in CI (PRD M2): breach-check tests opt back in
+    # through a stubbed transport.
+    os.environ.setdefault("PINCH_BREACH_CHECK_ENABLED", "false")
 
 
 @pytest.fixture

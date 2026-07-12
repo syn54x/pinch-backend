@@ -34,6 +34,18 @@ class Settings(BaseSettings):
 
     signup_enabled: bool = True
     """Self-hosters may close signup after user #1 (PRD M2 story 11)."""
+    verification_required: bool = False
+    """Hosted instances gate domain data on a verified email (story 10);
+    the default suits a single-user self-host."""
+    breach_check_enabled: bool = True
+    """Check new passwords against HIBP's k-anonymity range API (story 2).
+    Fails open on network trouble — availability over ceremony — logged."""
+    verification_token_ttl: timedelta = timedelta(hours=24)
+    reset_token_ttl: timedelta = timedelta(hours=1)
+    frontend_base_url: str = "http://localhost:5173"
+    """Base for links in outbound mail (verification, reset)."""
+    mailer_backend: str = "console"
+    """v0 ships console delivery; SMTP is config later, never a fork."""
     auth_rate_limit_per_email: int = 10
     """Attempts per email per window on credentialed endpoints."""
     auth_rate_limit_per_ip: int = 30

@@ -14,7 +14,11 @@ from litestar.exceptions import NotAuthorizedException
 from pydantic import ValidationError
 
 from pinch_backend.auth import methods
-from pinch_backend.auth.guards import provide_current_ledger, provide_current_user
+from pinch_backend.auth.guards import (
+    provide_current_ledger,
+    provide_current_session,
+    provide_current_user,
+)
 from pinch_backend.auth.models import Session
 from pinch_backend.auth.passwords import hash_password, needs_rehash
 from pinch_backend.auth.sessions import (
@@ -236,19 +240,21 @@ def test_clearing_the_session_cookie_expires_it_immediately() -> None:
 # --- Guards (core behavior; the HTTP seam re-covers these in CP3) ----------
 
 
-async def test_current_user_resolves_from_the_session_cookie(db) -> None:
+async def test_current_session_and_user_resolve_from_the_cookie(db) -> None:
     user = await _signup()
-    _, secret = await issue_session(user)
+    session, secret = await issue_session(user)
     request = SimpleNamespace(cookies={settings.session_cookie_name: secret})
 
-    assert (await provide_current_user(request)).id == user.id
+    resolved = await provide_current_session(request)
+    assert resolved.id == session.id
+    assert (await provide_current_user(resolved)).id == user.id
 
 
 @pytest.mark.parametrize("cookies", [{}, {"pinch_session": "forged-or-stale"}])
 async def test_no_valid_session_means_not_authenticated(db, cookies) -> None:
     await _signup()
     with pytest.raises(NotAuthorizedException):
-        await provide_current_user(SimpleNamespace(cookies=cookies))
+        await provide_current_session(SimpleNamespace(cookies=cookies))
 
 
 async def test_current_ledger_is_the_provisioned_ledger(db) -> None:
