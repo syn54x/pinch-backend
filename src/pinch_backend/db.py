@@ -3,6 +3,7 @@
 import ferro
 
 from pinch_backend import models  # noqa: F401 — register domain models before connect
+from pinch_backend.auth import models as auth_models  # noqa: F401 — register auth tables
 from pinch_backend.settings import settings
 
 

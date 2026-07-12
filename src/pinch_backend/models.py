@@ -10,10 +10,13 @@ the tenancy column (ADR-0002). All data access goes through ferro-orm
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Annotated, ClassVar
+from typing import TYPE_CHECKING, Annotated, ClassVar
 
 from ferro import BackRef, Field, ForeignKey, Model, Relation, transaction
 from pydantic import field_validator
+
+if TYPE_CHECKING:
+    from pinch_backend.auth.models import EmailVerificationToken, PasswordResetToken, Session
 
 
 def utcnow() -> datetime:
@@ -80,12 +83,18 @@ class User(TimestampMixin, Model):
     email: str = Field(unique=True)
     display_name: str
     primary_currency: str = Field(default="USD", pattern=r"^[A-Z]{3}$")
-    password_hash: str | None = None
-    """Column only — hashing, verification, and sessions are M2 (ADR-0005)."""
+    password_hash: str | None = Field(default=None, repr=False)
+    """argon2id via pinch_backend.auth.passwords (M2, ADR-0005); None means
+    no password login (e.g. a future social-only account)."""
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
     memberships: Relation[list["LedgerMember"]] = BackRef()
+    # Auth rows (pinch_backend.auth.models) — declared here because ferro
+    # requires the BackRef on the FK target; columns live on the auth tables.
+    sessions: Relation[list["Session"]] = BackRef()
+    email_verification_tokens: Relation[list["EmailVerificationToken"]] = BackRef()
+    password_reset_tokens: Relation[list["PasswordResetToken"]] = BackRef()
 
     @field_validator("email")
     @classmethod
