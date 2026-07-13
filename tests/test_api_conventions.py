@@ -146,6 +146,31 @@ async def test_openapi_documents_the_pagination_convention(client) -> None:
     assert {"items", "next_cursor"} <= set(component["properties"])
 
 
+async def test_openapi_declares_both_credential_schemes(client) -> None:
+    """The auth schemes are part of the served contract (story 7), and the
+    bearer scheme is what gives Swagger UI its Authorize button."""
+    schema = (await client.get(SCHEMA_JSON)).json()
+    schemes = schema["components"]["securitySchemes"]
+    assert schemes["bearerToken"]["type"] == "http"
+    assert schemes["bearerToken"]["scheme"] == "bearer"
+    assert schemes["sessionCookie"]["type"] == "apiKey"
+    assert schemes["sessionCookie"]["in"] == "cookie"
+    # Either credential satisfies the API-wide requirement.
+    assert {"bearerToken": []} in schema["security"]
+    assert {"sessionCookie": []} in schema["security"]
+
+
+async def test_the_docs_ui_is_swagger_plus_the_raw_document(client) -> None:
+    """One interactive UI, deliberately: the convention M4 copies is
+    "swagger + raw json/yaml", not Litestar's default four-UI zoo."""
+    assert (await client.get("/api/v1/schema")).status_code == 200
+    assert (await client.get("/api/v1/schema/swagger")).status_code == 200
+    assert (await client.get(SCHEMA_JSON)).status_code == 200
+    assert (await client.get("/api/v1/schema/openapi.yaml")).status_code == 200
+    for gone in ("/api/v1/schema/redoc", "/api/v1/schema/rapidoc", "/api/v1/schema/elements"):
+        assert (await client.get(gone)).status_code == 404, f"{gone} should be trimmed"
+
+
 async def test_the_error_envelope_is_documented_as_the_contract(client) -> None:
     schema = (await client.get(SCHEMA_JSON)).json()
     description = schema["info"]["description"]

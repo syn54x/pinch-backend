@@ -3,6 +3,8 @@ from litestar.config.csrf import CSRFConfig
 from litestar.di import Provide
 from litestar.middleware import DefineMiddleware
 from litestar.openapi import OpenAPIConfig
+from litestar.openapi.plugins import SwaggerRenderPlugin, YamlRenderPlugin
+from litestar.openapi.spec import Components, SecurityScheme
 
 from pinch_backend import __version__
 from pinch_backend.auth.csrf import CredentialAwareCSRFMiddleware
@@ -61,6 +63,30 @@ def create_app(*, manage_database: bool = True) -> Litestar:
             version=__version__,
             description=API_DESCRIPTION,
             path="/api/v1/schema",
+            # One interactive UI plus the raw document — a deliberate trim
+            # of Litestar's default four-UI set. Swagger because it can
+            # execute requests: Authorize with a PAT and try-it-out works.
+            render_plugins=[SwaggerRenderPlugin(), YamlRenderPlugin()],
+            # Both credential schemes are contract (M3 story 7). Declared
+            # API-wide as "either satisfies"; anonymous endpoints (signup,
+            # login, health) simply ignore credentials.
+            components=Components(
+                security_schemes={
+                    "bearerToken": SecurityScheme(
+                        type="http",
+                        scheme="bearer",
+                        description="A personal access token (`pinch_pat_…`).",
+                    ),
+                    "sessionCookie": SecurityScheme(
+                        type="apiKey",
+                        security_scheme_in="cookie",
+                        name=settings.session_cookie_name,
+                        description="A browser session; unsafe methods also "
+                        "require the x-csrftoken header.",
+                    ),
+                }
+            ),
+            security=[{"bearerToken": []}, {"sessionCookie": []}],
         ),
         # CSRF on every unsafe cookie-credentialed request (PRD M2 story 14):
         # the double-submit cookie is issued on first response; clients echo
