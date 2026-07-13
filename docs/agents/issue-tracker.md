@@ -13,6 +13,21 @@ Issues and PRDs for this repo live as GitHub issues. Use the `gh` CLI for all op
 
 Infer the repo from `git remote -v` — `gh` does this automatically when run inside a clone.
 
+## Hierarchy: native sub-issues
+
+The planning tree uses GitHub's **native sub-issues**, never just body-text
+references: the epic (#1) has each milestone PRD as a sub-issue, and each PRD
+has its implementation slices as sub-issues (carved with `/to-issues`).
+Dependencies between slices are **native blocking edges**. The `## Parent` /
+`## Blocked by` body sections are kept as a readable fallback, but the native
+links are canonical — they give parents progress bars and make blockers
+queryable.
+
+- **Attach a sub-issue**: `gh api --method POST repos/<owner>/<repo>/issues/<parent>/sub_issues -F sub_issue_id=<child-db-id>`
+- **Wire a blocker**: `gh api --method POST repos/<owner>/<repo>/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-db-id>`
+- Both take the numeric **database id** (`gh api repos/<owner>/<repo>/issues/<n> --jq .id`), not the `#number`. An issue may have only one parent.
+- **List a parent's children**: `gh api repos/<owner>/<repo>/issues/<parent>/sub_issues`
+
 ## Pull requests as a triage surface
 
 **PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_
