@@ -53,12 +53,10 @@ class Settings(BaseSettings):
     import_max_bytes: int = 5 * 1024 * 1024
     """Upload cap for CSV imports (PRD M4): the synchronous atomic commit
     is honest because bounded."""
-    import_max_rows: int = 1_000
-    """Rows per import. The PRD default is 10,000; bounded to 1,000 until
-    ferro-orm#298 lands (bulk_create binds the whole batch into one
-    statement and hits backend parameter ceilings around 2.7k rows at the
-    transaction table's width). Restore 10,000 with that fix — the commit
-    path itself needs no change."""
+    import_max_rows: int = 10_000
+    """Rows per import (PRD M4). One bulk insert regardless of size:
+    ferro chunks under backend bind-parameter limits since 0.16.1
+    (ferro-orm#298)."""
 
     auth_rate_limit_per_email: int = 10
     """Attempts per email per window on credentialed endpoints."""
