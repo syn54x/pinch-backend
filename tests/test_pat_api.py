@@ -294,6 +294,19 @@ async def test_a_bearer_header_wins_over_a_valid_cookie_and_fails_closed(client)
     assert (await client.get(ME, headers=_bearer("pinch_pat_" + "A" * 43))).status_code == 401
 
 
+async def test_pat_creation_is_rate_limited_per_user(client, monkeypatch) -> None:
+    """Minting is a mutation on the credential surface: bound it per user
+    so a hostile or runaway session can't spam unbounded rows."""
+    monkeypatch.setattr(settings, "auth_rate_limit_per_email", 2)
+    await _signup(client)
+    await _mint(client, name="one")
+    await _mint(client, name="two")
+    response = await client.post(
+        PATS, json={"name": "three", "scopes": ["read"]}, headers=await _csrf(client)
+    )
+    assert response.status_code == 429
+
+
 async def test_failed_bearers_are_rate_limited_per_ip(client, monkeypatch) -> None:
     monkeypatch.setattr(settings, "auth_rate_limit_per_ip", 3)
     await _signup(client)
