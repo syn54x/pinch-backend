@@ -1489,12 +1489,14 @@ source = { editable = "packages/pinch-cli" }
 dependencies = [
     { name = "cyclopts" },
     { name = "httpx" },
+    { name = "platformdirs" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "cyclopts", specifier = ">=4" },
     { name = "httpx", specifier = ">=0.28" },
+    { name = "platformdirs", specifier = ">=4" },
 ]
 
 [[package]]
