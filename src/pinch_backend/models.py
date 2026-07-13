@@ -101,6 +101,7 @@ class Ledger(TimestampMixin, Model):
     balance_entries: Relation[list["BalanceEntry"]] = BackRef()
     imports: Relation[list["Import"]] = BackRef()
     import_rows: Relation[list["ImportRow"]] = BackRef()
+    import_profiles: Relation[list["ImportProfile"]] = BackRef()
     transactions: Relation[list["Transaction"]] = BackRef()
 
 
@@ -280,6 +281,44 @@ class ImportRow(TimestampMixin, Model):
     """Denormalized ``errors == []`` so commit and the preview counts can
     filter in SQL instead of loading every row."""
     errors: list[str] = Field(default_factory=list)
+    duplicate: bool = False
+    """Fingerprint collides with an existing transaction or another row in
+    the same file (CONTEXT.md: Duplicate flag). Skipped at commit by
+    default; the per-row override is the escape hatch, which is why
+    skipping is a default and never silent."""
+    fingerprint: str | None = None
+    """Computed at parse for valid rows; the exact value the committed
+    Transaction stores."""
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class ImportProfile(TimestampMixin, Model):
+    """A saved, user-confirmed column mapping for a file shape (CONTEXT.md):
+    identity = normalized header tuple (casefold + trim, order-sensitive)
+    + delimiter, scoped to the ledger.
+
+    Auto-saved on successful commit of a headered file; a later commit
+    confirming a different mapping for the same shape updates it (the
+    freshest user confirmation wins). Headerless files never save or match
+    one — no trustworthy shape identity. Undo of an import leaves its
+    profile alone: the learning outlives the mistake (PRD M4).
+    """
+
+    __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
+        ("ledger_id", "shape_key"),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    ledger: Annotated[Ledger, ForeignKey(related_name="import_profiles", index=True)]
+    shape_key: str
+    """The lookup key: delimiter + normalized headers, joined on ASCII
+    unit separators (pinch_backend.imports.profiles.shape_key)."""
+    header_tuple: list[str]
+    """Normalized header cells, kept for display alongside the opaque key."""
+    delimiter: str
+    mapping: dict
+    """The confirmed MappingSpec this shape parses with."""
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 

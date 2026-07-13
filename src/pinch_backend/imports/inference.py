@@ -59,7 +59,9 @@ class MappingInferrer(Protocol):
         ...
 
 
-def _sniff_delimiter(sample: str) -> str:
+def sniff_delimiter(sample: str) -> str:
+    """Deterministic delimiter read; also what profile lookup keys on at
+    upload, before any mapping exists."""
     try:
         return csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
     except csv.Error:
@@ -117,7 +119,7 @@ class HeuristicInferrer:
     alone (PRD M4)."""
 
     async def suggest(self, text: str) -> MappingSpec | None:
-        delimiter = _sniff_delimiter(text[:4096])
+        delimiter = sniff_delimiter(text[:4096])
         reader = csv.reader(io.StringIO(text), delimiter=delimiter)
         records = [cells for cells in reader if cells][: SAMPLE_RECORDS + 1]
         if not records:

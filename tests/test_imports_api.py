@@ -41,6 +41,7 @@ ROW_FIELDS = {
     "amount_minor",
     "currency",
     "description_raw",
+    "duplicate",
     "errors",
 }
 
@@ -483,20 +484,6 @@ async def test_delete_discards_an_uncommitted_import_entirely(client) -> None:
     assert await Import.select().count() == 0
     assert await ImportRow.select().count() == 0
     assert (await client.get(f"{IMPORTS}/{previewed['id']}")).status_code == 404
-
-
-async def test_delete_of_a_committed_import_is_reserved_for_undo(client) -> None:
-    """CP2 fences committed imports behind 409; CP3 (#16) makes DELETE the
-    unconditional undo. This test is rewritten there."""
-    await _signup(client)
-    account_id = await _create_account(client)
-    previewed = await _previewed(client, account_id, HEADERED_CSV)
-    headers = await _csrf(client)
-    await client.post(f"{IMPORTS}/{previewed['id']}/commit", json={}, headers=headers)
-
-    response = await client.delete(f"{IMPORTS}/{previewed['id']}", headers=headers)
-    assert response.status_code == 409
-    assert await Transaction.select().count() == 2
 
 
 # --- Tenancy (AGENTS I-2) -----------------------------------------------------------------
