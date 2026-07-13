@@ -292,6 +292,14 @@ async def create_pat(data: PatCreateIn, current_session: NamedDependency[Session
     """Cookie-session only, via ``current_session`` (story 5): a PAT can
     never mint PATs."""
     user = await User.get(current_session.user_id)  # ty: ignore[unresolved-attribute]
+    # Minting is bounded per user: a hostile or runaway session can't spam
+    # unbounded credential rows. Same per-principal knob as the other
+    # credentialed endpoints.
+    await require_within_limit(
+        f"pat-create:user:{user.id}",
+        limit=settings.auth_rate_limit_per_email,
+        window=settings.auth_rate_limit_window,
+    )
     scope = PatScope.WRITE if PatScope.WRITE in data.scopes else PatScope.READ
     pat, secret = await issue_pat(user, name=data.name, scope=scope)
     log.info("auth.pat.created", user_id=str(user.id), pat_id=str(pat.id), scope=scope.value)
