@@ -100,6 +100,19 @@ def _parse_amount(cells: list[str], spec: "MappingSpec", exponent: int) -> int:
     raise ValueError("neither debit nor credit is set")
 
 
+def record_parses_as_data(cells: list[str], spec: "MappingSpec", *, exponent: int) -> bool:
+    """True when the record reads as a data row under the spec — the guard
+    that keeps a headerless file whose first record coincides with a saved
+    header tuple from matching that profile (headerless files never match,
+    PRD M4 #16). Header cells like "Date" don't parse as dates."""
+    try:
+        _parse_date(cells[spec.date_column], spec.date_format)
+        _parse_amount(cells, spec, exponent)
+    except ValueError, IndexError:
+        return False
+    return True
+
+
 def parse_rows(text: str, spec: "MappingSpec", *, exponent: int) -> list[ParsedRow]:
     """Parse every data record; blank records are skipped, a header record
     is skipped when the spec says one exists. Never raises on bad data —
