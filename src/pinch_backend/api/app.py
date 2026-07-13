@@ -8,6 +8,7 @@ from litestar.openapi.spec import Components, SecurityScheme
 
 from pinch_backend import __version__
 from pinch_backend.api.accounts import accounts_router
+from pinch_backend.api.imports import imports_router
 from pinch_backend.auth.csrf import CredentialAwareCSRFMiddleware
 from pinch_backend.auth.guards import (
     provide_current_credential,
@@ -56,7 +57,7 @@ def create_app(*, manage_database: bool = True) -> Litestar:
     """manage_database=False lets tests own the connection lifecycle while
     exercising the exact production app shape."""
     return Litestar(
-        route_handlers=[health, auth_router, accounts_router],
+        route_handlers=[health, auth_router, accounts_router, imports_router],
         # The served API contract (M3 story 7): the versioned path keeps the
         # document — like everything else public — under /api/v1.
         openapi_config=OpenAPIConfig(
