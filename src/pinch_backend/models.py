@@ -9,6 +9,7 @@ the tenancy column (ADR-0002). All data access goes through ferro-orm
 
 import uuid
 from datetime import UTC, datetime
+from datetime import date as CalendarDate
 from enum import StrEnum
 from typing import TYPE_CHECKING, Annotated, ClassVar
 
@@ -68,6 +69,20 @@ class BalanceSource(StrEnum):
     """Hand-entered by the user; providers supply entries too, later (M7+)."""
 
 
+class ImportStatus(StrEnum):
+    """The four locked lifecycle stages (PRD M4, CONTEXT.md: Importing).
+
+    The synchronous v0 flow passes through MAPPED inside the mapping-confirm
+    request (mapping stored, then rows parsed, one transaction), so the API
+    observes uploaded → previewed; the stage is real state, not dead vocab.
+    """
+
+    UPLOADED = "uploaded"
+    MAPPED = "mapped"
+    PREVIEWED = "previewed"
+    COMMITTED = "committed"
+
+
 class Ledger(TimestampMixin, Model):
     """The unit of data ownership and sharing (ADR-0002).
 
@@ -84,6 +99,9 @@ class Ledger(TimestampMixin, Model):
     accounts: Relation[list["Account"]] = BackRef()
     connections: Relation[list["Connection"]] = BackRef()
     balance_entries: Relation[list["BalanceEntry"]] = BackRef()
+    imports: Relation[list["Import"]] = BackRef()
+    import_rows: Relation[list["ImportRow"]] = BackRef()
+    transactions: Relation[list["Transaction"]] = BackRef()
 
 
 class User(TimestampMixin, Model):
@@ -172,6 +190,8 @@ class Account(TimestampMixin, Model):
     updated_at: datetime = Field(default_factory=utcnow)
 
     balance_entries: Relation[list["BalanceEntry"]] = BackRef()
+    imports: Relation[list["Import"]] = BackRef()
+    transactions: Relation[list["Transaction"]] = BackRef()
 
 
 class BalanceEntry(TimestampMixin, Model):
@@ -196,6 +216,110 @@ class BalanceEntry(TimestampMixin, Model):
     currency: str = Field(pattern=r"^[A-Z]{3}$")
     as_of: datetime
     source: BalanceSource = BalanceSource.MANUAL
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class Import(TimestampMixin, Model):
+    """A batch created by one file upload into a manual account, with the
+    locked lifecycle uploaded → mapped → previewed → committed (CONTEXT.md).
+
+    Nothing touches the ledger until commit; a committed batch is undoable
+    as a unit, dead = gone (PRD M4). The raw bytes are retained so a
+    corrected mapping can re-parse losslessly; rows live as long as their
+    import (pruning policy is explicitly out of M4's scope).
+    """
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    ledger: Annotated[Ledger, ForeignKey(related_name="imports", index=True)]
+    account: Annotated[Account, ForeignKey(related_name="imports", index=True)]
+    status: ImportStatus = ImportStatus.UPLOADED
+    filename: str
+    file_bytes: bytes = Field(repr=False)
+    suggested_mapping: dict | None = None
+    """The MappingSpec the inferrer proposed at upload; null when nothing
+    could be inferred. The API says "suggested", never how (PRD M4)."""
+    confirmed_mapping: dict | None = None
+    """The MappingSpec the user confirmed or corrected — the one rows were
+    actually parsed with, and the payload a profile saves (CP3)."""
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    rows: Relation[list["ImportRow"]] = BackRef()
+    transactions: Relation[list["Transaction"]] = BackRef()
+
+
+class ImportRow(TimestampMixin, Model):
+    """One raw record of an import plus its parsed values (PRD M4 #15).
+
+    Rows are data — they get pagination and per-row overrides — and they
+    are the preview: parsed values where parsing succeeded, per-row errors
+    where it didn't. Invalid rows are excluded from commit; amounts that
+    can't resolve exactly to minor units are invalid, never rounded (I-1).
+    """
+
+    __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
+        ("import_batch_id", "row_index"),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    ledger: Annotated[Ledger, ForeignKey(related_name="import_rows", index=True)]
+    import_batch: Annotated[Import, ForeignKey(related_name="rows", index=True)]
+    """``import`` in the PRD's vocabulary; ``import_batch`` because Python
+    reserves the keyword and CONTEXT.md defines an import as a batch."""
+    row_index: int
+    """Position among the file's data records, 0-based, header excluded."""
+    raw_cells: list[str]
+    date: CalendarDate | None = None
+    """Aliased type: a field literally named ``date`` (the locked
+    convention) shadows the ``datetime.date`` symbol in PEP 649's deferred
+    annotation scope."""
+    amount_minor: int | None = None
+    description_raw: str | None = None
+    valid: bool = False
+    """Denormalized ``errors == []`` so commit and the preview counts can
+    filter in SQL instead of loading every row."""
+    errors: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class Transaction(TimestampMixin, Model):
+    """A single money movement on an account (CONTEXT.md), minimal in M4:
+    only what file imports produce.
+
+    Locked conventions everything downstream bakes in (PRD M4): ``date`` is
+    the institution's calendar date — timezone-free, never a localized
+    timestamp; ``amount_minor`` is signed from the account's perspective —
+    negative is money out.
+
+    Field-ownership contract for every column M5+ adds: **source data**
+    (everything on this table today: date, amount_minor, currency,
+    description_raw, source_import, fingerprint) is owned by the
+    transaction's origin — syncs and re-imports may rewrite it, users
+    cannot. **User data** (M5+: category, tags, display name, notes,
+    reviewed status) is owned by the user — syncs may never alter it, and
+    a posted replacement inherits it (M7).
+    """
+
+    __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
+        ("ledger_id", "date"),
+        ("account_id", "fingerprint"),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    ledger: Annotated[Ledger, ForeignKey(related_name="transactions", index=True)]
+    account: Annotated[Account, ForeignKey(related_name="transactions", index=True)]
+    date: CalendarDate
+    amount_minor: int
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    description_raw: str
+    source_import: Annotated[Import | None, ForeignKey(related_name="transactions")] = None
+    """The import that produced this row (the PRD's ``import`` FK); null on
+    future provider-synced or hand-entered transactions."""
+    fingerprint: str
+    """Stored duplicate-detection hash (pinch_backend.imports.fingerprint):
+    a pure function of retained source data, recomputable by design."""
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
