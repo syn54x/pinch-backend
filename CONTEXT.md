@@ -25,11 +25,16 @@ docs, and conversation. Implementation details do not belong in this file.
   before commit; nothing touches the ledger until commit.
 - **Import profile** — a saved, user-confirmed column mapping for a given
   file shape (delimiter, date format, amount sign convention, column roles).
-  Penny infers the first mapping; subsequent files matching the profile map
-  deterministically with no AI involved.
-- **Duplicate flag** — at commit time, rows whose fingerprint (account, date,
-  amount, normalized description) matches an existing transaction are flagged
-  in the preview and skipped by default; the user may override per row.
+  The first mapping for an unrecognized file shape arrives as a **suggested
+  mapping** the user confirms or corrects (suggestion quality is an
+  implementation concern; Penny assumes the job when she lands); subsequent
+  files matching the profile map deterministically with no AI involved.
+- **Duplicate flag** — rows whose fingerprint (account, date, amount,
+  normalized description) matches an existing transaction — or another row
+  in the same file — are flagged in the preview and skipped by default; the
+  user may override per row. Distinct real-world transactions can collide
+  (two identical coffees, same day); the per-row override is the escape
+  hatch, which is why skipping is a default and never silent.
 
 ## Classification
 
@@ -61,7 +66,9 @@ docs, and conversation. Implementation details do not belong in this file.
   cosmetically (e.g. description).
 - **Correction log** — the append-only record of every review decision:
   what was proposed, with what provenance, and what the user accepted or
-  corrected it to. It is simultaneously the flywheel's memory (few-shot
+  corrected it to. Append-only includes retraction: when the data a
+  decision was made against is undone (e.g. an import reverted), the
+  decision is voided by a later entry, never deleted. It is simultaneously the flywheel's memory (few-shot
   context, rule-promotion evidence) and the eval dataset for improving the
   categorization prompt on ever-cheaper models.
 - **Rule** — a user-defined condition → action pair applied deterministically
@@ -91,8 +98,13 @@ docs, and conversation. Implementation details do not belong in this file.
 - **Manual account** — an account maintained by the user without a
   connection: balances entered by hand, transactions entered manually or via
   file import.
-- **Balance history** — the per-account time series of balances that powers
-  net worth over time.
+- **Balance entry** — one observed balance for an account at a point in
+  time, hand-entered by the user (providers supply them too, later). An
+  account's current balance is its latest entry; transactions are records
+  of money movement, never balance arithmetic — reconciling the two is a
+  deliberate future design, not an omission.
+- **Balance history** — the per-account time series of balance entries that
+  powers net worth over time.
 - **Valuation provider** — an external source of value estimates for asset
   accounts (e.g. Zillow for a home), analogous to Plaid for bank accounts.
 - **Net worth** — the sum of all account balances at a point in time. A
@@ -122,7 +134,9 @@ docs, and conversation. Implementation details do not belong in this file.
 ## Transactions
 
 - **Transaction** — a single money movement on an account, sourced from a
-  provider sync (e.g. Plaid), a file import, or manual entry.
+  provider sync (e.g. Plaid), a file import, or manual entry. Its date is
+  the institution's calendar date (never a localized timestamp); its amount
+  is signed from the account's perspective — negative is money out.
 - **Source data** — the fields of a transaction owned by its origin (raw
   description, amount, date, pending status, provider identifiers). Syncs and
   re-imports may rewrite source data; users cannot.
