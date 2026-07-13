@@ -14,7 +14,7 @@ dependencies = [
     "litestar[standard]>=2",
     "pydantic-ai>=2,<3",
     "logfire>=4,<5",
-    "ferro-orm>=0.15",
+    "ferro-orm>=0.16",
     "argon2-cffi>=25",
     "httpx>=0.28",
 ]
@@ -77,6 +77,7 @@ runtime-evaluated-base-classes = [
 runtime-evaluated-decorators = [
     "litestar.get",
     "litestar.post",
+    "litestar.patch",
     "litestar.delete",
     "pydantic.dataclasses.dataclass",
 ]
