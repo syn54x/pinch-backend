@@ -74,7 +74,12 @@ runtime-evaluated-base-classes = [
     "pydantic_settings.BaseSettings",
     "ferro.Model",
 ]
-runtime-evaluated-decorators = ["litestar.get", "litestar.post", "litestar.delete"]
+runtime-evaluated-decorators = [
+    "litestar.get",
+    "litestar.post",
+    "litestar.delete",
+    "pydantic.dataclasses.dataclass",
+]
 
 [tool.ty.environment]
 python-version = "3.14"

@@ -1,10 +1,13 @@
 from litestar import Litestar, get
 from litestar.config.csrf import CSRFConfig
 from litestar.di import Provide
+from litestar.middleware import DefineMiddleware
 from litestar.openapi import OpenAPIConfig
 
 from pinch_backend import __version__
+from pinch_backend.auth.csrf import CredentialAwareCSRFMiddleware
 from pinch_backend.auth.guards import (
+    provide_current_credential,
     provide_current_ledger,
     provide_current_session,
     provide_current_user,
@@ -59,16 +62,25 @@ def create_app(*, manage_database: bool = True) -> Litestar:
             description=API_DESCRIPTION,
             path="/api/v1/schema",
         ),
-        # CSRF on every unsafe method (PRD M2 story 14): the double-submit
-        # cookie is issued on first response; clients echo it in x-csrftoken.
-        csrf_config=CSRFConfig(
-            secret=settings.secret_key,
-            cookie_secure=settings.session_cookie_secure,
-            cookie_samesite="lax",
-        ),
-        # Every router gets the acting user and ledger by declaring the
-        # parameter (M2 story 13; M3 consumes this).
+        # CSRF on every unsafe cookie-credentialed request (PRD M2 story 14):
+        # the double-submit cookie is issued on first response; clients echo
+        # it in x-csrftoken. Bearer requests are exempt by construction (M3),
+        # so the config feeds our credential-aware subclass instead of
+        # Litestar's csrf_config hook (which would install the stock check).
+        middleware=[
+            DefineMiddleware(
+                CredentialAwareCSRFMiddleware,
+                config=CSRFConfig(
+                    secret=settings.secret_key,
+                    cookie_secure=settings.session_cookie_secure,
+                    cookie_samesite="lax",
+                ),
+            )
+        ],
+        # Every router gets the acting credential, user, and ledger by
+        # declaring the parameter (M2 story 13; M3 story 3).
         dependencies={
+            "current_credential": Provide(provide_current_credential),
             "current_session": Provide(provide_current_session),
             "current_user": Provide(provide_current_user),
             "current_ledger": Provide(provide_current_ledger),

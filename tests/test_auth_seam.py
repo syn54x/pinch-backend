@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from pinch_backend.auth import methods
 from pinch_backend.auth.guards import (
+    provide_current_credential,
     provide_current_ledger,
     provide_current_session,
     provide_current_user,
@@ -240,21 +241,26 @@ def test_clearing_the_session_cookie_expires_it_immediately() -> None:
 # --- Guards (core behavior; the HTTP seam re-covers these in CP3) ----------
 
 
-async def test_current_session_and_user_resolve_from_the_cookie(db) -> None:
+def _request(cookies: dict[str, str]) -> SimpleNamespace:
+    """The slice of Request the credential resolver reads."""
+    return SimpleNamespace(cookies=cookies, headers={}, method="GET", client=None)
+
+
+async def test_the_credential_chain_resolves_from_the_cookie(db) -> None:
     user = await _signup()
     session, secret = await issue_session(user)
-    request = SimpleNamespace(cookies={settings.session_cookie_name: secret})
 
-    resolved = await provide_current_session(request)
+    credential = await provide_current_credential(_request({settings.session_cookie_name: secret}))
+    resolved = await provide_current_session(credential)
     assert resolved.id == session.id
-    assert (await provide_current_user(resolved)).id == user.id
+    assert (await provide_current_user(credential)).id == user.id
 
 
 @pytest.mark.parametrize("cookies", [{}, {"pinch_session": "forged-or-stale"}])
 async def test_no_valid_session_means_not_authenticated(db, cookies) -> None:
     await _signup()
     with pytest.raises(NotAuthorizedException):
-        await provide_current_session(SimpleNamespace(cookies=cookies))
+        await provide_current_credential(_request(cookies))
 
 
 async def test_current_ledger_is_the_provisioned_ledger(db) -> None:
