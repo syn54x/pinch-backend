@@ -13,7 +13,7 @@ from pinch_backend.auth.guards import (
     provide_current_user,
 )
 from pinch_backend.auth.routes import auth_router
-from pinch_backend.db import connect_database, disconnect_database
+from pinch_backend.db import FerroSessionMiddleware, connect_database, disconnect_database
 from pinch_backend.observability import configure_observability
 from pinch_backend.settings import settings
 
@@ -68,6 +68,9 @@ def create_app(*, manage_database: bool = True) -> Litestar:
         # so the config feeds our credential-aware subclass instead of
         # Litestar's csrf_config hook (which would install the stock check).
         middleware=[
+            # Outermost: every request runs inside one ferro session, the
+            # app's own database scope (tests' ambient sessions just nest).
+            DefineMiddleware(FerroSessionMiddleware),
             DefineMiddleware(
                 CredentialAwareCSRFMiddleware,
                 config=CSRFConfig(
@@ -75,7 +78,7 @@ def create_app(*, manage_database: bool = True) -> Litestar:
                     cookie_secure=settings.session_cookie_secure,
                     cookie_samesite="lax",
                 ),
-            )
+            ),
         ],
         # Every router gets the acting credential, user, and ledger by
         # declaring the parameter (M2 story 13; M3 story 3).
