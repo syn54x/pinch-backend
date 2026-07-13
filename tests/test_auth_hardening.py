@@ -28,6 +28,7 @@ LOGIN = "/api/v1/auth/login"
 LOGOUT = "/api/v1/auth/logout"
 ME = "/api/v1/auth/me"
 SESSIONS = "/api/v1/auth/sessions"
+PATS = "/api/v1/auth/pats"
 VERIFY_CONFIRM = "/api/v1/auth/email-verification/confirm"
 RESET_REQUEST = "/api/v1/auth/password-reset/request"
 RESET_CONFIRM = "/api/v1/auth/password-reset/confirm"
@@ -205,6 +206,22 @@ async def test_the_full_journey_logs_events_and_never_a_secret(client, monkeypat
     secrets_seen.add(cookie_secret(second))
     await client.delete(SESSIONS + f"/{first_id}", headers=await _csrf(client))
 
+    # The second credential (M3): mint a PAT, act with it, fail a forged
+    # one, revoke. The real secret, the forgery, and their hashes all join
+    # the greps — an invalid presented token must be as unloggable as a
+    # valid one.
+    created = await client.post(
+        PATS, json={"name": "journey", "scopes": ["read", "write"]}, headers=await _csrf(client)
+    )
+    pat_secret = created.json()["token"]
+    secrets_seen.add(pat_secret)
+    bearer = {"Authorization": f"Bearer {pat_secret}"}
+    assert (await client.get(ME, headers=bearer)).status_code == 200
+    forged = "pinch_pat_" + "F" * 43
+    secrets_seen.add(forged)
+    assert (await client.get(ME, headers={"Authorization": f"Bearer {forged}"})).status_code == 401
+    await client.delete(PATS + f"/{created.json()['id']}", headers=await _csrf(client))
+
     # Rate limiting fires...
     monkeypatch.setattr(settings, "auth_rate_limit_per_email", 1)
     await client.post(
@@ -242,6 +259,9 @@ async def test_the_full_journey_logs_events_and_never_a_secret(client, monkeypat
         "auth.reset.requested",
         "auth.reset.completed",
         "auth.session.revoked",
+        "auth.pat.created",
+        "auth.pat.revoked",
+        "auth.bearer.failed",
         "auth.rate_limited",
         "auth.breach_check.skipped",
     } <= events

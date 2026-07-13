@@ -128,6 +128,8 @@ async def test_openapi_schema_is_served_under_the_versioned_api(client) -> None:
         "/api/v1/auth/me",
         "/api/v1/auth/sessions",
         "/api/v1/auth/sessions/{session_id}",
+        "/api/v1/auth/pats",
+        "/api/v1/auth/pats/{pat_id}",
         "/api/v1/auth/password-reset/request",
     ):
         assert path in schema["paths"], f"{path} missing from the OpenAPI document"

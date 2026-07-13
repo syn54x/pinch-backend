@@ -38,8 +38,9 @@ from pinch_backend.api.pagination import (
 )
 from pinch_backend.auth import flows, methods
 from pinch_backend.auth.breach import password_is_breached
-from pinch_backend.auth.models import Session
+from pinch_backend.auth.models import PatScope, PersonalAccessToken, Session
 from pinch_backend.auth.passwords import hash_password
+from pinch_backend.auth.pats import issue_pat
 from pinch_backend.auth.rate_limit import require_within_limit
 from pinch_backend.auth.sessions import (
     clear_session_cookie,
@@ -94,6 +95,34 @@ class SessionOut(BaseModel):
     last_seen_at: datetime
     client_hint: str | None
     current: bool
+
+
+class PatCreateIn(BaseModel):
+    model_config = ConfigDict(use_attribute_docstrings=True)
+
+    name: str = Field(min_length=1, max_length=100)
+    """User-chosen label; display-only, never unique."""
+    scopes: list[PatScope] = Field(min_length=1)
+    """The requested grant. Write implies read (PRD M3): the stored scope
+    is the strongest one requested, and responses render the full grant."""
+
+
+class PatOut(BaseModel):
+    """One row of the PAT list (story 2) — an allowlist, never the row.
+    No secret material beyond the display prefix."""
+
+    id: uuid.UUID
+    name: str
+    scopes: list[PatScope]
+    display_prefix: str
+    created_at: datetime
+    last_used_at: datetime | None
+
+
+class PatCreatedOut(PatOut):
+    """The create response: the only place the secret ever appears (story 1)."""
+
+    token: str
 
 
 class TokenIn(BaseModel):
@@ -252,6 +281,76 @@ async def revoke_session(
     log.info("auth.session.revoked", user_id=str(user_id), session_id=str(session_id))
 
 
+def _scopes_out(scope: PatScope) -> list[PatScope]:
+    """Render the stored rank as the full grant: write implies read, and
+    the wire format stays a list so per-resource scopes later are additive."""
+    return [PatScope.READ, PatScope.WRITE] if scope is PatScope.WRITE else [PatScope.READ]
+
+
+@post("/pats")
+async def create_pat(data: PatCreateIn, current_session: NamedDependency[Session]) -> PatCreatedOut:
+    """Cookie-session only, via ``current_session`` (story 5): a PAT can
+    never mint PATs."""
+    user = await User.get(current_session.user_id)  # ty: ignore[unresolved-attribute]
+    scope = PatScope.WRITE if PatScope.WRITE in data.scopes else PatScope.READ
+    pat, secret = await issue_pat(user, name=data.name, scope=scope)
+    log.info("auth.pat.created", user_id=str(user.id), pat_id=str(pat.id), scope=scope.value)
+    return PatCreatedOut(
+        id=pat.id,
+        name=pat.name,
+        scopes=_scopes_out(pat.scope),
+        display_prefix=pat.display_prefix,
+        created_at=pat.created_at,
+        last_used_at=pat.last_used_at,
+        token=secret,
+    )
+
+
+@get("/pats")
+async def list_pats(
+    current_session: NamedDependency[Session],
+    cursor: CursorParam = None,
+    limit: LimitParam = DEFAULT_PAGE_LIMIT,
+) -> Page[PatOut]:
+    """Born onto the pagination convention (issue #9), and behind the same
+    cookie fence as the rest of PAT management."""
+    user_id = current_session.user_id  # ty: ignore[unresolved-attribute]
+    rows, next_cursor = await paginate(
+        PersonalAccessToken.where(lambda p: p.user_id == user_id), cursor=cursor, limit=limit
+    )
+    return Page(
+        items=[
+            PatOut(
+                id=p.id,
+                name=p.name,
+                scopes=_scopes_out(p.scope),
+                display_prefix=p.display_prefix,
+                created_at=p.created_at,
+                last_used_at=p.last_used_at,
+            )
+            for p in rows
+        ],
+        next_cursor=next_cursor,
+    )
+
+
+@delete("/pats/{pat_id:uuid}")
+async def revoke_pat(
+    pat_id: FromPath[uuid.UUID], current_session: NamedDependency[Session]
+) -> None:
+    """Revocation is row deletion (dead = gone, like sessions); the audit
+    trail is the structured event."""
+    user_id = current_session.user_id  # ty: ignore[unresolved-attribute]
+    row = await PersonalAccessToken.where(
+        lambda p: (p.id == pat_id) & (p.user_id == user_id)
+    ).first()
+    if row is None:
+        # 404 for someone else's PAT too — never confirm it exists.
+        raise NotFoundException(detail="No such token")
+    await row.delete()
+    log.info("auth.pat.revoked", user_id=str(user_id), pat_id=str(pat_id))
+
+
 @post("/email-verification/request", status_code=HTTP_202_ACCEPTED)
 async def request_email_verification(current_user: NamedDependency[User]) -> None:
     await require_within_limit(
@@ -317,6 +416,9 @@ auth_router = Router(
         me,
         list_sessions,
         revoke_session,
+        create_pat,
+        list_pats,
+        revoke_pat,
         request_email_verification,
         confirm_email_verification,
         request_password_reset,
