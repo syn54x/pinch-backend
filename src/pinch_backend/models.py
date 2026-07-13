@@ -63,6 +63,11 @@ class ConnectionStatus(StrEnum):
     REAUTH_REQUIRED = "reauth_required"
 
 
+class BalanceSource(StrEnum):
+    MANUAL = "manual"
+    """Hand-entered by the user; providers supply entries too, later (M7+)."""
+
+
 class Ledger(TimestampMixin, Model):
     """The unit of data ownership and sharing (ADR-0002).
 
@@ -78,6 +83,7 @@ class Ledger(TimestampMixin, Model):
     members: Relation[list["LedgerMember"]] = BackRef()
     accounts: Relation[list["Account"]] = BackRef()
     connections: Relation[list["Connection"]] = BackRef()
+    balance_entries: Relation[list["BalanceEntry"]] = BackRef()
 
 
 class User(TimestampMixin, Model):
@@ -162,6 +168,34 @@ class Account(TimestampMixin, Model):
     provider_account_id: str | None = None
     archived: bool = False
     """Archive, don't delete: closed accounts keep their history."""
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    balance_entries: Relation[list["BalanceEntry"]] = BackRef()
+
+
+class BalanceEntry(TimestampMixin, Model):
+    """One observed balance for an account at a point in time (PRD M4,
+    issue #14).
+
+    The account's current balance is its latest entry by ``as_of``.
+    Transactions are records of money movement, never balance arithmetic:
+    imported transactions do not move this number, and reconciling the two
+    is M8's anchor-derivation design, not an omission (CONTEXT.md).
+    """
+
+    __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (("account_id", "as_of"),)
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    ledger: Annotated[Ledger, ForeignKey(related_name="balance_entries", index=True)]
+    """The tenancy column (ADR-0002), denormalized from the account so
+    row-level security has one ownership column on every domain table."""
+    account: Annotated[Account, ForeignKey(related_name="balance_entries", index=True)]
+    amount_minor: int
+    """Integer minor units + ISO 4217, always (CONTEXT.md: Money)."""
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    as_of: datetime
+    source: BalanceSource = BalanceSource.MANUAL
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 

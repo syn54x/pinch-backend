@@ -35,7 +35,14 @@ async def db(tmp_path):
     sqlite by default; Postgres when PINCH_TEST_DATABASE_URL is set, isolated
     per test via a throwaway schema (ferro's backend-matrix convention in
     miniature).
+
+    The import below registers every model table (domain + auth) before
+    connect's auto-migration runs, so table creation never depends on which
+    test module happened to import the app first. Deferred to fixture time
+    because settings must load after pytest_configure's env defaults.
     """
+    from pinch_backend import db as _db  # noqa: F401
+
     postgres_url = os.environ.get("PINCH_TEST_DATABASE_URL")
     if postgres_url:
         schema = f"pinch_test_{uuid.uuid4().hex[:8]}"
