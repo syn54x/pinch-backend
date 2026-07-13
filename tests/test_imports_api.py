@@ -449,6 +449,27 @@ async def test_a_mid_batch_failure_leaves_zero_transactions(client, monkeypatch)
     assert refetched["transaction_count"] is None
 
 
+async def test_a_batch_beyond_the_old_bind_ceilings_commits_whole(client) -> None:
+    """Regression for ferro-orm#298 (fixed in 0.16.1): 7,000 rows at the
+    Transaction table's width is ~84k bind parameters — over sqlite's
+    32,766 and Postgres's 65,535 — and must still be one atomic commit."""
+    await _signup(client)
+    account_id = await _create_account(client)
+    csv_text = "Date,Description,Amount\n" + "".join(
+        f"2026-{(i % 12) + 1:02d}-{(i % 28) + 1:02d},ROW {i},-{i}.{i % 100:02d}\n"
+        for i in range(7_000)
+    )
+    previewed = await _previewed(client, account_id, csv_text)
+    assert previewed["valid_row_count"] == 7_000
+
+    committed = await client.post(
+        f"{IMPORTS}/{previewed['id']}/commit", json={}, headers=await _csrf(client)
+    )
+    assert committed.status_code == 200, committed.text
+    assert committed.json()["transaction_count"] == 7_000
+    assert await Transaction.select().count() == 7_000
+
+
 # --- DELETE an uncommitted import: dead = gone (story 4) ---------------------------------
 
 

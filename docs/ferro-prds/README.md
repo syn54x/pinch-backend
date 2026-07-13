@@ -12,4 +12,4 @@ upstream issue body is the canonical PRD; the drafts here are historical.
 | 0002 | Aggregations & group-by | filed as workloads on existing [Epic F-6 (ferro-orm#225)](https://github.com/syn54x/ferro-orm/issues/225#issuecomment-4928762474) |
 | 0003 | JSONB columns | filed: [ferro-orm#260](https://github.com/syn54x/ferro-orm/issues/260) |
 | 0004 | Static typing for shadow FK columns & relation traversal | filed: [ferro-orm#290](https://github.com/syn54x/ferro-orm/issues/290) |
-| 0005 | `bulk_create` chunking under backend bind-parameter limits | filed: [ferro-orm#298](https://github.com/syn54x/ferro-orm/issues/298) |
+| 0005 | `bulk_create` chunking under backend bind-parameter limits | delivered in 0.16.1: [ferro-orm#298](https://github.com/syn54x/ferro-orm/issues/298) |
