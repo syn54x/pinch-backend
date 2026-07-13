@@ -424,6 +424,34 @@ async def test_commit_requires_a_preview_and_never_runs_twice(client) -> None:
     assert await Transaction.select().count() == 2  # committed exactly once
 
 
+async def test_a_racing_commit_that_loses_the_status_edge_answers_409(client, monkeypatch) -> None:
+    """Two racing commits must not double-book: the previewed → committed
+    transition is a compare-and-set, so only one request wins the edge.
+    The hook simulates the exact interleaving the guard exists for — a
+    rival commit completing after this request's fast-path status check
+    but before its transition."""
+    from pinch_backend.models import Account
+
+    await _signup(client)
+    account_id = await _create_account(client)
+    previewed = await _previewed(client, account_id, HEADERED_CSV)
+    import_uuid = uuid.UUID(previewed["id"])
+
+    original = Account.get.__func__
+
+    async def rival_wins_the_race(cls, *args, **kwargs):
+        result = await original(cls, *args, **kwargs)
+        await Import.where(lambda i: i.id == import_uuid).update(status=ImportStatus.COMMITTED)
+        return result
+
+    monkeypatch.setattr(Account, "get", classmethod(rival_wins_the_race))
+    response = await client.post(
+        f"{IMPORTS}/{previewed['id']}/commit", json={}, headers=await _csrf(client)
+    )
+    assert response.status_code == 409
+    assert await Transaction.select().count() == 0  # the loser wrote nothing
+
+
 async def test_a_mid_batch_failure_leaves_zero_transactions(client, monkeypatch) -> None:
     """The atomicity contract (story 9), asserted on both backends via the
     test matrix: a commit that dies half-way leaves the ledger untouched

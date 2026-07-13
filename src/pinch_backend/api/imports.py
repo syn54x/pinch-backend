@@ -49,6 +49,7 @@ from pinch_backend.models import (
     ImportStatus,
     Ledger,
     Transaction,
+    utcnow,
 )
 from pinch_backend.observability import get_logger
 from pinch_backend.settings import settings
@@ -453,6 +454,31 @@ async def commit_import(
         key=lambda r: r.row_index,
     )
     async with transaction():
+        # Compare-and-set on the previewed → committed edge: of two racing
+        # commits, exactly one wins; the loser rolls back and answers the
+        # same 409 as the fast-path check above.
+        claimed = await Import.where(
+            lambda i: (i.id == batch_id) & (i.status == ImportStatus.PREVIEWED)
+        ).update(status=ImportStatus.COMMITTED, updated_at=utcnow())
+        if claimed == 0:
+            raise _conflict("Only a previewed import can be committed")
+        # Duplicate flags are point-in-time: if unflagged rows now collide
+        # with transactions committed since this preview, committing them
+        # would double-book data the user never saw flagged. Refuse loudly;
+        # re-confirming the mapping refreshes the flags (I-1).
+        account_id = account.id
+        clean = sorted(
+            {r.fingerprint for r in included if not r.duplicate and r.fingerprint is not None}
+        )
+        if clean:
+            gone_stale = await Transaction.where(
+                lambda t: (t.account_id == account_id) & (t.fingerprint.in_(clean))
+            ).count()
+            if gone_stale:
+                raise _conflict(
+                    "Duplicates appeared after this preview; confirm the mapping "
+                    "again to refresh it"
+                )
         transactions = [
             # Shadow-FK kwargs: ferro PRD 0004 / ferro-orm#290. The None
             # ignores are guarded by the valid filter: valid rows carry
@@ -471,8 +497,7 @@ async def commit_import(
         ]
         if transactions:
             await Transaction.bulk_create(transactions)
-        batch.status = ImportStatus.COMMITTED
-        await batch.save()
+        batch.status = ImportStatus.COMMITTED  # the CAS wrote the row; sync the instance
         await _save_profile(batch, account, current_ledger)
     log.info(
         "import.committed",

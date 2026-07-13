@@ -206,6 +206,38 @@ async def test_overriding_a_row_that_is_not_an_overridable_duplicate_is_400(clie
         assert response.status_code == 400, bogus
 
 
+async def test_commit_refuses_a_preview_whose_flags_have_gone_stale(client) -> None:
+    """Duplicate flags are point-in-time: if overlapping data commits after
+    this preview, committing it would double-book rows the user never saw
+    flagged. The commit refuses loudly (409); re-confirming the mapping
+    refreshes the flags and the preview tells the truth again."""
+    await _signup(client)
+    account_id = await _create_account(client)
+    first = await _previewed(client, account_id, BANK_CSV)
+    second = await _previewed(client, account_id, OVERLAPPING_CSV)
+    await _commit(client, first["id"])  # lands the shared COFFEE SHOP row
+
+    stale = await client.post(
+        f"{IMPORTS}/{second['id']}/commit", json={}, headers=await _csrf(client)
+    )
+    assert stale.status_code == 409
+    assert await Transaction.select().count() == 2  # nothing double-booked
+
+    refresh = await client.post(
+        f"{IMPORTS}/{second['id']}/mapping",
+        json=second["confirmed_mapping"],
+        headers=await _csrf(client),
+    )
+    assert refresh.status_code == 200
+    coffee, new_thing = await _rows(client, second["id"])
+    assert coffee["duplicate"] is True  # the refreshed preview shows it
+    assert new_thing["duplicate"] is False
+
+    committed = await _commit(client, second["id"])
+    assert committed["transaction_count"] == 1
+    assert await Transaction.select().count() == 3
+
+
 # --- Undo: this import never happened (story 10) --------------------------------------
 
 
