@@ -87,6 +87,16 @@ async def validate_placement(ledger_id: uuid.UUID, parent: Category | None) -> N
         raise ClientException(detail=f"Categories may nest at most {MAX_DEPTH} levels deep")
 
 
+async def subtree_height(category: "Category") -> int:
+    """Number of levels in the subtree rooted at `category`: 1 for a leaf,
+    2 for a node with children, ... Depth-agnostic; taxonomy is tiny."""
+    children = await Category.where(lambda c: c.parent_id == category.id).all()
+    if not children:
+        return 1
+    heights = [await subtree_height(child) for child in children]
+    return 1 + max(heights)
+
+
 async def check_no_cycle(category: Category, new_parent: Category | None) -> None:
     """Reject (400) re-parenting ``category`` under itself or a descendant."""
     current = new_parent
