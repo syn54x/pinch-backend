@@ -3,7 +3,7 @@ from litestar.config.csrf import CSRFConfig
 from litestar.di import Provide
 from litestar.middleware import DefineMiddleware
 from litestar.openapi import OpenAPIConfig
-from litestar.openapi.plugins import SwaggerRenderPlugin, YamlRenderPlugin
+from litestar.openapi.plugins import ScalarRenderPlugin, SwaggerRenderPlugin, YamlRenderPlugin
 from litestar.openapi.spec import Components, SecurityScheme
 
 from pinch_backend import __version__
@@ -74,7 +74,7 @@ def create_app(*, manage_database: bool = True) -> Litestar:
             # One interactive UI plus the raw document — a deliberate trim
             # of Litestar's default four-UI set. Swagger because it can
             # execute requests: Authorize with a PAT and try-it-out works.
-            render_plugins=[SwaggerRenderPlugin(), YamlRenderPlugin()],
+            render_plugins=[SwaggerRenderPlugin(), YamlRenderPlugin(), ScalarRenderPlugin()],
             # Both credential schemes are contract (M3 story 7). Declared
             # API-wide as "either satisfies"; anonymous endpoints (signup,
             # login, health) simply ignore credentials.
