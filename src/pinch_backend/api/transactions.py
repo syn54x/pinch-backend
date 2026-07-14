@@ -13,6 +13,7 @@ import uuid
 from datetime import date, datetime
 from typing import Annotated
 
+from ferro import transaction
 from litestar import Router, get, patch
 from litestar.di import NamedDependency
 from litestar.exceptions import NotFoundException
@@ -27,7 +28,7 @@ from pinch_backend.api.pagination import (
     Page,
     paginate_by_date,
 )
-from pinch_backend.models import Category, Ledger, Tag, Transaction, TransactionTag
+from pinch_backend.models import Category, Ledger, Tag, Transaction, TransactionTag, utcnow
 from pinch_backend.observability import get_logger
 from pinch_backend.tags import resolve_tags
 
@@ -207,41 +208,43 @@ async def patch_transaction(
     data: TransactionPatchIn,
     current_ledger: NamedDependency[Ledger],
 ) -> TransactionOut:
-    from pinch_backend.models import utcnow
-
     txn = await _get(current_ledger, txn_id)
     fields = data.model_fields_set
 
-    if "category_id" in fields:
-        if data.category_id is not None:
-            category = await Category.where(
-                lambda c: (c.id == data.category_id) & (c.ledger_id == current_ledger.id)
-            ).first()
-            if category is None:
-                raise NotFoundException(detail="No such category")
-            txn.category_id = category.id  # ty: ignore[unresolved-attribute]
-        else:
-            txn.category_id = None  # ty: ignore[unresolved-attribute]
-    if "display_name" in fields:
-        txn.display_name = data.display_name
-    if "notes" in fields:
-        txn.notes = data.notes
-    if "reviewed" in fields:
-        txn.reviewed_at = utcnow() if data.reviewed else None
-    await txn.save()
+    # Validation reads happen before the transaction: a foreign/missing
+    # category is a 404 that shouldn't open (and roll back) a write scope.
+    category_id: uuid.UUID | None = None
+    if "category_id" in fields and data.category_id is not None:
+        category = await Category.where(
+            lambda c: (c.id == data.category_id) & (c.ledger_id == current_ledger.id)
+        ).first()
+        if category is None:
+            raise NotFoundException(detail="No such category")
+        category_id = category.id
 
-    if "tags" in fields:
-        wanted = await resolve_tags(current_ledger, data.tags or [])
-        wanted_ids = {t.id for t in wanted}
-        tid = txn.id
-        existing = await TransactionTag.where(lambda tt: tt.transaction_id == tid).all()
-        existing_ids = {tt.tag_id for tt in existing}  # ty: ignore[unresolved-attribute]
-        for tt in existing:
-            if tt.tag_id not in wanted_ids:  # ty: ignore[unresolved-attribute]
-                await tt.delete()
-        for tg in wanted:
-            if tg.id not in existing_ids:
-                await TransactionTag.create(ledger=current_ledger, transaction=txn, tag=tg)
+    async with transaction():
+        if "category_id" in fields:
+            txn.category_id = category_id  # ty: ignore[unresolved-attribute]
+        if "display_name" in fields:
+            txn.display_name = data.display_name
+        if "notes" in fields:
+            txn.notes = data.notes
+        if "reviewed" in fields:
+            txn.reviewed_at = utcnow() if data.reviewed else None
+        await txn.save()
+
+        if "tags" in fields:
+            wanted = await resolve_tags(current_ledger, data.tags or [])
+            wanted_ids = {t.id for t in wanted}
+            tid = txn.id
+            existing = await TransactionTag.where(lambda tt: tt.transaction_id == tid).all()
+            existing_ids = {tt.tag_id for tt in existing}  # ty: ignore[unresolved-attribute]
+            for tt in existing:
+                if tt.tag_id not in wanted_ids:  # ty: ignore[unresolved-attribute]
+                    await tt.delete()
+            for tg in wanted:
+                if tg.id not in existing_ids:
+                    await TransactionTag.create(ledger=current_ledger, transaction=txn, tag=tg)
 
     log.info("transaction.updated", transaction_id=str(txn.id), ledger_id=str(current_ledger.id))
     (out,) = await _out_page([txn])

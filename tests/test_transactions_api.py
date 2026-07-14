@@ -224,6 +224,20 @@ async def test_read_scoped_pat_cannot_patch(client) -> None:
     assert r.status_code == 403
 
 
+async def test_patch_tag_reconcile_detaches_and_is_idempotent(client) -> None:
+    txn_id = await _one_txn(client)
+    await client.patch(f"{TX}/{txn_id}", json={"tags": ["a", "b"]}, headers=await _csrf(client))
+    # reduce to one — the other must detach
+    r = await client.patch(f"{TX}/{txn_id}", json={"tags": ["a"]}, headers=await _csrf(client))
+    assert [t["name"] for t in r.json()["tags"]] == ["a"]
+    # identical repeat — idempotent, no duplicate row, still exactly one
+    r2 = await client.patch(f"{TX}/{txn_id}", json={"tags": ["a"]}, headers=await _csrf(client))
+    assert [t["name"] for t in r2.json()["tags"]] == ["a"]
+    # clear all
+    r3 = await client.patch(f"{TX}/{txn_id}", json={"tags": []}, headers=await _csrf(client))
+    assert r3.json()["tags"] == []
+
+
 # --- Filter round-trip tests (added per Task 9 review): the category/tag/
 # reviewed filters can only be exercised once PATCH exists to assign those
 # values, so their integration coverage lands here, at the real seam. ---
