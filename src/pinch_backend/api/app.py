@@ -11,6 +11,7 @@ from pinch_backend.api.accounts import accounts_router
 from pinch_backend.api.categories import categories_router
 from pinch_backend.api.imports import import_profiles_router, imports_router
 from pinch_backend.api.tags import tags_router
+from pinch_backend.api.transactions import transactions_router
 from pinch_backend.auth.csrf import CredentialAwareCSRFMiddleware
 from pinch_backend.auth.guards import (
     provide_current_credential,
@@ -67,6 +68,7 @@ def create_app(*, manage_database: bool = True) -> Litestar:
             imports_router,
             import_profiles_router,
             tags_router,
+            transactions_router,
         ],
         # The served API contract (M3 story 7): the versioned path keeps the
         # document — like everything else public — under /api/v1.
