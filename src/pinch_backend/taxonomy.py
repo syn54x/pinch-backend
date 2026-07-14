@@ -71,14 +71,14 @@ async def category_depth(category: Category) -> int:
     """1 for a root, 2 for its child, … — walk to the root, counting hops."""
     depth = 1
     current = category
-    while current.parent_id is not None:  # ty: ignore
-        parent = await Category.get(current.parent_id)  # ty: ignore
+    while current.parent_id is not None:  # ty: ignore[unresolved-attribute]
+        parent = await Category.get(current.parent_id)  # ty: ignore[unresolved-attribute]
         depth += 1
         current = parent
     return depth
 
 
-async def validate_placement(ledger_id: uuid.UUID, parent: Category | None) -> None:
+async def validate_placement(parent: Category | None) -> None:
     """Reject (400) a child placed under ``parent`` if it would exceed the cap.
     A root (parent None) is always depth 1 and always allowed."""
     if parent is None:
@@ -104,8 +104,8 @@ async def check_no_cycle(category: Category, new_parent: Category | None) -> Non
         if current.id == category.id:
             raise ClientException(detail="A category cannot be its own ancestor")
         current = (
-            await Category.get(current.parent_id)  # ty: ignore
-            if current.parent_id  # ty: ignore
+            await Category.get(current.parent_id)  # ty: ignore[unresolved-attribute]
+            if current.parent_id  # ty: ignore[unresolved-attribute]
             else None
         )
 
@@ -116,8 +116,8 @@ async def collect_descendant_ids(root_ids: list[uuid.UUID], ledger_id: uuid.UUID
     cats = await Category.where(lambda c: c.ledger_id == ledger_id).all()
     children: dict[uuid.UUID, list[uuid.UUID]] = {}
     for c in cats:
-        if c.parent_id is not None:  # ty: ignore
-            children.setdefault(c.parent_id, []).append(c.id)  # ty: ignore
+        if c.parent_id is not None:  # ty: ignore[unresolved-attribute]
+            children.setdefault(c.parent_id, []).append(c.id)  # ty: ignore[unresolved-attribute]
     result: set[uuid.UUID] = set()
     stack = list(root_ids)
     while stack:

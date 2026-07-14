@@ -184,6 +184,10 @@ async def list_transactions(
             links = await TransactionTag.where(lambda tt, tid=tid: tt.tag_id == tid).all()
             ids_for_tag = {link.transaction_id for link in links}  # ty: ignore[unresolved-attribute]
             keep = ids_for_tag if keep is None else (keep & ids_for_tag)
+        # Scaling seam: this materializes every matching transaction id before
+        # the keyset page, partly defeating keyset pagination at large scale.
+        # Acceptable at CP1 data volumes; revisit when the inbox query is
+        # optimized.
         keep_ids = sorted(keep or set())
         if not keep_ids:
             return Page(items=[], next_cursor=None)

@@ -102,7 +102,7 @@ async def create_category(
     data: CategoryCreateIn, current_ledger: NamedDependency[Ledger]
 ) -> CategoryOut:
     parent = await _get(current_ledger, data.parent_id) if data.parent_id else None
-    await taxonomy.validate_placement(current_ledger.id, parent)
+    await taxonomy.validate_placement(parent)
     await _assert_sibling_name_free(current_ledger.id, data.parent_id, data.name, None)
     category = await Category.create(ledger=current_ledger, name=data.name, parent=parent)
     log.info("category.created", category_id=str(category.id), ledger_id=str(current_ledger.id))
