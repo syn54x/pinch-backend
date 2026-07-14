@@ -1,0 +1,193 @@
+"""/api/v1/categories — the editable classification taxonomy (PRD M5 #19).
+
+Same conventions as every domain surface: current_ledger (I-2), Page[T]
+lists, allowlist responses, tenancy 404s, and the scope guard by
+construction on every unsafe method. The two-level depth cap and cycle
+prevention live in pinch_backend.taxonomy; nothing here hardcodes a depth.
+"""
+
+import uuid
+from datetime import datetime
+
+from litestar import Router, delete, get, patch, post
+from litestar.di import NamedDependency
+from litestar.exceptions import ClientException, NotFoundException
+from litestar.params import FromPath
+from pydantic import BaseModel, ConfigDict, Field
+
+from pinch_backend import taxonomy
+from pinch_backend.api.pagination import (
+    DEFAULT_PAGE_LIMIT,
+    CursorParam,
+    LimitParam,
+    Page,
+    paginate,
+)
+from pinch_backend.models import Category, Ledger, Transaction
+from pinch_backend.observability import get_logger
+
+log = get_logger(__name__)
+
+
+class CategoryCreateIn(BaseModel):
+    model_config = ConfigDict(use_attribute_docstrings=True)
+
+    name: str = Field(min_length=1, max_length=100)
+    parent_id: uuid.UUID | None = None
+    """A top-level node when null; otherwise nests under the named parent
+    (depth-capped, validated server-side)."""
+
+
+class CategoryUpdateIn(BaseModel):
+    model_config = ConfigDict(use_attribute_docstrings=True)
+
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    parent_id: uuid.UUID | None = None
+    """Re-parent target. Present-and-null moves the node to top level;
+    absent leaves the parent unchanged (see reparent field)."""
+    reparent: bool = False
+    """True to apply parent_id (including null → top level). Distinguishes
+    "move to top level" from "don't touch the parent" without a sentinel."""
+
+
+class CategoryDeleteIn(BaseModel):
+    model_config = ConfigDict(use_attribute_docstrings=True)
+
+    reassign_to: uuid.UUID | None
+    """Where this category's transactions go: another category, or null to
+    make them uncategorized. Required — no default — because silently
+    uncategorizing a year of history is exactly what we refuse to do (I-1)."""
+
+
+class CategoryOut(BaseModel):
+    """What a client may see about a category — an allowlist, never the row."""
+
+    id: uuid.UUID
+    name: str
+    parent_id: uuid.UUID | None
+    created_at: datetime
+
+
+def _out(c: Category) -> CategoryOut:
+    return CategoryOut(
+        id=c.id,
+        name=c.name,
+        parent_id=c.parent_id,  # ty: ignore[unresolved-attribute]
+        created_at=c.created_at,
+    )
+
+
+async def _get(ledger: Ledger, category_id: uuid.UUID) -> Category:
+    c = await Category.where(lambda x: (x.id == category_id) & (x.ledger_id == ledger.id)).first()
+    if c is None:
+        raise NotFoundException(detail="No such category")
+    return c
+
+
+async def _assert_sibling_name_free(
+    ledger_id: uuid.UUID, parent_id: uuid.UUID | None, name: str, exclude: uuid.UUID | None
+) -> None:
+    """Sibling names are unique (works for null and non-null parents, which a
+    DB unique on a nullable column cannot guarantee alone)."""
+    siblings = await Category.where(
+        lambda c: (c.ledger_id == ledger_id) & (c.parent_id == parent_id)
+    ).all()
+    if any(s.name == name and s.id != exclude for s in siblings):
+        raise ClientException(detail="A sibling category already has that name")
+
+
+@post("/")
+async def create_category(
+    data: CategoryCreateIn, current_ledger: NamedDependency[Ledger]
+) -> CategoryOut:
+    parent = await _get(current_ledger, data.parent_id) if data.parent_id else None
+    await taxonomy.validate_placement(current_ledger.id, parent)
+    await _assert_sibling_name_free(current_ledger.id, data.parent_id, data.name, None)
+    category = await Category.create(ledger=current_ledger, name=data.name, parent=parent)
+    log.info("category.created", category_id=str(category.id), ledger_id=str(current_ledger.id))
+    return _out(category)
+
+
+@get("/")
+async def list_categories(
+    current_ledger: NamedDependency[Ledger],
+    cursor: CursorParam = None,
+    limit: LimitParam = DEFAULT_PAGE_LIMIT,
+) -> Page[CategoryOut]:
+    ledger_id = current_ledger.id
+    rows, next_cursor = await paginate(
+        Category.where(lambda c: c.ledger_id == ledger_id), cursor=cursor, limit=limit
+    )
+    return Page(items=[_out(c) for c in rows], next_cursor=next_cursor)
+
+
+@get("/{category_id:uuid}")
+async def get_category(
+    category_id: FromPath[uuid.UUID], current_ledger: NamedDependency[Ledger]
+) -> CategoryOut:
+    return _out(await _get(current_ledger, category_id))
+
+
+@patch("/{category_id:uuid}")
+async def update_category(
+    category_id: FromPath[uuid.UUID],
+    data: CategoryUpdateIn,
+    current_ledger: NamedDependency[Ledger],
+) -> CategoryOut:
+    category = await _get(current_ledger, category_id)
+    new_parent_id = category.parent_id  # ty: ignore[unresolved-attribute]
+    if data.reparent:
+        new_parent = await _get(current_ledger, data.parent_id) if data.parent_id else None
+        await taxonomy.check_no_cycle(category, new_parent)
+        await taxonomy.validate_placement(current_ledger.id, new_parent)
+        category.parent = new_parent
+        new_parent_id = data.parent_id
+    if data.name is not None:
+        category.name = data.name
+    await _assert_sibling_name_free(current_ledger.id, new_parent_id, category.name, category.id)
+    await category.save()
+    log.info("category.updated", category_id=str(category.id), ledger_id=str(current_ledger.id))
+    return _out(category)
+
+
+@delete("/{category_id:uuid}")
+async def delete_category(
+    category_id: FromPath[uuid.UUID],
+    data: CategoryDeleteIn,
+    current_ledger: NamedDependency[Ledger],
+) -> None:
+    """Hard delete with an explicit disposition (CONTEXT.md / D4). Children
+    block; rules-block arrives in CP2 and proposal re-point in CP3 — both add
+    a guard here without changing this contract."""
+    category = await _get(current_ledger, category_id)
+    child = await Category.where(lambda c: c.parent_id == category_id).first()
+    if child is not None:
+        raise ClientException(
+            detail="Move or delete this category's children first", status_code=409
+        )
+    target: Category | None = None
+    if data.reassign_to is not None:
+        target = await _get(current_ledger, data.reassign_to)
+    cid = category.id
+    await Transaction.where(lambda t: t.category_id == cid).update(
+        category_id=target.id if target else None
+    )
+    await category.delete()
+    log.info(
+        "category.deleted",
+        category_id=str(cid),
+        ledger_id=str(current_ledger.id),
+        reassigned_to=str(target.id) if target else None,
+    )
+
+
+categories_router = Router(
+    path="/api/v1/categories",
+    route_handlers=[
+        create_category,
+        list_categories,
+        get_category,
+        update_category,
+        delete_category,
+    ],
+)
