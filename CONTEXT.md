@@ -29,6 +29,11 @@ docs, and conversation. Implementation details do not belong in this file.
   mapping** the user confirms or corrects (suggestion quality is an
   implementation concern; Penny assumes the job when she lands); subsequent
   files matching the profile map deterministically with no AI involved.
+- **Auto-file** — an import-commit option for historical backfill: the
+  classification pipeline runs normally, but its proposals are applied and
+  marked reviewed immediately instead of entering the inbox. Auto-filed
+  decisions are recorded in the correction log as the system's, never the
+  user's — they are not rule-promotion evidence and not eval data.
 - **Duplicate flag** — rows whose fingerprint (account, date, amount,
   normalized description) matches an existing transaction — or another row
   in the same file — are flagged in the preview and skipped by default; the
@@ -38,10 +43,13 @@ docs, and conversation. Implementation details do not belong in this file.
 
 ## Classification
 
-- **Category** — the canonical classification of a transaction. Every
-  transaction has exactly one category, drawn from the user's editable
-  taxonomy. Categories are the basis for budgets and reporting; no
-  double-counting is possible. Assigned automatically (rules, then AI) and
+- **Category** — the canonical classification of a transaction, drawn from
+  the user's editable taxonomy. A transaction has at most one category —
+  never more than one, so double-counting is impossible — and may be
+  **uncategorized**: the classification pipeline's bottom case and a
+  legitimate reviewed state, never an error. Categories are the basis for
+  budgets and reporting; uncategorized transactions report as their own
+  bucket. Assigned automatically (rules, then history, then AI) and
   confirmed or corrected by the user.
 - **Category hierarchy** — categories may nest (e.g. Food → Restaurants). A
   transaction is assigned to exactly one node; membership in ancestor
@@ -53,10 +61,17 @@ docs, and conversation. Implementation details do not belong in this file.
 - **Proposal** — the category (and tags) suggested for an incoming
   transaction before the user has reviewed it. Every incoming transaction —
   even one matched by a user rule — carries a proposal, never an accepted
-  category. Each proposal records its **provenance**: rule, history, or AI.
+  category. A proposal may be **empty**: every stage of the pipeline
+  abstained, and the suggestion is "no category". Each proposal records its
+  **provenance**: rule, history, AI, or none.
+- **Payee** — the normalized form of a transaction's raw description: the
+  deterministic key that rule conditions and history matching operate on,
+  ledger-wide. Exact by design — recognizing "the same merchant, written
+  differently" is the AI stage's job, never the deterministic pipeline's.
 - **Provenance** — how a proposal was produced: *rule* (a user rule matched),
-  *history* (same payee previously confirmed), or *AI* (Penny classified it).
-  Always shown to the user during review.
+  *history* (same payee previously confirmed), *AI* (Penny classified it),
+  or *none* (the pipeline ran and every stage abstained). Always shown to
+  the user during review.
 - **Review** — the act of accepting or correcting proposals on incoming
   transactions. All incoming transactions require review. The dashboard
   presents them grouped by day; the user may accept transactions
@@ -65,17 +80,22 @@ docs, and conversation. Implementation details do not belong in this file.
   the inbox if its source data changes materially (e.g. amount), but not
   cosmetically (e.g. description).
 - **Correction log** — the append-only record of every review decision:
-  what was proposed, with what provenance, and what the user accepted or
-  corrected it to. Append-only includes retraction: when the data a
-  decision was made against is undone (e.g. an import reverted), the
-  decision is voided by a later entry, never deleted. It is simultaneously the flywheel's memory (few-shot
-  context, rule-promotion evidence) and the eval dataset for improving the
+  what was proposed, with what provenance, and what was accepted or
+  corrected — self-contained, surviving the deletion of anything it
+  mentions. Every decision carries its **actor**: the user, or the system
+  (an auto-filed import applying the user's own precedent). Append-only
+  includes retraction: when the data a decision was made against is undone
+  (e.g. an import reverted), the decision is voided by a later entry, never
+  deleted; a changed mind is a later entry, never an edit. It is
+  simultaneously the flywheel's memory (few-shot context, rule-promotion
+  evidence — user decisions only) and the eval dataset for improving the
   categorization prompt on ever-cheaper models.
 - **Rule** — a user-defined condition → action pair applied deterministically
   to incoming transactions (e.g. payee contains "COSTCO" → propose category
-  Groceries). Rules take precedence over history and AI. Penny may propose
-  new rules from repeated corrections (rule promotion), but a rule is only
-  ever created with user consent.
+  Groceries). Rules take precedence over history and AI. Pinch may propose
+  a new rule when the user's own filings repeat consistently (**rule
+  promotion**); a proposed rule is never law — a rule is only ever created
+  with user consent.
 
 ## Tenancy
 
