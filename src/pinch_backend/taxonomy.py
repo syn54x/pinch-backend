@@ -17,9 +17,54 @@ from pinch_backend.models import Category
 if TYPE_CHECKING:
     import uuid
 
+    from pinch_backend.models import Ledger
+
 MAX_DEPTH = 2
 """Top-level groups plus one child level (CONTEXT.md: Food → Restaurants).
 The only place the depth is written down."""
+
+DEFAULT_TAXONOMY: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Income", ("Paycheck", "Interest", "Other Income")),
+    ("Housing", ("Rent & Mortgage", "Utilities", "Home Improvement")),
+    ("Food & Drink", ("Groceries", "Restaurants", "Coffee")),
+    ("Transportation", ("Gas", "Parking & Tolls", "Public Transit", "Auto & Ride Share")),
+    ("Shopping", ("Clothing", "Electronics", "Household")),
+    ("Health", ("Medical", "Pharmacy", "Fitness")),
+    ("Entertainment", ("Streaming", "Events", "Hobbies")),
+    ("Travel", ("Flights", "Lodging", "Rideshare")),
+    ("Bills & Subscriptions", ("Phone", "Internet", "Software")),
+    ("Personal Care", ()),
+    ("Gifts & Donations", ()),
+    ("Fees & Charges", ()),
+)
+"""The starter set seeded into every new ledger (12 top-level, 28 children).
+Ordinary editable rows — the user may rename, re-parent, or delete any of
+them; nothing in the pipeline assumes a category exists."""
+
+
+async def seed_default_taxonomy(ledger: "Ledger") -> None:
+    """Insert the starter taxonomy for a freshly provisioned ledger. Runs
+    inside provision_user's transaction — the ledger exists or none of this
+    does. Two bulk inserts: parents (for their ids), then children."""
+    parents = [
+        Category(  # ty: ignore[missing-argument]
+            ledger_id=ledger.id,  # ty: ignore[unknown-argument]
+            name=name,
+        )
+        for name, _ in DEFAULT_TAXONOMY
+    ]
+    await Category.bulk_create(parents)
+    children = [
+        Category(  # ty: ignore[missing-argument]
+            ledger_id=ledger.id,  # ty: ignore[unknown-argument]
+            name=child_name,
+            parent_id=parent.id,  # ty: ignore[unknown-argument]
+        )
+        for parent, (_, child_names) in zip(parents, DEFAULT_TAXONOMY, strict=True)
+        for child_name in child_names
+    ]
+    if children:
+        await Category.bulk_create(children)
 
 
 async def category_depth(category: Category) -> int:
