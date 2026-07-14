@@ -221,3 +221,6 @@ __marimo__/
 
 .worktrees/
 .cache/
+
+# Subagent-driven-development scratch (briefs, reports, review packages, ledger)
+.superpowers/
