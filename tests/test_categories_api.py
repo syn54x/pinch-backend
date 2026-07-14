@@ -90,3 +90,44 @@ async def test_other_ledger_category_is_a_404(client) -> None:
     await _signup(client, "b@example.com")
     r = await client.get(f"{CATEGORIES}/{mine['id']}")
     assert r.status_code == 404
+
+
+async def test_reparent_to_a_new_valid_parent_succeeds(client) -> None:
+    await _signup(client)
+    a = (await _create(client, "A")).json()
+    b = (await _create(client, "B")).json()
+    leaf = (await _create(client, "Leaf", parent_id=a["id"])).json()
+    r = await client.patch(
+        f"{CATEGORIES}/{leaf['id']}",
+        json={"parent_id": b["id"], "reparent": True},
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["parent_id"] == b["id"]
+
+
+async def test_reparent_to_top_level_succeeds(client) -> None:
+    await _signup(client)
+    a = (await _create(client, "A")).json()
+    leaf = (await _create(client, "Leaf", parent_id=a["id"])).json()
+    r = await client.patch(
+        f"{CATEGORIES}/{leaf['id']}",
+        json={"parent_id": None, "reparent": True},
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["parent_id"] is None
+
+
+async def test_reparent_a_subtree_past_the_cap_is_rejected(client) -> None:
+    await _signup(client)
+    a = (await _create(client, "A")).json()
+    b = (await _create(client, "B")).json()
+    # A has a child, so moving A under B would push the grandchild to depth 3.
+    await _create(client, "AChild", parent_id=a["id"])
+    r = await client.patch(
+        f"{CATEGORIES}/{a['id']}",
+        json={"parent_id": b["id"], "reparent": True},
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 400

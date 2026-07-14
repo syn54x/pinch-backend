@@ -9,6 +9,7 @@ prevention live in pinch_backend.taxonomy; nothing here hardcodes a depth.
 import uuid
 from datetime import datetime
 
+from ferro import transaction
 from litestar import Router, delete, get, patch, post
 from litestar.di import NamedDependency
 from litestar.exceptions import ClientException, NotFoundException
@@ -139,8 +140,15 @@ async def update_category(
     if data.reparent:
         new_parent = await _get(current_ledger, data.parent_id) if data.parent_id else None
         await taxonomy.check_no_cycle(category, new_parent)
-        await taxonomy.validate_placement(current_ledger.id, new_parent)
-        category.parent = new_parent
+        # Depth: the *moved subtree* must fit under the new parent within the
+        # cap — checking only the new parent's depth would let a node with
+        # children land one level too deep (D3).
+        new_node_depth = (await taxonomy.category_depth(new_parent) + 1) if new_parent else 1
+        if new_node_depth + await taxonomy.subtree_height(category) - 1 > taxonomy.MAX_DEPTH:
+            raise ClientException(
+                detail=f"Re-parenting would nest deeper than {taxonomy.MAX_DEPTH} levels"
+            )
+        category.parent_id = new_parent.id if new_parent else None  # ty: ignore[unresolved-attribute]
         new_parent_id = data.parent_id
     if data.name is not None:
         category.name = data.name
@@ -169,10 +177,11 @@ async def delete_category(
     if data.reassign_to is not None:
         target = await _get(current_ledger, data.reassign_to)
     cid = category.id
-    await Transaction.where(lambda t: t.category_id == cid).update(
-        category_id=target.id if target else None
-    )
-    await category.delete()
+    async with transaction():
+        await Transaction.where(lambda t: t.category_id == cid).update(
+            category_id=target.id if target else None
+        )
+        await category.delete()
     log.info(
         "category.deleted",
         category_id=str(cid),
