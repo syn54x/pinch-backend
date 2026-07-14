@@ -810,6 +810,20 @@ git commit -m "feat(api): composite (date, id) keyset paginator for the transact
 
 ## Task 7: Categories API
 
+> **Correction (post-implementation, shipped in commit 7fc5556):** the
+> re-parent code below has two bugs found in review. (1) `category.parent =
+> new_parent` must be `category.parent_id = new_parent.id if new_parent else
+> None` — `parent` is a ferro relation ClassVar and is not settable on an
+> instance. (2) The re-parent depth check must account for the *moved
+> subtree's height*, not just the new parent's depth, or moving a
+> node-with-children under a root pushes a grandchild past the depth-2 cap
+> (D3); use a `taxonomy.subtree_height(category)` helper and check
+> `new_node_depth + subtree_height(category) - 1 <= MAX_DEPTH`. (3) The
+> DELETE reassign+delete must be wrapped in `async with transaction():`.
+> A successful-re-parent test and a subtree-cap-rejection test were added.
+> The shipped code is authoritative; the snippets below are left as the
+> original plan for the record.
+
 **Files:**
 - Create: `src/pinch_backend/api/categories.py`
 - Modify: `src/pinch_backend/api/app.py` (register `categories_router`)
@@ -1797,6 +1811,78 @@ async def test_read_scoped_pat_cannot_patch(client) -> None:
         headers={"Authorization": f"Bearer {token}"},
     )
     assert r.status_code == 403
+
+
+# --- Filter round-trip tests (added per Task 9 review): the category/tag/
+# reviewed filters can only be exercised once PATCH exists to assign those
+# values, so their integration coverage lands here, at the real seam. ---
+
+
+async def _setup_txns(client, rows):
+    """Sign up, import `rows`, and return a {description: transaction_id} map."""
+    await _signup(client)
+    acct = await _account(client)
+    await _import(client, acct, rows)
+    items = (await client.get(f"{TX}?limit=100")).json()["items"]
+    return {i["description_raw"]: i["id"] for i in items}
+
+
+async def test_category_id_filter_is_subtree_inclusive(client) -> None:
+    ids = await _setup_txns(client, [("2026-01-01", "-5.00", "DINNER")])
+    food = (await client.post("/api/v1/categories", json={"name": "Food2"},
+                              headers=await _csrf(client))).json()
+    rest = (await client.post(
+        "/api/v1/categories", json={"name": "Restaurants2", "parent_id": food["id"]},
+        headers=await _csrf(client),
+    )).json()
+    await client.patch(f"{TX}/{ids['DINNER']}", json={"category_id": rest["id"]},
+                       headers=await _csrf(client))
+    # Filtering by the PARENT returns the child-categorized transaction.
+    r = await client.get(f"{TX}?category_id={food['id']}")
+    assert [i["description_raw"] for i in r.json()["items"]] == ["DINNER"]
+
+
+async def test_tag_filter_is_and_composition(client) -> None:
+    ids = await _setup_txns(client, [
+        ("2026-01-02", "-1.00", "BOTH"),
+        ("2026-01-01", "-2.00", "ONE"),
+    ])
+    await client.patch(f"{TX}/{ids['BOTH']}", json={"tags": ["x", "y"]},
+                       headers=await _csrf(client))
+    await client.patch(f"{TX}/{ids['ONE']}", json={"tags": ["x"]},
+                       headers=await _csrf(client))
+    r = await client.get(f"{TX}?tag=x&tag=y")  # AND: only the row with both
+    assert [i["description_raw"] for i in r.json()["items"]] == ["BOTH"]
+    r2 = await client.get(f"{TX}?tag=x")  # single tag: both rows
+    assert {i["description_raw"] for i in r2.json()["items"]} == {"BOTH", "ONE"}
+    r3 = await client.get(f"{TX}?tag=x&tag=nope")  # unknown tag: empty, not ignored
+    assert r3.json()["items"] == []
+
+
+async def test_reviewed_filter_splits_inbox_from_done(client) -> None:
+    ids = await _setup_txns(client, [
+        ("2026-01-02", "-1.00", "DONE"),
+        ("2026-01-01", "-2.00", "TODO"),
+    ])
+    await client.patch(f"{TX}/{ids['DONE']}", json={"reviewed": True},
+                       headers=await _csrf(client))
+    r = await client.get(f"{TX}?reviewed=true")
+    assert [i["description_raw"] for i in r.json()["items"]] == ["DONE"]
+    r2 = await client.get(f"{TX}?reviewed=false")
+    assert [i["description_raw"] for i in r2.json()["items"]] == ["TODO"]
+
+
+async def test_uncategorized_filter_excludes_categorized_rows(client) -> None:
+    ids = await _setup_txns(client, [
+        ("2026-01-02", "-1.00", "HASCAT"),
+        ("2026-01-01", "-2.00", "NOCAT"),
+    ])
+    cat = (await client.post("/api/v1/categories", json={"name": "Misc2"},
+                             headers=await _csrf(client))).json()
+    await client.patch(f"{TX}/{ids['HASCAT']}", json={"category_id": cat["id"]},
+                       headers=await _csrf(client))
+    r = await client.get(f"{TX}?uncategorized=true")
+    assert [i["description_raw"] for i in r.json()["items"]] == ["NOCAT"]
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
