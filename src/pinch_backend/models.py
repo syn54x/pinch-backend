@@ -463,6 +463,8 @@ async def provision_user(
     here rather than in M2's signup flow because it is a tenancy invariant,
     not an auth flow.
     """
+    from pinch_backend.taxonomy import seed_default_taxonomy
+
     async with transaction():
         ledger = await Ledger.create(name=display_name)
         user = await User.create(
@@ -472,4 +474,5 @@ async def provision_user(
             password_hash=password_hash,
         )
         await LedgerMember.create(user=user, ledger=ledger, role=LedgerRole.OWNER)
+        await seed_default_taxonomy(ledger)
     return user
