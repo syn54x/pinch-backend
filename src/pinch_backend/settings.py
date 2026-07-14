@@ -16,6 +16,13 @@ class Settings(BaseSettings):
     database_auto_migrate: bool = True
     """Migrate the schema automatically on connect. Config, not a code fork
     (ADR-0002): hosted deploys disable it and use the Alembic bridge."""
+    database_migrate_updates: bool = True
+    """Let auto_migrate ALTER existing tables (add/modify columns) on connect.
+    On in development — Pinch is pre-deployment and wipe-and-reset is free;
+    disabled for hosted deploys once the schema stabilizes (ADR-0002 config)."""
+    database_migrate_destructive: bool = True
+    """Let auto_migrate DROP columns/tables that no longer exist in the models.
+    On in development for the same reason; there are no users to lose."""
 
     secret_key: str = ""
     """Signs the CSRF cookie (sessions themselves are database rows and need
