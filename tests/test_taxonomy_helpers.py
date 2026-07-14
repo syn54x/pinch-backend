@@ -25,7 +25,7 @@ async def test_placement_under_a_depth_2_node_is_rejected(db) -> None:
     food = await Category.create(ledger=ledger, name="Food")
     rest = await Category.create(ledger=ledger, name="Restaurants", parent=food)
     with pytest.raises(ClientException):
-        await taxonomy.validate_placement(ledger.id, rest)
+        await taxonomy.validate_placement(rest)
 
 
 async def test_cycle_is_rejected(db) -> None:

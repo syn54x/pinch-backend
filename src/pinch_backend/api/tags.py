@@ -7,6 +7,7 @@ responses, tenancy 404s, scope guard by construction.
 import uuid
 from datetime import datetime
 
+from ferro import transaction
 from litestar import Router, delete, get, post
 from litestar.di import NamedDependency
 from litestar.exceptions import HTTPException, NotFoundException
@@ -73,8 +74,9 @@ async def delete_tag(tag_id: FromPath[uuid.UUID], current_ledger: NamedDependenc
     tag = await Tag.where(lambda t: (t.id == tag_id) & (t.ledger_id == ledger_id)).first()
     if tag is None:
         raise NotFoundException(detail="No such tag")
-    await TransactionTag.where(lambda tt: tt.tag_id == tag_id).delete()
-    await tag.delete()
+    async with transaction():
+        await TransactionTag.where(lambda tt: tt.tag_id == tag_id).delete()
+        await tag.delete()
     log.info("tag.deleted", tag_id=str(tag_id), ledger_id=str(current_ledger.id))
 
 
