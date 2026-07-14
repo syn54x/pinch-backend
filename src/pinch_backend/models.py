@@ -11,7 +11,7 @@ import uuid
 from datetime import UTC, datetime
 from datetime import date as CalendarDate
 from enum import StrEnum
-from typing import TYPE_CHECKING, Annotated, ClassVar
+from typing import TYPE_CHECKING, Annotated, ClassVar, Optional
 
 from ferro import BackRef, Field, ForeignKey, Model, Relation, transaction
 from pydantic import field_validator
@@ -103,6 +103,9 @@ class Ledger(TimestampMixin, Model):
     import_rows: Relation[list["ImportRow"]] = BackRef()
     import_profiles: Relation[list["ImportProfile"]] = BackRef()
     transactions: Relation[list["Transaction"]] = BackRef()
+    categories: Relation[list["Category"]] = BackRef()
+    tags: Relation[list["Tag"]] = BackRef()
+    transaction_tags: Relation[list["TransactionTag"]] = BackRef()
 
 
 class User(TimestampMixin, Model):
@@ -344,6 +347,7 @@ class Transaction(TimestampMixin, Model):
     __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
         ("ledger_id", "date"),
         ("account_id", "fingerprint"),
+        ("ledger_id", "description_normalized"),
     )
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
@@ -359,6 +363,88 @@ class Transaction(TimestampMixin, Model):
     fingerprint: str
     """Stored duplicate-detection hash (pinch_backend.imports.fingerprint):
     a pure function of retained source data, recomputable by design."""
+    description_normalized: str
+    """The **payee** (CONTEXT.md): NFKC → casefold → collapse whitespace →
+    trim of description_raw, via imports.fingerprint.normalize_description.
+    Source data, computed at write, indexed per-ledger for CP3 history
+    matching. Non-null — first deploy runs on an empty schema, so no backfill."""
+    category: Annotated[Optional["Category"], ForeignKey(related_name="transactions")] = None
+    """User data (M5): the assigned category, or NULL for uncategorized."""
+    display_name: str | None = None
+    """User data: an override of description_raw for display; NULL shows the
+    raw description (an override, never a copy — source rewrites shine through)."""
+    notes: str | None = None
+    """User data: free-form user annotation."""
+    reviewed_at: datetime | None = None
+    """User data: when the user cleared this from the review inbox; NULL means
+    still in the inbox. M7 reopens review by nulling it."""
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    transaction_tags: Relation[list["TransactionTag"]] = BackRef()
+
+
+class Category(TimestampMixin, Model):
+    """A node in the ledger's editable classification taxonomy (PRD M5 #19).
+
+    A transaction has at most one category and may be uncategorized (a NULL
+    FK — the pipeline's bottom case and a legitimate reviewed state). Nesting
+    is a plain self-referential parent FK; the two-level depth cap is an API
+    validation (pinch_backend.taxonomy), never encoded here — the schema
+    stays depth-agnostic so raising the cap is one constant.
+    """
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    ledger: Annotated[Ledger, ForeignKey(related_name="categories", index=True)]
+    name: str
+    parent: Annotated[Optional["Category"], ForeignKey(related_name="children")] = None
+    """The verified ferro 0.16.1 self-FK spelling. NULL = a top-level node."""
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    children: Relation[list["Category"]] = BackRef()
+    transactions: Relation[list["Transaction"]] = BackRef()
+
+
+class Tag(TimestampMixin, Model):
+    """A free-form, optional label; a transaction may carry many (CONTEXT.md).
+
+    Created implicitly on first use. ``name_fold`` is the casefolded name and
+    the uniqueness key, so "Vacation" and "vacation" never fork; the original
+    casing is preserved in ``name`` for display.
+    """
+
+    __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
+        ("ledger_id", "name_fold"),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    ledger: Annotated[Ledger, ForeignKey(related_name="tags", index=True)]
+    name: str
+    name_fold: str
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    transaction_tags: Relation[list["TransactionTag"]] = BackRef()
+
+
+class TransactionTag(TimestampMixin, Model):
+    """The transaction↔tag join (CONTEXT.md: a transaction carries many tags).
+
+    Deleting a tag detaches it everywhere by removing these rows; tags are
+    never load-bearing, so no reassignment machinery.
+    """
+
+    __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
+        ("transaction_id", "tag_id"),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    ledger: Annotated[Ledger, ForeignKey(related_name="transaction_tags", index=True)]
+    """The tenancy column (ADR-0002), denormalized so row-level security has
+    one ownership column on every domain table."""
+    transaction: Annotated["Transaction", ForeignKey(related_name="transaction_tags", index=True)]
+    tag: Annotated[Tag, ForeignKey(related_name="transaction_tags", index=True)]
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
