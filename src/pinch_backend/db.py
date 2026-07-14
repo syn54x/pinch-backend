@@ -16,7 +16,12 @@ if TYPE_CHECKING:
 
 
 async def connect_database() -> None:
-    await ferro.connect(settings.database_url, auto_migrate=settings.database_auto_migrate)
+    await ferro.connect(
+        settings.database_url,
+        auto_migrate=settings.database_auto_migrate,
+        migrate_updates=settings.database_migrate_updates,
+        migrate_destructive=settings.database_migrate_destructive,
+    )
 
 
 async def disconnect_database() -> None:
