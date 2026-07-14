@@ -113,3 +113,31 @@ async def test_other_ledger_transaction_is_a_404(client) -> None:
     await _signup(client, "b@example.com")
     r = await client.get(f"{TX}/{mine_id}")
     assert r.status_code == 404
+
+
+async def test_account_id_filter_scopes_to_that_account(client) -> None:
+    await _signup(client)
+    a1 = await _account(client)
+    a2 = await _account(client)
+    await _import(client, a1, [("2026-01-01", "-5.00", "IN_A1")])
+    await _import(client, a2, [("2026-01-02", "-6.00", "IN_A2")])
+    r = await client.get(f"{TX}?account_id={a1}")
+    assert [i["description_raw"] for i in r.json()["items"]] == ["IN_A1"]
+
+
+async def test_date_range_filter_is_inclusive_on_both_bounds(client) -> None:
+    await _signup(client)
+    acct = await _account(client)
+    await _import(
+        client,
+        acct,
+        [
+            ("2026-01-01", "-1.00", "JAN1"),
+            ("2026-02-15", "-2.00", "FEB15"),
+            ("2026-03-31", "-3.00", "MAR31"),
+        ],
+    )
+    r = await client.get(f"{TX}?date_from=2026-02-01&date_to=2026-02-28")
+    assert [i["description_raw"] for i in r.json()["items"]] == ["FEB15"]
+    r2 = await client.get(f"{TX}?date_from=2026-01-01&date_to=2026-01-01")
+    assert [i["description_raw"] for i in r2.json()["items"]] == ["JAN1"]
