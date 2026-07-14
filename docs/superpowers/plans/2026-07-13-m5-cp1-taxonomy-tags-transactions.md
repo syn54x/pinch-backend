@@ -1731,6 +1731,15 @@ git commit -m "feat(api): transaction list + get with filters and composite curs
 
 ## Task 10: Transaction user-data PATCH
 
+> **Correction (post-implementation, shipped in commits 10b2c8a + 03eeeed):**
+> (1) `txn.category = category` must be `txn.category_id = category.id` (or
+> `None` to clear) — same ferro relation-ClassVar issue as Task 7. (2) The
+> handler's writes (`txn.save()`, `resolve_tags`, and the tag detach/attach
+> loop) must run inside one `async with transaction():` (import `transaction`
+> from ferro), with the ledger-scoped category 404 lookup done before the
+> block — otherwise a mid-reconcile failure leaves partial writes. A tag
+> detach/idempotency test was added. Shipped code is authoritative.
+
 **Files:**
 - Modify: `src/pinch_backend/api/transactions.py` (add `patch` handler + input model; register it)
 - Test: `tests/test_transactions_api.py` (add PATCH tests)
