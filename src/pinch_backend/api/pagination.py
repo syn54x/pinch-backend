@@ -7,9 +7,15 @@ greater id". uuid7 ids are time-ordered, so this is creation order, stable
 under concurrent inserts, and needs no OFFSET scan. A cursor is a *position*,
 not a row reference — deleting the row it names does not invalidate it, so
 list-and-revoke loops (sessions, PATs) page correctly.
+
+A second variant, ``paginate_by_date``, keysets on ``(date desc, id desc)``
+for the transaction list (M5): same Page[T] envelope and opaque cursor, no
+OFFSET; the cursor carries the last row's date and id.
 """
 
+import base64
 import uuid
+from datetime import date
 from typing import TYPE_CHECKING, Annotated, Protocol
 
 if TYPE_CHECKING:
@@ -79,4 +85,53 @@ async def paginate[ModelT: HasUuid7Id](
     rows = await query.order_by(lambda row: row.id).limit(limit + 1).all()
     if len(rows) > limit:
         return rows[:limit], str(rows[limit - 1].id)
+    return rows, None
+
+
+def encode_date_cursor(txn_date: date, row_id: uuid.UUID) -> str:
+    """Opaque position for the (date, id) keyset: base64url of
+    ``<iso-date>|<uuid>``. Opaque means clients pass it back verbatim and
+    never parse it."""
+    raw = f"{txn_date.isoformat()}|{row_id}"
+    return base64.urlsafe_b64encode(raw.encode()).decode()
+
+
+def decode_date_cursor(cursor: str) -> tuple[date, uuid.UUID]:
+    """Reverse of encode_date_cursor; anything else is a 400. The detail never
+    echoes the value (request inputs are not reflected into responses)."""
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode()).decode()
+        iso, _, id_str = raw.partition("|")
+        return date.fromisoformat(iso), uuid.UUID(id_str)
+    except ValueError, UnicodeDecodeError:
+        raise ClientException(detail="Invalid cursor") from None
+
+
+class HasDateAndId(Protocol):
+    """What a row must offer for date-keyset pagination."""
+
+    id: uuid.UUID
+    date: date
+
+
+async def paginate_by_date[ModelT: HasDateAndId](
+    query: "Query[ModelT]", *, cursor: str | None, limit: int
+) -> tuple[list[ModelT], str | None]:
+    """One keyset page ordered newest-first: ``date`` desc, ``id`` desc as the
+    tiebreak, ``limit`` rows plus one probe row to learn if a next page
+    exists without a COUNT."""
+    if cursor is not None:
+        after_date, after_id = decode_date_cursor(cursor)
+        query = query.where(
+            lambda row: (row.date < after_date) | ((row.date == after_date) & (row.id < after_id))
+        )
+    rows = (
+        await query.order_by(lambda row: row.date, "desc")
+        .order_by(lambda row: row.id, "desc")
+        .limit(limit + 1)
+        .all()
+    )
+    if len(rows) > limit:
+        last = rows[limit - 1]
+        return rows[:limit], encode_date_cursor(last.date, last.id)
     return rows, None
