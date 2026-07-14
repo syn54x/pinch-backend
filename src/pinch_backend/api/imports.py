@@ -32,7 +32,7 @@ from pinch_backend.api.pagination import (
     paginate,
 )
 from pinch_backend.imports import inference
-from pinch_backend.imports.fingerprint import compute_fingerprint
+from pinch_backend.imports.fingerprint import compute_fingerprint, normalize_description
 from pinch_backend.imports.parsing import (
     ParsedRow,
     currency_exponent,
@@ -490,6 +490,7 @@ async def commit_import(
                 amount_minor=row.amount_minor,  # ty: ignore[invalid-argument-type]
                 currency=account.currency,
                 description_raw=row.description_raw or "",
+                description_normalized=normalize_description(row.description_raw or ""),
                 source_import_id=batch.id,  # ty: ignore[unknown-argument]
                 fingerprint=row.fingerprint,  # ty: ignore[invalid-argument-type]
             )

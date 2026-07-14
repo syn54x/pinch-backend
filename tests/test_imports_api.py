@@ -132,6 +132,28 @@ async def _previewed(client, account_id: str, csv_text: str) -> dict:
     return response.json()
 
 
+async def _import_and_commit_one(client, *, description: str) -> str:
+    account_id = await _create_account(client)
+    csv_body = f"date,amount,description\n2026-01-15,-9.99,{description}\n"
+    upload = await client.post(
+        "/api/v1/imports",
+        files={"file": ("bank.csv", csv_body, "text/csv")},
+        data={"account_id": account_id},
+        headers=await _csrf(client),
+    )
+    assert upload.status_code == 201, upload.text
+    import_id = upload.json()["id"]
+    mapping = upload.json()["suggested_mapping"]
+    await client.post(
+        f"/api/v1/imports/{import_id}/mapping", json=mapping, headers=await _csrf(client)
+    )
+    commit = await client.post(
+        f"/api/v1/imports/{import_id}/commit", json={}, headers=await _csrf(client)
+    )
+    assert commit.status_code == 200, commit.text
+    return account_id
+
+
 async def _rows(client, import_id: str, **params) -> dict:
     response = await client.get(f"{IMPORTS}/{import_id}/rows", params=params)
     assert response.status_code == 200, response.text
@@ -497,6 +519,17 @@ async def test_a_batch_beyond_the_old_bind_ceilings_commits_whole(client) -> Non
     assert committed.status_code == 200, committed.text
     assert committed.json()["transaction_count"] == 7_000
     assert await Transaction.select().count() == 7_000
+
+
+async def test_committed_transactions_carry_normalized_payee(client) -> None:
+    from pinch_backend.imports.fingerprint import normalize_description
+    from pinch_backend.models import Transaction
+
+    await _signup(client)
+    account_id = await _import_and_commit_one(client, description="  COSTCO   WHSE  #42 ")
+    txn = await Transaction.where(lambda t: t.account_id == account_id).first()
+    assert txn.description_normalized == normalize_description("  COSTCO   WHSE  #42 ")
+    assert txn.description_normalized == "costco whse #42"
 
 
 # --- DELETE an uncommitted import: dead = gone (story 4) ---------------------------------
