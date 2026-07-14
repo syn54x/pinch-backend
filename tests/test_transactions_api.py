@@ -323,3 +323,49 @@ async def test_uncategorized_filter_excludes_categorized_rows(client) -> None:
     )
     r = await client.get(f"{TX}?uncategorized=true")
     assert [i["description_raw"] for i in r.json()["items"]] == ["NOCAT"]
+
+
+# --- PATCH input validation (PR #23 review: bound user-data, protect the
+# display_name → description_raw fallback) -----------------------------------
+
+
+async def test_patch_rejects_overlong_display_name(client) -> None:
+    txn_id = await _one_txn(client)
+    r = await client.patch(
+        f"{TX}/{txn_id}", json={"display_name": "x" * 101}, headers=await _csrf(client)
+    )
+    assert r.status_code == 400
+
+
+async def test_patch_rejects_empty_display_name_but_null_clears(client) -> None:
+    txn_id = await _one_txn(client)
+    # An empty string would render blank, breaking the NULL → description_raw
+    # fallback contract — so it is rejected.
+    bad = await client.patch(
+        f"{TX}/{txn_id}", json={"display_name": ""}, headers=await _csrf(client)
+    )
+    assert bad.status_code == 400
+    # Setting a name and then clearing it with null is the supported path.
+    await client.patch(
+        f"{TX}/{txn_id}", json={"display_name": "Renamed"}, headers=await _csrf(client)
+    )
+    cleared = await client.patch(
+        f"{TX}/{txn_id}", json={"display_name": None}, headers=await _csrf(client)
+    )
+    assert cleared.json()["display_name"] is None
+
+
+async def test_patch_rejects_overlong_notes(client) -> None:
+    txn_id = await _one_txn(client)
+    r = await client.patch(
+        f"{TX}/{txn_id}", json={"notes": "x" * 2001}, headers=await _csrf(client)
+    )
+    assert r.status_code == 400
+
+
+async def test_patch_rejects_overlong_tag(client) -> None:
+    txn_id = await _one_txn(client)
+    r = await client.patch(
+        f"{TX}/{txn_id}", json={"tags": ["x" * 101]}, headers=await _csrf(client)
+    )
+    assert r.status_code == 400

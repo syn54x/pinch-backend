@@ -18,7 +18,7 @@ from litestar import Router, get, patch
 from litestar.di import NamedDependency
 from litestar.exceptions import NotFoundException
 from litestar.params import FromPath, QueryParameter
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from pinch_backend import taxonomy
 from pinch_backend.api.pagination import (
@@ -73,11 +73,17 @@ class TransactionPatchIn(BaseModel):
 
     category_id: uuid.UUID | None = None
     """Present-and-null clears the category (→ uncategorized)."""
-    tags: list[str] | None = None
+    tags: list[Annotated[str, Field(min_length=1, max_length=100)]] | None = Field(
+        default=None, max_length=50
+    )
     """The complete tag set for the transaction; reconciled (implicit-create
-    new names, detach removed ones). Present-and-empty clears all tags."""
-    display_name: str | None = None
-    notes: str | None = None
+    new names, detach removed ones). Present-and-empty clears all tags. Each
+    name is bounded to the same 100 chars POST /tags enforces on this table,
+    and the set is capped so one PATCH can't mint an unbounded tag list."""
+    display_name: str | None = Field(default=None, min_length=1, max_length=100)
+    """An override of the raw description; NULL shows description_raw (an
+    override, never a copy). Empty is rejected — clear with null, not ""."""
+    notes: str | None = Field(default=None, max_length=2000)
     reviewed: bool | None = None
     """True sets reviewed_at to now; False clears it (back to the inbox)."""
 
