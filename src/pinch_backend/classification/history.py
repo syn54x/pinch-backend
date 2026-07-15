@@ -7,12 +7,15 @@ Reviewed-but-uncategorized is not a signal (the user shrugged, they didn't
 decide).
 """
 
-import uuid  # noqa: TC003
+from typing import TYPE_CHECKING
 
 from pinch_backend.models import Transaction
 
+if TYPE_CHECKING:
+    import uuid
 
-async def history_match(ledger_id: uuid.UUID, payee: str) -> Transaction | None:
+
+async def history_match(ledger_id: "uuid.UUID", payee: str) -> Transaction | None:
     return await (
         Transaction.where(
             lambda t, lid=ledger_id, p=payee: (

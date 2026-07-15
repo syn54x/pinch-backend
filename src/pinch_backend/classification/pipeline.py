@@ -9,8 +9,8 @@ This module is the ONE site that orders rules (uuid7 creation order) — the
 explicit-priority door stays open (D13).
 """
 
-import uuid  # noqa: TC003
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from ferro import UniqueViolationError, transaction
 
@@ -31,6 +31,9 @@ from pinch_backend.observability import get_logger
 from pinch_backend.rules.evaluator import matches
 from pinch_backend.rules.spec import ConditionSpec
 
+if TYPE_CHECKING:
+    import uuid
+
 log = get_logger(__name__)
 
 SWEEP_BATCH = 500
@@ -39,7 +42,7 @@ SWEEP_BATCH = 500
 
 @dataclass
 class ProposalDraft:
-    category_id: uuid.UUID | None
+    category_id: "uuid.UUID | None"
     provenance: ProposalProvenance
     detail: dict | None
     tag_names: list[str]
@@ -113,7 +116,7 @@ async def classify_transaction(
 
 
 async def sweep_ledger(
-    ledger_id: uuid.UUID, *, auto_file_import_id: uuid.UUID | None = None
+    ledger_id: "uuid.UUID", *, auto_file_import_id: "uuid.UUID | None" = None
 ) -> None:
     """The idempotent sweep. Safe to run twice, safe to run concurrently,
     safe to crash and re-run: progress is the proposals themselves."""
@@ -128,7 +131,7 @@ async def sweep_ledger(
     active_rules = [(rule, ConditionSpec(**rule.condition)) for rule in rules]
 
     written = 0
-    last_id: uuid.UUID | None = None
+    last_id: "uuid.UUID | None" = None
     while True:
         query = Transaction.where(
             lambda t, lid=ledger_id: (t.ledger_id == lid) & (t.reviewed_at == None)  # noqa: E711

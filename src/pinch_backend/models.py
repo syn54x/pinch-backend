@@ -548,7 +548,9 @@ class Proposal(TimestampMixin, Model):
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="proposals", index=True)]
     transaction: Annotated["Transaction", ForeignKey(related_name="proposals", unique=True)]
-    category: Annotated[Optional["Category"], ForeignKey(related_name="proposals")] = None
+    category: Annotated[Optional["Category"], ForeignKey(related_name="proposals", index=True)] = (
+        None
+    )
     proposed_display_name: str | None = None
     provenance: ProposalProvenance = ProposalProvenance.NONE
     provenance_detail: dict | None = None
@@ -609,7 +611,7 @@ class CorrectionLogEntry(TimestampMixin, Model):
     decision_tags: list[str] = Field(default_factory=list)
     decision_display_name: str | None = None
     # Void bookkeeping (kind=void only).
-    voids: uuid.UUID | None = None
+    voids: uuid.UUID | None = Field(default=None, index=True)
     """The entry this one retracts — a bare id, same reasoning as
     transaction_id."""
     void_reason: str | None = None

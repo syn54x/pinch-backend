@@ -1017,6 +1017,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 **Interfaces:**
 - Consumes: `matches` + `ConditionSpec` (CP2), `history_match`, `active_classifier`, `consume_proposal`, models.
 - Produces: `ProposalDraft` dataclass (`category_id`, `provenance`, `detail: dict | None`, `tag_names: list[str]`, `display_name: str | None`); `async def classify_transaction(txn: Transaction, active_rules: list[tuple[Rule, ConditionSpec]]) -> ProposalDraft`; `async def sweep_ledger(ledger_id: uuid.UUID, *, auto_file_import_id: uuid.UUID | None = None) -> None`. Task 6's job calls `sweep_ledger`.
+- Both phases (proposal writes, auto-file consume) re-check `reviewed_at` immediately before their respective write, closing the window where a concurrent human decision could be clobbered by a stale in-flight batch row (final-review fix, M5 CP3, #21).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1389,6 +1390,20 @@ async def sweep_ledger(
             draft = await classify_transaction(txn, active_rules)
             try:
                 async with transaction():
+                    # Freshness re-check: the batch was fetched before this
+                    # await chain ran, so a human PATCH (reviewed: true) may
+                    # have landed on this row in the meantime. Re-reading
+                    # reviewed_at here, inside the same transaction as the
+                    # write, shrinks that window to a single round trip under
+                    # READ COMMITTED. The unique transaction FK is a separate
+                    # guard — it only protects sweep-vs-sweep races, not a
+                    # sweep racing a human decision.
+                    txn_id = txn.id
+                    fresh = await Transaction.where(
+                        lambda t, tid=txn_id: (t.id == tid) & (t.reviewed_at == None)  # noqa: E711
+                    ).first()
+                    if fresh is None:
+                        continue  # reviewed while this batch was in flight — a human decided
                     # Shadow-FK kwarg (category_id): runtime-synthesized and
                     # invisible to ty (ferro PRD 0004 / ferro-orm#290).
                     proposal = await Proposal.create(
@@ -1442,9 +1457,22 @@ async def sweep_ledger(
                     .order_by(lambda pt: pt.id)
                     .all()
                 ]
+                # Freshness re-check (mirrors the write-phase guard above):
+                # the proposal/tag fetches just awaited past this batch's
+                # fetch, so a human PATCH (reviewed/category/notes) may have
+                # landed on this row in the meantime. Re-reading reviewed_at
+                # here, immediately before consuming, shrinks that window to
+                # a single round trip, and passing `fresh` (not the stale
+                # `txn`) means consume's whole-row save can't resurrect
+                # stale notes/display_name either.
+                fresh = await Transaction.where(
+                    lambda t, tid=txn_id: (t.id == tid) & (t.reviewed_at == None)  # noqa: E711
+                ).first()
+                if fresh is None:
+                    continue  # reviewed while this batch was in flight — a human decided
                 await consume_proposal(
                     ledger,
-                    txn,
+                    fresh,
                     category_id=proposal.category_id,  # ty: ignore[unresolved-attribute]
                     tags=tag_names,
                     display_name=proposal.proposed_display_name,

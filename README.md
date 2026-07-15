@@ -19,6 +19,7 @@ uv run prek install --hook-type commit-msg
 prek run --all-files   # full CI parity
 just check             # fast lint + types
 uv run pytest
+uv run pinch-dev worker   # background jobs (classification)
 ```
 
 ## Release
