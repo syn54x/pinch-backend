@@ -81,3 +81,31 @@ async def standalone_db_url():
     async with engines.session():
         await execute(f'DROP SCHEMA "{schema}" CASCADE')
     reset_engine()
+
+
+@pytest.fixture(autouse=True)
+def job_connector():
+    """Every test runs Procrastinate on the in-memory connector — same
+    stance as "no live network": nothing in the suite touches a real queue.
+    Yields the connector; inspect queued jobs via `job_connector.jobs`."""
+    from procrastinate import testing
+
+    from pinch_backend.jobs import job_app
+
+    in_memory = testing.InMemoryConnector()
+    with job_app.replace_connector(in_memory):
+        yield in_memory
+
+
+@pytest.fixture
+def run_jobs(job_connector):
+    """Execute everything queued, then return (the testing-connector
+    pattern): job effects are asserted back at the API seam."""
+    from pinch_backend.jobs import job_app
+
+    async def _run() -> None:
+        await job_app.run_worker_async(
+            wait=False, listen_notify=False, install_signal_handlers=False
+        )
+
+    return _run

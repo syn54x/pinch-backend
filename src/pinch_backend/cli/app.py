@@ -19,5 +19,17 @@ def main() -> None:
     print("Hello from pinch-dev")
 
 
+@app.command
+def worker() -> None:
+    """Run the background-job worker (deployment shape: API + worker +
+    Postgres, ADR-0006). Applies Procrastinate's schema on first run when
+    PINCH_DATABASE_AUTO_MIGRATE is on."""
+    import asyncio
+
+    from pinch_backend.jobs import run_worker
+
+    asyncio.run(run_worker())
+
+
 if __name__ == "__main__":
     app()

@@ -5,7 +5,23 @@
 # pinch-dev
 
 ```console
-pinch-dev
+pinch-dev COMMAND
 ```
 
 Pinch backend developer CLI (internal; the public CLI is pinch-cli)
+
+## Table of Contents
+
+- [`worker`](#pinch-dev-worker)
+
+**Commands**:
+
+* [`worker`](#pinch-dev-worker): Run the background-job worker (deployment shape: API + worker + Postgres, ADR-0006). Applies Procrastinate's schema on first run when PINCH_DATABASE_AUTO_MIGRATE is on.
+
+## pinch-dev worker
+
+```console
+pinch-dev worker
+```
+
+Run the background-job worker (deployment shape: API + worker + Postgres, ADR-0006). Applies Procrastinate's schema on first run when PINCH_DATABASE_AUTO_MIGRATE is on.

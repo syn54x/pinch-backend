@@ -22,6 +22,7 @@ from pinch_backend.auth.guards import (
 )
 from pinch_backend.auth.routes import auth_router
 from pinch_backend.db import FerroSessionMiddleware, connect_database, disconnect_database
+from pinch_backend.jobs import close_job_app, open_job_app
 from pinch_backend.observability import configure_observability
 from pinch_backend.settings import settings
 
@@ -130,8 +131,8 @@ def create_app(*, manage_database: bool = True) -> Litestar:
             "current_user": Provide(provide_current_user),
             "current_ledger": Provide(provide_current_ledger),
         },
-        on_startup=[connect_database] if manage_database else [],
-        on_shutdown=[disconnect_database] if manage_database else [],
+        on_startup=[connect_database, open_job_app] if manage_database else [],
+        on_shutdown=[close_job_app, disconnect_database] if manage_database else [],
     )
 
 
