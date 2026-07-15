@@ -10,6 +10,7 @@ from pinch_backend import __version__
 from pinch_backend.api.accounts import accounts_router
 from pinch_backend.api.categories import categories_router
 from pinch_backend.api.imports import import_profiles_router, imports_router
+from pinch_backend.api.rules import rules_router
 from pinch_backend.api.tags import tags_router
 from pinch_backend.api.transactions import transactions_router
 from pinch_backend.auth.csrf import CredentialAwareCSRFMiddleware
@@ -67,6 +68,7 @@ def create_app(*, manage_database: bool = True) -> Litestar:
             categories_router,
             imports_router,
             import_profiles_router,
+            rules_router,
             tags_router,
             transactions_router,
         ],
