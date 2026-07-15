@@ -41,6 +41,7 @@ from pinch_backend.imports.parsing import (
 )
 from pinch_backend.imports.profiles import normalized_header_tuple, shape_key
 from pinch_backend.imports.spec import MappingSpec
+from pinch_backend.jobs import classify_ledger
 from pinch_backend.models import (
     Account,
     Import,
@@ -70,6 +71,12 @@ class CommitIn(BaseModel):
     include_duplicates: list[uuid.UUID] = Field(default_factory=list)
     """Row ids to commit despite their duplicate flag (story 8) — the
     two-identical-coffees escape hatch, per row and explicit."""
+
+    auto_file: bool = False
+    """Backfill mode (story 12): the classification job applies each of this
+    import's proposals immediately — reviewed and categorized by the user's
+    own rules/history, logged actor=auto, never promotion evidence. Scoped
+    to THIS import; anything already in the inbox stays there."""
 
 
 class ImportOut(BaseModel):
@@ -500,6 +507,14 @@ async def commit_import(
             await Transaction.bulk_create(transactions)
         batch.status = ImportStatus.COMMITTED  # the CAS wrote the row; sync the instance
         await _save_profile(batch, account, current_ledger)
+    # Classification is the reacting subsystem's background job, never this
+    # request's (M4's bound contract). Deferred AFTER the commit transaction:
+    # the job must see the rows; a phantom job from a rollback would have
+    # been harmless (idempotent sweep), invisible data would not.
+    await classify_ledger.configure(lock=f"ledger:{current_ledger.id}").defer_async(
+        ledger_id=str(current_ledger.id),
+        auto_file_import_id=str(batch.id) if data.auto_file else None,
+    )
     log.info(
         "import.committed",
         import_id=str(batch.id),
@@ -508,6 +523,7 @@ async def commit_import(
         transactions=len(transactions),
         duplicates_skipped=sum(1 for r in rows if r.valid and r.duplicate) - len(overridden),
         duplicates_overridden=len(overridden),
+        auto_file=data.auto_file,
     )
     return await _import_out(batch)
 
