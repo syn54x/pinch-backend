@@ -181,3 +181,95 @@ async def test_delete_succeeds_after_rule_retargeted(client) -> None:
         headers=await _csrf(client),
     )
     assert r.status_code == 204, r.text
+
+
+async def _seed_proposal_targeting(category_id: str):
+    """A transaction + pending proposal aimed at ``category_id``. Model-layer
+    on purpose: the pending proposal is pipeline-owned state and the surface
+    under test is DELETE /categories."""
+    import uuid as _uuid
+    from datetime import date as _date
+
+    from pinch_backend.models import (
+        Account,
+        AccountKind,
+        Category,
+        Ledger,
+        Proposal,
+        ProposalProvenance,
+        Transaction,
+    )
+
+    ledger = (await Ledger.all())[0]
+    account = await Account.create(ledger=ledger, kind=AccountKind.DEPOSITORY, label="Chk")
+    txn = await Transaction.create(
+        ledger=ledger,
+        account=account,
+        date=_date(2026, 7, 1),
+        amount_minor=-100,
+        currency="USD",
+        description_raw="X",
+        description_normalized="x",
+        fingerprint=f"fp-{_uuid.uuid4().hex[:8]}",
+    )
+    target = await Category.get(_uuid.UUID(category_id))
+    await Proposal.create(
+        ledger=ledger,
+        transaction=txn,
+        category=target,
+        provenance=ProposalProvenance.RULE,
+        provenance_detail={"rule_ids": ["r"]},
+    )
+    return txn
+
+
+async def test_delete_repoints_pending_proposals(client) -> None:
+    from pinch_backend.models import Proposal, ProposalProvenance
+
+    await _signup(client)
+    a = (
+        await client.post(
+            "/api/v1/categories", json={"name": "Doomed Q"}, headers=await _csrf(client)
+        )
+    ).json()
+    b = (
+        await client.post(
+            "/api/v1/categories", json={"name": "Target Q"}, headers=await _csrf(client)
+        )
+    ).json()
+    txn = await _seed_proposal_targeting(a["id"])
+
+    resp = await client.request(
+        "DELETE",
+        f"/api/v1/categories/{a['id']}",
+        json={"reassign_to": b["id"]},
+        headers=await _csrf(client),
+    )
+    assert resp.status_code == 204
+    p = await Proposal.where(lambda p, tid=txn.id: p.transaction_id == tid).first()
+    assert str(p.category_id) == b["id"]
+    assert p.provenance is ProposalProvenance.RULE  # re-point keeps provenance
+
+
+async def test_delete_with_null_disposition_empties_proposals(client) -> None:
+    from pinch_backend.models import Proposal, ProposalProvenance
+
+    await _signup(client)
+    a = (
+        await client.post(
+            "/api/v1/categories", json={"name": "Doomed R"}, headers=await _csrf(client)
+        )
+    ).json()
+    txn = await _seed_proposal_targeting(a["id"])
+
+    resp = await client.request(
+        "DELETE",
+        f"/api/v1/categories/{a['id']}",
+        json={"reassign_to": None},
+        headers=await _csrf(client),
+    )
+    assert resp.status_code == 204
+    p = await Proposal.where(lambda p, tid=txn.id: p.transaction_id == tid).first()
+    assert p.category_id is None
+    assert p.provenance is ProposalProvenance.NONE
+    assert p.provenance_detail is None
