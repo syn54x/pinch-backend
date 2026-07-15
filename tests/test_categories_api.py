@@ -131,3 +131,53 @@ async def test_reparent_a_subtree_past_the_cap_is_rejected(client) -> None:
         headers=await _csrf(client),
     )
     assert r.status_code == 400
+
+
+async def test_delete_is_blocked_by_targeting_rules(client) -> None:
+    await _signup(client)
+    cat = (await _create(client, "RuleTarget")).json()
+    rule = await client.post(
+        "/api/v1/rules",
+        json={
+            "condition": {"payee": {"op": "contains", "value": "x"}},
+            "action_category_id": cat["id"],
+        },
+        headers=await _csrf(client),
+    )
+    assert rule.status_code == 201, rule.text
+    r = await client.request(
+        "DELETE",
+        f"{CATEGORIES}/{cat['id']}",
+        json={"reassign_to": None},
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 409
+    assert rule.json()["id"] in r.json()["extra"]["rules"]
+
+
+async def test_delete_succeeds_after_rule_retargeted(client) -> None:
+    await _signup(client)
+    cat = (await _create(client, "RuleTarget2")).json()
+    other = (await _create(client, "Elsewhere")).json()
+    rule = (
+        await client.post(
+            "/api/v1/rules",
+            json={
+                "condition": {"payee": {"op": "contains", "value": "y"}},
+                "action_category_id": cat["id"],
+            },
+            headers=await _csrf(client),
+        )
+    ).json()
+    await client.patch(
+        f"/api/v1/rules/{rule['id']}",
+        json={"action_category_id": other["id"]},
+        headers=await _csrf(client),
+    )
+    r = await client.request(
+        "DELETE",
+        f"{CATEGORIES}/{cat['id']}",
+        json={"reassign_to": None},
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 204, r.text

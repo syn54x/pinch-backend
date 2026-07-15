@@ -24,7 +24,7 @@ from pinch_backend.api.pagination import (
     Page,
     paginate,
 )
-from pinch_backend.models import Category, Ledger, Transaction
+from pinch_backend.models import Category, Ledger, Rule, Transaction
 from pinch_backend.observability import get_logger
 
 log = get_logger(__name__)
@@ -164,14 +164,22 @@ async def delete_category(
     data: CategoryDeleteIn,
     current_ledger: NamedDependency[Ledger],
 ) -> None:
-    """Hard delete with an explicit disposition (CONTEXT.md / D4). Children
-    block; rules-block arrives in CP2 and proposal re-point in CP3 — both add
-    a guard here without changing this contract."""
+    """Hard delete with an explicit disposition (CONTEXT.md / D4). Children and
+    targeting rules block (409); proposal re-point arrives in CP3. The request
+    carries a JSON body — unusual for DELETE; some proxies strip DELETE bodies, so
+    scripting clients should send it explicitly."""
     category = await _get(current_ledger, category_id)
     child = await Category.where(lambda c: c.parent_id == category_id).first()
     if child is not None:
         raise ClientException(
             detail="Move or delete this category's children first", status_code=409
+        )
+    blocking = await Rule.where(lambda r: r.action_category_id == category_id).all()
+    if blocking:
+        raise ClientException(
+            detail="Retarget or delete the rules targeting this category first",
+            status_code=409,
+            extra={"rules": [str(r.id) for r in blocking]},
         )
     target: Category | None = None
     if data.reassign_to is not None:
