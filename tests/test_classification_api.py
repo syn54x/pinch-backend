@@ -2,8 +2,6 @@
 with provenance; auto-file; undo retraction; the commit request itself
 never classifies. Data flows through the real M4 import seam."""
 
-import pytest
-
 TX = "/api/v1/transactions"
 IMPORTS = "/api/v1/imports"
 CATEGORIES = "/api/v1/categories"
@@ -135,7 +133,6 @@ async def test_commit_defers_and_the_job_writes_proposals(client, run_jobs) -> N
     assert unknown["category"] is None
 
 
-@pytest.mark.xfail(reason="correction-log endpoint lands in Task 9", strict=True)
 async def test_auto_file_lands_reviewed_and_logged_auto(client, run_jobs) -> None:
     await _signup(client)
     account_id = await _account(client)
