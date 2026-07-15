@@ -12,7 +12,11 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     environment: str = "development"
 
-    database_url: str = "sqlite:pinch.db?mode=rwc"
+    database_url: str = "postgres://postgres:password@localhost:5432/postgres"
+    """The one datastore (ADR-0003); default matches the local-pg dev
+    container. sqlite support was retired at M5 CP3: Procrastinate made
+    Postgres load-bearing for the product's core loop, and a backend
+    nothing deploys on isn't worth a parallel execution story."""
     database_auto_migrate: bool = True
     """Migrate the schema automatically on connect. Config, not a code fork
     (ADR-0002): hosted deploys disable it and use the Alembic bridge."""

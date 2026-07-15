@@ -4,13 +4,21 @@ import uuid
 import pytest
 from ferro import connect, engines, execute, reset_engine
 
+DEFAULT_TEST_DATABASE_URL = "postgres://postgres:password@localhost:5432/postgres"
+"""The local-pg docker container; CI's service container answers the same
+DSN. sqlite was retired at M5 CP3 — Postgres is the only backend."""
+
 
 def pytest_configure() -> None:
     os.environ.setdefault("LOGFIRE_SEND_TO_LOGFIRE", "false")
-    os.environ.setdefault("PINCH_DATABASE_URL", "sqlite::memory:")
+    os.environ.setdefault("PINCH_DATABASE_URL", DEFAULT_TEST_DATABASE_URL)
     # No live network calls in CI (PRD M2): breach-check tests opt back in
     # through a stubbed transport.
     os.environ.setdefault("PINCH_BREACH_CHECK_ENABLED", "false")
+
+
+def _test_database_url() -> str:
+    return os.environ.get("PINCH_TEST_DATABASE_URL", DEFAULT_TEST_DATABASE_URL)
 
 
 @pytest.fixture
@@ -29,12 +37,9 @@ async def client(db):
 
 
 @pytest.fixture
-async def db(tmp_path):
-    """The model-layer seam: a real database per test.
-
-    sqlite by default; Postgres when PINCH_TEST_DATABASE_URL is set, isolated
-    per test via a throwaway schema (ferro's backend-matrix convention in
-    miniature).
+async def db():
+    """The model-layer seam: a real Postgres database per test, isolated via
+    a throwaway schema (ferro_search_path).
 
     The import below registers every model table (domain + auth) before
     connect's auto-migration runs, so table creation never depends on which
@@ -43,21 +48,36 @@ async def db(tmp_path):
     """
     from pinch_backend import db as _db  # noqa: F401
 
-    postgres_url = os.environ.get("PINCH_TEST_DATABASE_URL")
-    if postgres_url:
-        schema = f"pinch_test_{uuid.uuid4().hex[:8]}"
-        await connect(postgres_url)
-        async with engines.session():
-            await execute(f'CREATE SCHEMA "{schema}"')
-        reset_engine()
-        separator = "&" if "?" in postgres_url else "?"
-        await connect(f"{postgres_url}{separator}ferro_search_path={schema}", auto_migrate=True)
-        async with engines.session():
-            yield
-            await execute(f'DROP SCHEMA "{schema}" CASCADE')
-        reset_engine()
-    else:
-        await connect(f"sqlite:{tmp_path / 'pinch_test.db'}?mode=rwc", auto_migrate=True)
-        async with engines.session():
-            yield
-        reset_engine()
+    postgres_url = _test_database_url()
+    schema = f"pinch_test_{uuid.uuid4().hex[:8]}"
+    await connect(postgres_url)
+    async with engines.session():
+        await execute(f'CREATE SCHEMA "{schema}"')
+    reset_engine()
+    separator = "&" if "?" in postgres_url else "?"
+    await connect(f"{postgres_url}{separator}ferro_search_path={schema}", auto_migrate=True)
+    async with engines.session():
+        yield
+        await execute(f'DROP SCHEMA "{schema}" CASCADE')
+    reset_engine()
+
+
+@pytest.fixture
+async def standalone_db_url():
+    """A Postgres DSN carrying its own throwaway schema, for tests that run
+    the app's OWN lifecycle (create_app() with manage_database=True) or the
+    CLI's per-command lifespans, instead of the db fixture's ambient session."""
+    from pinch_backend import db as _db  # noqa: F401
+
+    postgres_url = _test_database_url()
+    schema = f"pinch_standalone_{uuid.uuid4().hex[:8]}"
+    await connect(postgres_url)
+    async with engines.session():
+        await execute(f'CREATE SCHEMA "{schema}"')
+    reset_engine()
+    separator = "&" if "?" in postgres_url else "?"
+    yield f"{postgres_url}{separator}ferro_search_path={schema}"
+    await connect(postgres_url)
+    async with engines.session():
+        await execute(f'DROP SCHEMA "{schema}" CASCADE')
+    reset_engine()

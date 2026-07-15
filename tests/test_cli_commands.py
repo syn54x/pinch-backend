@@ -29,13 +29,13 @@ PASSWORD = "correct horse battery staple"
 
 
 @pytest.fixture
-def cli_env(tmp_path, monkeypatch):
+def cli_env(tmp_path, monkeypatch, standalone_db_url):
     """A hermetic CLI home: throwaway config dir, file-backed database
     (each command's lifespan reconnects to it), no ambient env."""
     monkeypatch.setenv("PINCH_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.delenv("PINCH_SERVER_URL", raising=False)
     monkeypatch.delenv("PINCH_API_TOKEN", raising=False)
-    monkeypatch.setattr(settings, "database_url", f"sqlite:{tmp_path / 'cli.db'}?mode=rwc")
+    monkeypatch.setattr(settings, "database_url", standalone_db_url)
 
     servers_seen: list[str] = []
 

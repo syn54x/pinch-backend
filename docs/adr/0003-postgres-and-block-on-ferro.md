@@ -22,3 +22,10 @@ data only.
   problem PG FTS covers for years.
 - Raw-SQL reporting layer alongside ferro — rejected in favor of blocking on
   ferro, accepting that ferro's roadmap is Pinch's critical path.
+
+## Amendment (M5 CP3, 2026-07-15)
+
+sqlite dev/test support is retired. Procrastinate (ADR-0006, pulled forward
+to M5) made Postgres load-bearing for the product's core loop, and CP3's
+concurrency guarantees are untestable on a single-writer backend. Postgres
+is dev, test, and CI; the dev default DSN matches the local-pg container.
