@@ -502,7 +502,7 @@ async def test_a_mid_batch_failure_leaves_zero_transactions(client, monkeypatch)
 
 async def test_a_batch_beyond_the_old_bind_ceilings_commits_whole(client) -> None:
     """Regression for ferro-orm#298 (fixed in 0.16.1): 7,000 rows at the
-    Transaction table's width is ~84k bind parameters — over sqlite's
+    Transaction table's width is ~84k bind parameters — over one backend's
     32,766 and Postgres's 65,535 — and must still be one atomic commit."""
     await _signup(client)
     account_id = await _create_account(client)

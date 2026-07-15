@@ -14,8 +14,10 @@ from pinch_backend.api.app import create_app
 from pinch_backend.settings import settings
 
 
-async def test_the_standalone_app_manages_its_own_database_sessions(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(settings, "database_url", f"sqlite:{tmp_path / 'standalone.db'}?mode=rwc")
+async def test_the_standalone_app_manages_its_own_database_sessions(
+    standalone_db_url, monkeypatch
+) -> None:
+    monkeypatch.setattr(settings, "database_url", standalone_db_url)
 
     async with AsyncTestClient(create_app(), base_url="https://testserver.local") as client:
         await client.get("/health")

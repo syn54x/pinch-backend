@@ -8,6 +8,10 @@ This distribution (`pinch-backend`) is **not published to PyPI** (enforced via t
 
 ## Development
 
+Development runs against a local Postgres (`docker run -d --name local-pg
+-e POSTGRES_PASSWORD=password -p 5432:5432 postgres:17`); tests isolate
+themselves in throwaway schemas.
+
 ```bash
 uv sync
 uv run prek install
