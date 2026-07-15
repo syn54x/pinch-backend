@@ -17,6 +17,7 @@ dependencies = [
     "ferro-orm>=0.16.2",
     "argon2-cffi>=25",
     "httpx>=0.28",
+    "procrastinate>=3.9",
 ]
 
 [project.scripts]
