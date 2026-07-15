@@ -94,6 +94,35 @@ class RuleStatus(StrEnum):
     DISMISSED = "dismissed"
 
 
+class ProposalProvenance(StrEnum):
+    """Who decided the proposal's CATEGORY (PRD M5 D11/D13): a rule, exact
+    payee history, the AI classifier (unreachable until M9's Penny — v0
+    deterministically abstains), or nobody (the empty proposal). Contributing
+    rules for tags/rename ride in provenance_detail regardless."""
+
+    RULE = "rule"
+    HISTORY = "history"
+    AI = "ai"
+    NONE = "none"
+
+
+class CorrectionActor(StrEnum):
+    """Whose judgment a correction-log decision records: the user's, or the
+    system's (auto-file). Auto decisions are never promotion evidence and
+    never eval data (PRD M5)."""
+
+    USER = "user"
+    AUTO = "auto"
+
+
+class CorrectionKind(StrEnum):
+    """decision = a review consumed a proposal; void = a later entry
+    retracting an earlier one (import undo). Voided, never deleted."""
+
+    DECISION = "decision"
+    VOID = "void"
+
+
 class Ledger(TimestampMixin, Model):
     """The unit of data ownership and sharing (ADR-0002).
 
@@ -118,6 +147,9 @@ class Ledger(TimestampMixin, Model):
     tags: Relation[list["Tag"]] = BackRef()
     transaction_tags: Relation[list["TransactionTag"]] = BackRef()
     rules: Relation[list["Rule"]] = BackRef()
+    proposals: Relation[list["Proposal"]] = BackRef()
+    proposal_tags: Relation[list["ProposalTag"]] = BackRef()
+    correction_log_entries: Relation[list["CorrectionLogEntry"]] = BackRef()
 
 
 class User(TimestampMixin, Model):
@@ -394,6 +426,7 @@ class Transaction(TimestampMixin, Model):
     updated_at: datetime = Field(default_factory=utcnow)
 
     transaction_tags: Relation[list["TransactionTag"]] = BackRef()
+    proposals: Relation[list["Proposal"]] = BackRef()
 
 
 class Category(TimestampMixin, Model):
@@ -417,6 +450,7 @@ class Category(TimestampMixin, Model):
     children: Relation[list["Category"]] = BackRef()
     transactions: Relation[list["Transaction"]] = BackRef()
     rules: Relation[list["Rule"]] = BackRef()
+    proposals: Relation[list["Proposal"]] = BackRef()
 
 
 class Tag(TimestampMixin, Model):
@@ -496,6 +530,89 @@ class Rule(TimestampMixin, Model):
     """Tag names to propose, unioned across matching rules (D13)."""
     action_rename_to: str | None = None
     """Proposed display_name override."""
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class Proposal(TimestampMixin, Model):
+    """The pipeline's suggestion for one transaction (PRD M5 #21): exactly
+    one row per transaction — the unique FK is also the double-sweep race
+    guard. An empty proposal (category NULL, provenance=none) is the sweep's
+    done-marker: every stage abstained, and the abstention is data.
+
+    Review consumes this row (classification.consume): log entry → apply →
+    delete, one transaction. The pipeline never proposes over a human
+    decision — replacement only while the transaction is unreviewed.
+    """
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    ledger: Annotated[Ledger, ForeignKey(related_name="proposals", index=True)]
+    transaction: Annotated["Transaction", ForeignKey(related_name="proposals", unique=True)]
+    category: Annotated[Optional["Category"], ForeignKey(related_name="proposals")] = None
+    proposed_display_name: str | None = None
+    provenance: ProposalProvenance = ProposalProvenance.NONE
+    provenance_detail: dict | None = None
+    """Snapshots, never FKs (PRD M5 D11): contributing rule ids as strings,
+    the matched history transaction id. Survives rule/transaction deletion."""
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    tags: Relation[list["ProposalTag"]] = BackRef()
+
+
+class ProposalTag(TimestampMixin, Model):
+    """A proposed tag by NAME, not FK (M5 CP3 brainstorm): Tag rows are
+    minted only when a proposal is consumed — a rejected proposal leaves no
+    tag debris, and tags stay non-load-bearing (CONTEXT.md)."""
+
+    __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (("proposal_id", "name"),)
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    ledger: Annotated[Ledger, ForeignKey(related_name="proposal_tags", index=True)]
+    proposal: Annotated["Proposal", ForeignKey(related_name="tags", index=True)]
+    name: str
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class CorrectionLogEntry(TimestampMixin, Model):
+    """One review decision (or its later retraction), append-only and
+    self-contained (PRD M5 #21): readable, evaluable, and promotable without
+    joining anything deletable. ``transaction_id`` is a bare uuid on purpose
+    — transactions are deletable, the log is forever. Snapshot groups are
+    nullable: void entries carry only the reference and a reason. Append-only
+    is discipline (no code path updates an entry), not schema.
+    """
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    ledger: Annotated[Ledger, ForeignKey(related_name="correction_log_entries", index=True)]
+    transaction_id: uuid.UUID = Field(index=True)
+    kind: CorrectionKind = CorrectionKind.DECISION
+    actor: CorrectionActor = CorrectionActor.USER
+    # Input snapshot — what the transaction looked like when decided.
+    input_description_raw: str | None = None
+    input_payee: str | None = None
+    input_amount_minor: int | None = None
+    input_currency: str | None = None
+    input_date: CalendarDate | None = None
+    input_account_id: uuid.UUID | None = None
+    # Proposal snapshot — what the pipeline suggested (names, not FKs).
+    proposal_category_id: uuid.UUID | None = None
+    proposal_category_name: str | None = None
+    proposal_tags: list[str] = Field(default_factory=list)
+    proposal_display_name: str | None = None
+    proposal_provenance: ProposalProvenance | None = None
+    proposal_detail: dict | None = None
+    # Decision — what the user (or auto-file) actually applied.
+    decision_category_id: uuid.UUID | None = None
+    decision_category_name: str | None = None
+    decision_tags: list[str] = Field(default_factory=list)
+    decision_display_name: str | None = None
+    # Void bookkeeping (kind=void only).
+    voids: uuid.UUID | None = None
+    """The entry this one retracts — a bare id, same reasoning as
+    transaction_id."""
+    void_reason: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
