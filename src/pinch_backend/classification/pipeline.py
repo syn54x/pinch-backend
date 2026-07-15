@@ -150,9 +150,24 @@ async def sweep_ledger(
             draft = await classify_transaction(txn, active_rules)
             try:
                 async with transaction():
-                    # Shadow-FK kwarg (category_id): runtime-synthesized;
-                    # ty already resolves it since `category` is Optional
-                    # (ferro PRD 0004 / ferro-orm#290).
+                    # Freshness re-check: the batch was fetched before this
+                    # await chain ran, so a human PATCH (reviewed: true) may
+                    # have landed on this row in the meantime. Re-reading
+                    # reviewed_at here, inside the same transaction as the
+                    # write, shrinks that window to a single round trip under
+                    # READ COMMITTED. The unique transaction FK is a separate
+                    # guard — it only protects sweep-vs-sweep races, not a
+                    # sweep racing a human decision.
+                    txn_id = txn.id
+                    fresh = await Transaction.where(
+                        lambda t, tid=txn_id: (t.id == tid) & (t.reviewed_at == None)  # noqa: E711
+                    ).first()
+                    if fresh is None:
+                        continue  # reviewed while this batch was in flight — a human decided
+                    # Shadow-FK kwarg (category_id): runtime-synthesized.
+                    # .create()'s **fields is untyped, so no ignore is needed
+                    # here (unlike direct constructor calls, which is where
+                    # this codebase's ty-ignores live).
                     proposal = await Proposal.create(
                         ledger=ledger,
                         transaction=txn,
