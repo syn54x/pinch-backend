@@ -369,3 +369,26 @@ async def test_patch_rejects_overlong_tag(client) -> None:
         f"{TX}/{txn_id}", json={"tags": ["x" * 101]}, headers=await _csrf(client)
     )
     assert r.status_code == 400
+
+
+async def test_uncategorized_false_means_categorized_only(client) -> None:
+    ids = await _setup_txns(
+        client,
+        [("2026-01-02", "-1.00", "HASCAT2"), ("2026-01-01", "-2.00", "NOCAT2")],
+    )
+    cat = (
+        await client.post("/api/v1/categories", json={"name": "Misc3"}, headers=await _csrf(client))
+    ).json()
+    await client.patch(
+        f"{TX}/{ids['HASCAT2']}", json={"category_id": cat["id"]}, headers=await _csrf(client)
+    )
+    r = await client.get(f"{TX}?uncategorized=false")
+    assert [i["description_raw"] for i in r.json()["items"]] == ["HASCAT2"]
+
+
+async def test_transaction_tags_are_sorted_by_name(client) -> None:
+    txn_id = await _one_txn(client)
+    r = await client.patch(
+        f"{TX}/{txn_id}", json={"tags": ["zeta", "Alpha", "mid"]}, headers=await _csrf(client)
+    )
+    assert [t["name"] for t in r.json()["tags"]] == ["Alpha", "mid", "zeta"]

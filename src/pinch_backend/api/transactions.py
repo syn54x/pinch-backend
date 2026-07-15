@@ -95,9 +95,9 @@ async def _get(ledger: Ledger, txn_id: uuid.UUID) -> Transaction:
     return txn
 
 
-async def _out_page(txns: list[Transaction]) -> list[TransactionOut]:
-    """Batch-hydrate categories and tags for a page in two queries each,
-    never per-row."""
+async def hydrate_transactions(txns: list[Transaction]) -> list[TransactionOut]:
+    """Batch-hydrate categories and tags for a page in two queries each, never
+    per-row. Public: the rules preview (CP2) reuses it."""
     cat_ids = sorted({t.category_id for t in txns if t.category_id is not None})  # ty: ignore[unresolved-attribute]
     cats = (
         {c.id: c for c in await Category.where(lambda c: c.id.in_(cat_ids)).all()}
@@ -118,6 +118,8 @@ async def _out_page(txns: list[Transaction]) -> list[TransactionOut]:
         by_txn.setdefault(link.transaction_id, []).append(  # ty: ignore[unresolved-attribute]
             TagRef(id=tag.id, name=tag.name)
         )
+    for refs in by_txn.values():
+        refs.sort(key=lambda ref: ref.name.casefold())
     result = []
     for t in txns:
         cat = cats.get(t.category_id) if t.category_id else None  # ty: ignore[unresolved-attribute]
@@ -170,8 +172,10 @@ async def list_transactions(
         query = query.where(lambda t: t.reviewed_at != None)  # noqa: E711
     elif reviewed is False:
         query = query.where(lambda t: t.reviewed_at == None)  # noqa: E711
-    if uncategorized:
+    if uncategorized is True:
         query = query.where(lambda t: t.category_id == None)  # noqa: E711
+    elif uncategorized is False:
+        query = query.where(lambda t: t.category_id != None)  # noqa: E711
     if category_id:
         subtree = await taxonomy.collect_descendant_ids(list(category_id), ledger_id)
         ids = sorted(subtree)
@@ -200,7 +204,7 @@ async def list_transactions(
         query = query.where(lambda t: t.id.in_(keep_ids))
 
     rows, next_cursor = await paginate_by_date(query, cursor=cursor, limit=limit)
-    return Page(items=await _out_page(rows), next_cursor=next_cursor)
+    return Page(items=await hydrate_transactions(rows), next_cursor=next_cursor)
 
 
 @get("/{txn_id:uuid}")
@@ -208,7 +212,7 @@ async def get_transaction(
     txn_id: FromPath[uuid.UUID], current_ledger: NamedDependency[Ledger]
 ) -> TransactionOut:
     txn = await _get(current_ledger, txn_id)
-    (out,) = await _out_page([txn])
+    (out,) = await hydrate_transactions([txn])
     return out
 
 
@@ -257,7 +261,7 @@ async def patch_transaction(
                     await TransactionTag.create(ledger=current_ledger, transaction=txn, tag=tg)
 
     log.info("transaction.updated", transaction_id=str(txn.id), ledger_id=str(current_ledger.id))
-    (out,) = await _out_page([txn])
+    (out,) = await hydrate_transactions([txn])
     return out
 
 
