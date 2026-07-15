@@ -115,7 +115,6 @@ async def test_auto_file_commit_carries_the_import_id(client, job_connector) -> 
     assert jobs[0]["args"]["auto_file_import_id"] == import_id
 
 
-@pytest.mark.xfail(reason="TransactionOut.proposal lands in Task 8", strict=True)
 async def test_commit_defers_and_the_job_writes_proposals(client, run_jobs) -> None:
     await _signup(client)
     account_id = await _account(client)
@@ -158,7 +157,6 @@ async def test_auto_file_lands_reviewed_and_logged_auto(client, run_jobs) -> Non
     assert entries and all(e["actor"] == "auto" for e in entries)
 
 
-@pytest.mark.xfail(reason="TransactionOut.proposal lands in Task 8", strict=True)
 async def test_keyless_empty_taxonomy_sweeps_clean(client, run_jobs) -> None:
     await _signup(client)
     account_id = await _account(client)
