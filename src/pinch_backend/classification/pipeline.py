@@ -218,9 +218,22 @@ async def sweep_ledger(
                     .order_by(lambda pt: pt.id)
                     .all()
                 ]
+                # Freshness re-check (mirrors the write-phase guard above):
+                # the proposal/tag fetches just awaited past this batch's
+                # fetch, so a human PATCH (reviewed/category/notes) may have
+                # landed on this row in the meantime. Re-reading reviewed_at
+                # here, immediately before consuming, shrinks that window to
+                # a single round trip, and passing `fresh` (not the stale
+                # `txn`) means consume's whole-row save can't resurrect
+                # stale notes/display_name either.
+                fresh = await Transaction.where(
+                    lambda t, tid=txn_id: (t.id == tid) & (t.reviewed_at == None)  # noqa: E711
+                ).first()
+                if fresh is None:
+                    continue  # reviewed while this batch was in flight — a human decided
                 await consume_proposal(
                     ledger,
-                    txn,
+                    fresh,
                     category_id=proposal.category_id,  # ty: ignore[unresolved-attribute]
                     tags=tag_names,
                     display_name=proposal.proposed_display_name,
