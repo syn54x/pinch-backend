@@ -24,7 +24,15 @@ from pinch_backend.api.pagination import (
     Page,
     paginate,
 )
-from pinch_backend.models import Category, Ledger, Rule, Transaction
+from pinch_backend.models import (
+    Category,
+    Ledger,
+    Proposal,
+    ProposalProvenance,
+    Rule,
+    Transaction,
+    utcnow,
+)
 from pinch_backend.observability import get_logger
 
 log = get_logger(__name__)
@@ -187,8 +195,23 @@ async def delete_category(
     cid = category.id
     async with transaction():
         await Transaction.where(lambda t: t.category_id == cid).update(
-            category_id=target.id if target else None
+            category_id=target.id if target else None, updated_at=utcnow()
         )
+        # Pending proposals follow the disposition (PRD M5 D4): re-pointed at
+        # the target, or emptied to provenance=none — the pipeline's decision
+        # died with the category. Tags/rename survive; they were never the
+        # category's decision. Must precede the delete (FK cascade).
+        if target is not None:
+            await Proposal.where(lambda p: p.category_id == cid).update(
+                category_id=target.id, updated_at=utcnow()
+            )
+        else:
+            await Proposal.where(lambda p: p.category_id == cid).update(
+                category_id=None,
+                provenance=ProposalProvenance.NONE,
+                provenance_detail=None,
+                updated_at=utcnow(),
+            )
         await category.delete()
     log.info(
         "category.deleted",
