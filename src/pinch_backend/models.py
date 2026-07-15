@@ -83,6 +83,17 @@ class ImportStatus(StrEnum):
     COMMITTED = "committed"
 
 
+class RuleStatus(StrEnum):
+    """Only ACTIVE rules are law (evaluated by the pipeline). PROPOSED and
+    DISMISSED exist for CP4's promotion: a proposed rule awaits consent, a
+    dismissed one is a tombstone that prevents eternal re-proposal."""
+
+    PROPOSED = "proposed"
+    ACTIVE = "active"
+    DISABLED = "disabled"
+    DISMISSED = "dismissed"
+
+
 class Ledger(TimestampMixin, Model):
     """The unit of data ownership and sharing (ADR-0002).
 
@@ -106,6 +117,7 @@ class Ledger(TimestampMixin, Model):
     categories: Relation[list["Category"]] = BackRef()
     tags: Relation[list["Tag"]] = BackRef()
     transaction_tags: Relation[list["TransactionTag"]] = BackRef()
+    rules: Relation[list["Rule"]] = BackRef()
 
 
 class User(TimestampMixin, Model):
@@ -404,6 +416,7 @@ class Category(TimestampMixin, Model):
 
     children: Relation[list["Category"]] = BackRef()
     transactions: Relation[list["Transaction"]] = BackRef()
+    rules: Relation[list["Rule"]] = BackRef()
 
 
 class Tag(TimestampMixin, Model):
@@ -445,6 +458,42 @@ class TransactionTag(TimestampMixin, Model):
     one ownership column on every domain table."""
     transaction: Annotated["Transaction", ForeignKey(related_name="transaction_tags", index=True)]
     tag: Annotated[Tag, ForeignKey(related_name="transaction_tags", index=True)]
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class Rule(TimestampMixin, Model):
+    """A user-defined condition → action pair applied deterministically to
+    incoming transactions (CONTEXT.md: Rule). Actions ride the proposal —
+    a rule never writes user data directly (PRD M5, D13/D14).
+
+    Conditions are an open, evolving vocabulary → a versioned pydantic spec
+    stored as JSONB (pinch_backend.rules.spec.ConditionSpec — the MappingSpec
+    precedent). Actions are typed columns: the category is the one action
+    with referential-integrity stakes, so it is a real FK (a dangling
+    category id is impossible by construction, and D4's delete-block is one
+    indexed query). Tag names resolve to rows at apply time (CP3) — a rule
+    may name a tag that doesn't exist yet.
+
+    Evaluation order is creation order (uuid7), resolved in exactly one
+    order_by at the evaluation site — nothing else attaches meaning to id
+    order, so explicit priority later is one additive column.
+    """
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    ledger: Annotated[Ledger, ForeignKey(related_name="rules", index=True)]
+    status: RuleStatus = RuleStatus.ACTIVE
+    """User-created rules are ACTIVE by authorship; PROPOSED is what CP4's
+    promotion mints."""
+    condition: dict
+    """A validated ConditionSpec (versioned); never queried into — loaded
+    and evaluated in Python only."""
+    action_category: Annotated[Optional["Category"], ForeignKey(related_name="rules")] = None
+    """Propose this category (indexed shadow FK: the D4 delete-block query)."""
+    action_add_tags: list[str] = Field(default_factory=list)
+    """Tag names to propose, unioned across matching rules (D13)."""
+    action_rename_to: str | None = None
+    """Proposed display_name override."""
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
