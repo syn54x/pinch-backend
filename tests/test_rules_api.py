@@ -139,3 +139,76 @@ async def test_tenancy_and_scope(client) -> None:
     await client.post("/api/v1/auth/logout", headers=await _csrf(client))
     await _signup(client, "b@example.com")
     assert (await client.get(f"{RULES}/{rule['id']}")).status_code == 404
+
+
+# --- Preview (story 9: rules built with evidence, not hope) -------------------
+
+IMPORTS = "/api/v1/imports"
+ACCOUNTS = "/api/v1/accounts"
+
+
+async def _import_rows(client, rows: list[tuple[str, str, str]]) -> None:
+    account = await client.post(
+        ACCOUNTS,
+        json={"kind": "depository", "label": "Chk", "currency": "USD"},
+        headers=await _csrf(client),
+    )
+    body = "date,amount,description\n" + "\n".join(f"{d},{a},{desc}" for d, a, desc in rows) + "\n"
+    up = await client.post(
+        IMPORTS,
+        files={"file": ("bank.csv", body, "text/csv")},
+        data={"account_id": account.json()["id"]},
+        headers=await _csrf(client),
+    )
+    iid = up.json()["id"]
+    await client.post(
+        f"{IMPORTS}/{iid}/mapping", json=up.json()["suggested_mapping"], headers=await _csrf(client)
+    )
+    commit = await client.post(f"{IMPORTS}/{iid}/commit", json={}, headers=await _csrf(client))
+    assert commit.status_code == 200, commit.text
+
+
+async def test_preview_samples_matches_before_any_rule_exists(client) -> None:
+    await _signup(client)
+    await _import_rows(
+        client,
+        [("2026-01-10", "-9.50", "COSTCO WHSE #1"), ("2026-01-11", "-40.00", "SHELL OIL")],
+    )
+    r = await client.post(
+        f"{RULES}/preview",
+        json={"payee": {"op": "contains", "value": "Costco"}},
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["truncated"] is False
+    assert [i["description_raw"] for i in body["items"]] == ["COSTCO WHSE #1"]
+    assert "tags" in body["items"][0]  # full TransactionOut shape
+
+
+async def test_preview_caps_at_50_and_flags_truncation(client) -> None:
+    await _signup(client)
+    await _import_rows(
+        client,
+        [("2026-01-10", f"-{i + 1}.00", f"COSTCO RUN {i}") for i in range(51)],
+    )
+    r = await client.post(
+        f"{RULES}/preview",
+        json={"payee": {"op": "contains", "value": "costco"}},
+        headers=await _csrf(client),
+    )
+    body = r.json()
+    assert len(body["items"]) == 50
+    assert body["truncated"] is True
+
+
+async def test_preview_fills_currency_and_rejects_garbage(client) -> None:
+    await _signup(client)
+    ok = await client.post(
+        f"{RULES}/preview",
+        json={"amount": {"op": "equals", "value": 950, "direction": "out"}},
+        headers=await _csrf(client),
+    )
+    assert ok.status_code == 200  # currency filled from primary (USD)
+    bad = await client.post(f"{RULES}/preview", json={}, headers=await _csrf(client))
+    assert bad.status_code == 400
