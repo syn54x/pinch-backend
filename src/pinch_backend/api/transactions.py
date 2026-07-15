@@ -30,7 +30,7 @@ from pinch_backend.api.pagination import (
 )
 from pinch_backend.models import Category, Ledger, Tag, Transaction, TransactionTag, utcnow
 from pinch_backend.observability import get_logger
-from pinch_backend.tags import resolve_tags
+from pinch_backend.tags import apply_tag_set
 
 log = get_logger(__name__)
 
@@ -248,17 +248,7 @@ async def patch_transaction(
         await txn.save()
 
         if "tags" in fields:
-            wanted = await resolve_tags(current_ledger, data.tags or [])
-            wanted_ids = {t.id for t in wanted}
-            tid = txn.id
-            existing = await TransactionTag.where(lambda tt: tt.transaction_id == tid).all()
-            existing_ids = {tt.tag_id for tt in existing}  # ty: ignore[unresolved-attribute]
-            for tt in existing:
-                if tt.tag_id not in wanted_ids:  # ty: ignore[unresolved-attribute]
-                    await tt.delete()
-            for tg in wanted:
-                if tg.id not in existing_ids:
-                    await TransactionTag.create(ledger=current_ledger, transaction=txn, tag=tg)
+            await apply_tag_set(current_ledger, txn, data.tags or [])
 
     log.info("transaction.updated", transaction_id=str(txn.id), ledger_id=str(current_ledger.id))
     (out,) = await hydrate_transactions([txn])
