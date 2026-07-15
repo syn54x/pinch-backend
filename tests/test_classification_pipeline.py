@@ -7,6 +7,7 @@ from datetime import UTC, date, datetime
 
 from ferro import engines
 
+from pinch_backend.classification import pipeline
 from pinch_backend.classification.pipeline import sweep_ledger
 from pinch_backend.models import (
     Account,
@@ -183,6 +184,32 @@ async def test_concurrent_sweeps_hold_the_unique_guard(db) -> None:
 
     await asyncio.gather(run(), run())
     assert await Proposal.where(lambda p: p.ledger_id == ledger.id).count() == 25
+
+
+async def test_reviewed_between_batch_fetch_and_write_is_not_proposed(db, monkeypatch) -> None:
+    ledger, account = await _seed(db)
+    txn = await _txn(ledger, account, "mystery co")
+
+    real_classify = pipeline.classify_transaction
+
+    async def classify_then_mark_reviewed(t, active_rules):
+        # Simulate a human PATCH (reviewed: true) landing between the
+        # sweep's batch fetch and this transaction's write — the race in
+        # Finding 1. If the freshness re-check inside the write transaction
+        # is missing, the sweep proposes over this decision.
+        now = datetime(2026, 7, 1, tzinfo=UTC)
+        await Transaction.where(lambda tt, tid=t.id: tt.id == tid).update(
+            reviewed_at=now, updated_at=now
+        )
+        return await real_classify(t, active_rules)
+
+    monkeypatch.setattr(pipeline, "classify_transaction", classify_then_mark_reviewed)
+
+    await sweep_ledger(ledger.id)
+
+    assert await _proposal_for(txn) is None  # a human decided; the sweep must not propose
+    reviewed = await Transaction.get(txn.id)
+    assert reviewed.reviewed_at is not None
 
 
 async def test_auto_file_is_import_scoped(db) -> None:
