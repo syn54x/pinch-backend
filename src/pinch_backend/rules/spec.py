@@ -75,6 +75,9 @@ class ConditionSpec(BaseModel):
     model_config = ConfigDict(use_attribute_docstrings=True)
 
     version: Literal[1] = 1
+    """Schema version. Evolve ADDITIVELY (Literal[1, 2] / discriminated
+    union) — never replace the 1, or stored v1 rules fail validation at
+    pipeline load."""
     payee: PayeeCondition | None = None
     amount: AmountCondition | None = None
     day_of_month: DayOfMonthCondition | None = None
