@@ -4,7 +4,12 @@ Tags are free-form and created implicitly on first use; ``name_fold`` (the
 casefolded name) is the identity, so "Vacation" and "vacation" never fork.
 """
 
-from pinch_backend.models import Ledger, Tag
+from typing import TYPE_CHECKING
+
+from pinch_backend.models import Ledger, Tag, TransactionTag
+
+if TYPE_CHECKING:
+    from pinch_backend.models import Transaction
 
 
 async def resolve_tags(ledger: Ledger, names: list[str]) -> list[Tag]:
@@ -27,3 +32,20 @@ async def resolve_tags(ledger: Ledger, names: list[str]) -> list[Tag]:
             tag = await Tag.create(ledger=ledger, name=name.strip(), name_fold=fold)
         result.append(tag)
     return result
+
+
+async def apply_tag_set(ledger: Ledger, txn: "Transaction", names: list[str]) -> None:
+    """Reconcile ``txn``'s tags to exactly ``names``: implicit-create new
+    ones, detach removed ones. Shared by the transaction PATCH and the
+    consume-proposal operation (M5 CP3) — one reconciliation semantics."""
+    wanted = await resolve_tags(ledger, names)
+    wanted_ids = {t.id for t in wanted}
+    txn_id = txn.id
+    existing = await TransactionTag.where(lambda tt, tid=txn_id: tt.transaction_id == tid).all()
+    existing_ids = {tt.tag_id for tt in existing}  # ty: ignore[unresolved-attribute]
+    for tt in existing:
+        if tt.tag_id not in wanted_ids:  # ty: ignore[unresolved-attribute]
+            await tt.delete()
+    for tg in wanted:
+        if tg.id not in existing_ids:
+            await TransactionTag.create(ledger=ledger, transaction=txn, tag=tg)
