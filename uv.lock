@@ -555,17 +555,17 @@ client = [
 
 [[package]]
 name = "ferro-orm"
-version = "0.16.1"
+version = "0.16.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/fe/5f/418847e58b3b94126c93a2faa9a4a2211da68be6a92b7761dd20f60d7686/ferro_orm-0.16.1.tar.gz", hash = "sha256:a231fdb99b6001c5cbc1b9da88665478418b2f325724097c0ff75fcc9c342058", size = 1138885, upload-time = "2026-07-13T04:08:06.555Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ce/ab/f312c24eb6370bd95a7b27ff5d7d16c9675164d3bfb34d29230b7e0a79e3/ferro_orm-0.16.2.tar.gz", hash = "sha256:1774388c8911b100e6acba928bd88618eb10ad8b935d502a4ac654be3554d043", size = 1147568, upload-time = "2026-07-15T13:48:46.253Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c4/68/25004c4bf94f8e0ada9f3c03c5888fdd5b2ebea967ca113e672ca619da71/ferro_orm-0.16.1-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:8903e9d3ee05700751eee82b1aa749be701cd28e8f0a4a077e7199fba151dfe4", size = 5081515, upload-time = "2026-07-13T04:07:58.921Z" },
-    { url = "https://files.pythonhosted.org/packages/13/19/6c4cebb4c74fe6c6aa6234d1d65251e57ca39340c25cb8e73d32fb89349e/ferro_orm-0.16.1-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:9051e0802c15449f3288a0ae32b8b6c47bfd48320edd5646c47b7045c83bd4fc", size = 5460294, upload-time = "2026-07-13T04:08:00.831Z" },
-    { url = "https://files.pythonhosted.org/packages/52/41/7c55b7e419b500c5799913031142bb2e23744860d7659acd13c6cfb11022/ferro_orm-0.16.1-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:1103081ed92a97ffc7a31e41e503d91391f681be58e61b4e1b58ac962516e3ce", size = 5486795, upload-time = "2026-07-13T04:08:02.745Z" },
-    { url = "https://files.pythonhosted.org/packages/5e/f0/d8e15479f2e62e90076caa96644b8f32a09a4c17ea39f62fdee8ec1574ff/ferro_orm-0.16.1-cp39-abi3-win_amd64.whl", hash = "sha256:c5e43fcd24dcc48c5f4ee937b27207cce7328c5d79339cf156d8102ff61d5e1c", size = 5015067, upload-time = "2026-07-13T04:08:04.83Z" },
+    { url = "https://files.pythonhosted.org/packages/60/52/b08d2b75b576e1cdc3de36bb1346dcf8d30584937c6887edf8c3b8ea69d6/ferro_orm-0.16.2-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:61b742a8f25c58da57eb174617f500fa18343f7145216cbd1e3fed9c1d1ea8e2", size = 5095118, upload-time = "2026-07-15T13:48:39.826Z" },
+    { url = "https://files.pythonhosted.org/packages/c3/62/301a01d080e412b7883df56babc69e73064e5f049d8a5bda39bef911f9c1/ferro_orm-0.16.2-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:0d87ab83e3f73fc7c1eb8e805ee8949db5639ba418c64edb4c9859cf741d6089", size = 5459708, upload-time = "2026-07-15T13:48:41.477Z" },
+    { url = "https://files.pythonhosted.org/packages/a5/87/960e5c20377f9744a26a638fa2405f4bff9494af41d815a8a9c5c77133be/ferro_orm-0.16.2-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:9e712e78967bfd17a0b23c1e39af57a28f94426cb303ea014df8a4c8e086f2de", size = 5488249, upload-time = "2026-07-15T13:48:43.207Z" },
+    { url = "https://files.pythonhosted.org/packages/74/95/9df523061e81d9a94b716c52f2b088bfa30b0faf9bf0417656d8cbfef70a/ferro_orm-0.16.2-cp39-abi3-win_amd64.whl", hash = "sha256:cf0bc8d303fd56da50d00f545180bff00a95d050dc3edfea742ab5295197d5e2", size = 5016161, upload-time = "2026-07-15T13:48:44.675Z" },
 ]
 
 [[package]]
@@ -1456,7 +1456,7 @@ dev = [
 requires-dist = [
     { name = "argon2-cffi", specifier = ">=25" },
     { name = "cyclopts", specifier = ">=4" },
-    { name = "ferro-orm", specifier = ">=0.16.1" },
+    { name = "ferro-orm", specifier = ">=0.16.2" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "litestar", extras = ["standard"], specifier = ">=2" },
     { name = "logfire", specifier = ">=4,<5" },
