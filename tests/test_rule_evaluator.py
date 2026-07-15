@@ -5,8 +5,9 @@ from datetime import date
 
 import pytest
 
-from pinch_backend.models import Transaction
-from pinch_backend.rules.evaluator import matches
+from pinch_backend.imports.fingerprint import normalize_description
+from pinch_backend.models import Account, AccountKind, Ledger, Transaction, provision_user
+from pinch_backend.rules.evaluator import matches, scan_matches
 from pinch_backend.rules.spec import ConditionSpec
 
 
@@ -108,3 +109,68 @@ def test_amount_without_currency_is_a_loud_error() -> None:
     spec = _spec({"amount": {"op": "equals", "value": 950, "direction": "out"}})
     with pytest.raises(ValueError, match="currency"):
         matches(spec, _txn())
+
+
+# --- SQL narrowing + scan (DB-backed) ----------------------------------------
+
+
+async def _seed(db, rows) -> Ledger:
+    """rows: list of (description_raw, amount_minor, date) on one account."""
+    await provision_user(email="taylor@example.com", display_name="Taylor")
+    ledger = (await Ledger.all())[0]
+    account = await Account.create(
+        ledger=ledger, kind=AccountKind.DEPOSITORY, label="Chk", currency="USD"
+    )
+    for raw, amount, d in rows:
+        await Transaction.create(
+            ledger=ledger,
+            account=account,
+            date=d,
+            amount_minor=amount,
+            currency="USD",
+            description_raw=raw,
+            description_normalized=normalize_description(raw),
+            fingerprint=uuid.uuid7().hex,
+        )
+    return ledger
+
+
+async def test_scan_finds_matches_and_reports_truncation(db) -> None:
+    ledger = await _seed(
+        db,
+        [(f"COSTCO WHSE #{i}", -100 - i, date(2026, 1, 10)) for i in range(3)]
+        + [("SHELL OIL", -4000, date(2026, 1, 11))],
+    )
+    spec = _spec({"payee": {"op": "contains", "value": "costco"}})
+    found, truncated = await scan_matches(spec, ledger.id, cap=50)
+    assert len(found) == 3 and truncated is False
+    found2, truncated2 = await scan_matches(spec, ledger.id, cap=2)
+    assert len(found2) == 2 and truncated2 is True
+
+
+async def test_literal_like_metacharacter_matches_exactly(db) -> None:
+    # "100% JUICE" contains a LIKE metacharacter: narrowing must skip, and
+    # the evaluator must still match it — and NOT match "100 JUICE".
+    ledger = await _seed(
+        db,
+        [("100% JUICE CO", -500, date(2026, 1, 5)), ("100 JUICE CO", -600, date(2026, 1, 6))],
+    )
+    spec = _spec({"payee": {"op": "contains", "value": "100% juice"}})
+    found, _ = await scan_matches(spec, ledger.id, cap=50)
+    assert [t.description_raw for t in found] == ["100% JUICE CO"]
+
+
+async def test_amount_narrowing_direction_either_finds_both_signs(db) -> None:
+    ledger = await _seed(
+        db,
+        [
+            ("REFUND", 950, date(2026, 1, 5)),
+            ("CHARGE", -950, date(2026, 1, 6)),
+            ("OTHER", -100, date(2026, 1, 7)),
+        ],
+    )
+    spec = _spec(
+        {"amount": {"op": "equals", "value": 950, "direction": "either", "currency": "USD"}}
+    )
+    found, _ = await scan_matches(spec, ledger.id, cap=50)
+    assert {t.description_raw for t in found} == {"REFUND", "CHARGE"}
