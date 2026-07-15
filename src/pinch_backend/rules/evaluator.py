@@ -8,10 +8,13 @@ later touches spec.py and this file, nothing else.
 
 from typing import TYPE_CHECKING
 
+from pinch_backend.api.pagination import paginate
 from pinch_backend.imports.fingerprint import normalize_description
+from pinch_backend.models import Transaction
 
 if TYPE_CHECKING:
-    from pinch_backend.models import Transaction
+    import uuid
+
     from pinch_backend.rules.spec import ConditionSpec
 
 
@@ -55,3 +58,73 @@ def matches(spec: "ConditionSpec", txn: "Transaction") -> bool:
             return False
 
     return True
+
+
+SCAN_BATCH = 500
+"""Keyset batch size for narrowed scans; correctness is matches()'s."""
+
+
+def narrow(spec: "ConditionSpec", query):
+    """Best-effort SQL pre-filter: never wrong, sometimes absent.
+
+    - payee: equality or LIKE — but only when the normalized value carries
+      no LIKE metacharacter (ferro's like() has no ESCAPE support and SQLite
+      no default escape char, so portable escaping is impossible; a %/_
+      value simply skips narrowing and lets matches() decide).
+    - amount: currency equality + sign-aware magnitude range (OR for either).
+    - day_of_month: no SQL (ferro has no date-part extraction — by design).
+    """
+    if spec.payee is not None:
+        needle = normalize_description(spec.payee.value)
+        if "%" not in needle and "_" not in needle:
+            if spec.payee.op == "equals":
+                query = query.where(lambda t, n=needle: t.description_normalized == n)
+            else:
+                pattern = f"%{needle}%"
+                query = query.where(lambda t, p=pattern: t.description_normalized.like(p))
+    if spec.amount is not None:
+        clause = spec.amount
+        query = query.where(lambda t, c=clause.currency: t.currency == c)
+        lo = clause.value if clause.op == "equals" else clause.lo
+        hi = clause.value if clause.op == "equals" else clause.hi
+        neg_lo, neg_hi = -lo, -hi  # ty: ignore[unsupported-operator]
+        if clause.direction == "out":
+            query = query.where(
+                lambda t, lo=neg_hi, hi=neg_lo: (t.amount_minor >= lo) & (t.amount_minor <= hi)
+            )
+        elif clause.direction == "in":
+            query = query.where(
+                lambda t, lo=lo, hi=hi: (t.amount_minor >= lo) & (t.amount_minor <= hi)
+            )
+        else:
+            query = query.where(
+                lambda t, lo=lo, hi=hi, nlo=neg_hi, nhi=neg_lo: (
+                    ((t.amount_minor >= lo) & (t.amount_minor <= hi))
+                    | ((t.amount_minor >= nlo) & (t.amount_minor <= nhi))
+                )
+            )
+    return query
+
+
+async def scan_matches(
+    spec: "ConditionSpec", ledger_id: "uuid.UUID", *, cap: int
+) -> tuple[list[Transaction], bool]:
+    """Up to ``cap`` matching transactions (id order) + a truncation flag.
+
+    Narrowed SQL keyset batches, finished in Python by matches(). Worst case
+    scans the ledger (a CP1-volumes seam, same class as the tag filter);
+    the preview is a capped sample, never a cursor walk (D14).
+    """
+    base = Transaction.where(lambda t, lid=ledger_id: t.ledger_id == lid)
+    base = narrow(spec, base)
+    matched: list[Transaction] = []
+    cursor: str | None = None
+    while True:
+        rows, cursor = await paginate(base, cursor=cursor, limit=SCAN_BATCH)
+        for txn in rows:
+            if matches(spec, txn):
+                if len(matched) == cap:
+                    return matched, True
+                matched.append(txn)
+        if cursor is None:
+            return matched, False
