@@ -87,6 +87,23 @@ def test_conditions_and_compose() -> None:
     assert matches(spec, _txn(amount_minor=-951)) is False
 
 
+def test_zero_amount_matches_neither_out_nor_in() -> None:
+    # A $0 transaction is neither money out nor money in; only `either`
+    # may consider it (and then magnitude 0 can never equal a gt=0 value).
+    out = _spec({"amount": {"op": "equals", "value": 950, "direction": "out", "currency": "USD"}})
+    into = _spec({"amount": {"op": "equals", "value": 950, "direction": "in", "currency": "USD"}})
+    assert matches(out, _txn(amount_minor=0)) is False
+    assert matches(into, _txn(amount_minor=0)) is False
+
+
+def test_day_of_month_equals_and_upper_bound() -> None:
+    spec_eq = _spec({"day_of_month": {"op": "equals", "value": 30}})
+    assert matches(spec_eq, _txn(date=date(2026, 1, 30))) is True
+    assert matches(spec_eq, _txn(date=date(2026, 1, 29))) is False
+    spec_between = _spec({"day_of_month": {"op": "between", "lo": 28, "hi": 31}})
+    assert matches(spec_between, _txn(date=date(2026, 1, 31))) is True  # hi inclusive
+
+
 def test_amount_without_currency_is_a_loud_error() -> None:
     spec = _spec({"amount": {"op": "equals", "value": 950, "direction": "out"}})
     with pytest.raises(ValueError, match="currency"):
