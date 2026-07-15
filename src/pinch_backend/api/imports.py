@@ -44,11 +44,16 @@ from pinch_backend.imports.spec import MappingSpec
 from pinch_backend.jobs import classify_ledger
 from pinch_backend.models import (
     Account,
+    CorrectionActor,
+    CorrectionKind,
+    CorrectionLogEntry,
     Import,
     ImportProfile,
     ImportRow,
     ImportStatus,
     Ledger,
+    Proposal,
+    ProposalTag,
     Transaction,
     utcnow,
 )
@@ -567,13 +572,58 @@ async def delete_import(
     """This import never happened (stories 4, 10): transactions, rows, and
     the batch go atomically — unconditionally, dead = gone, even after the
     user has worked with the data. The audit trail is the structured event;
-    the learned profile survives. Forward contract (M5, bound here):
-    subsystems referencing transactions must tolerate retraction — the
-    correction log voids affected decisions with a later entry."""
+    the learned profile survives. The M4 retraction contract, bound here:
+    the correction log voids every not-yet-voided decision entry referencing
+    these transactions with a later entry, actor=user — never deleted."""
     batch = await _get_import(current_ledger, import_id)
     undone = batch.status is ImportStatus.COMMITTED
     batch_id = batch.id
     async with transaction():
+        txn_ids = [
+            t.id for t in await Transaction.where(lambda t: t.source_import_id == batch_id).all()
+        ]
+        if txn_ids:
+            # Retraction over CP3's tables (the M4 forward contract, bound
+            # here): proposals die with their transactions; log entries are
+            # voided with a later entry, never deleted.
+            proposal_ids = [
+                p.id
+                for p in await Proposal.where(
+                    lambda p, ids=txn_ids: p.transaction_id.in_(ids)
+                ).all()
+            ]
+            if proposal_ids:
+                await ProposalTag.where(
+                    lambda pt, ids=proposal_ids: pt.proposal_id.in_(ids)
+                ).delete()
+                await Proposal.where(lambda p, ids=proposal_ids: p.id.in_(ids)).delete()
+            decisions = await CorrectionLogEntry.where(
+                lambda e, ids=txn_ids: (
+                    (e.transaction_id.in_(ids)) & (e.kind == CorrectionKind.DECISION)
+                )
+            ).all()
+            decision_ids = [d.id for d in decisions]
+            already_voided = (
+                {
+                    v.voids
+                    for v in await CorrectionLogEntry.where(
+                        lambda v, ids=decision_ids: v.voids.in_(ids)
+                    ).all()
+                }
+                if decision_ids
+                else set()
+            )
+            for decision in decisions:
+                if decision.id in already_voided:
+                    continue
+                await CorrectionLogEntry.create(
+                    ledger=current_ledger,
+                    transaction_id=decision.transaction_id,
+                    kind=CorrectionKind.VOID,
+                    actor=CorrectionActor.USER,
+                    voids=decision.id,
+                    void_reason="import undone",
+                )
         await Transaction.where(lambda t: t.source_import_id == batch_id).delete()
         await ImportRow.where(lambda r: r.import_batch_id == batch_id).delete()
         await batch.delete()

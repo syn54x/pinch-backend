@@ -178,3 +178,48 @@ async def test_keyless_empty_taxonomy_sweeps_clean(client, run_jobs) -> None:
     await run_jobs()
     payees = {t["description_normalized"] for t in await _transactions(client)}
     assert "another" in payees
+
+
+async def test_undo_voids_log_and_retracts_history(client, run_jobs) -> None:
+    await _signup(client)
+    account_id = await _account(client)
+    import_id = await _commit_csv(client, account_id, auto_file=True)
+    await run_jobs()
+
+    decisions = (await client.get(f"{LOG}?kind=decision")).json()["items"]
+    assert decisions
+
+    undone = await client.delete(f"{IMPORTS}/{import_id}", headers=await _csrf(client))
+    assert undone.status_code == 204
+
+    assert await _transactions(client) == []
+    entries = (await client.get(LOG)).json()["items"]
+    voids = [e for e in entries if e["kind"] == "void"]
+    kept = [e for e in entries if e["kind"] == "decision"]
+    assert len(kept) == len(decisions)  # voided, never deleted
+    assert {v["voids"] for v in voids} == {d["id"] for d in decisions}
+    assert all(v["void_reason"] == "import undone" for v in voids)
+    assert all(v["actor"] == "user" for v in voids)
+
+    # History no longer matches the retracted payee: a fresh import of the
+    # same payee gets provenance=none, not history.
+    await _commit_csv(client, account_id)
+    await run_jobs()
+    by_payee = {t["description_normalized"]: t for t in await _transactions(client)}
+    assert by_payee["starbucks 123"]["proposal"]["provenance"] == "none"
+
+
+async def test_repeated_undo_cycles_keep_one_void_per_decision(client, run_jobs) -> None:
+    await _signup(client)
+    account_id = await _account(client)
+    first = await _commit_csv(client, account_id, auto_file=True)
+    await run_jobs()
+    await client.delete(f"{IMPORTS}/{first}", headers=await _csrf(client))
+    # Same file again: same payees, fresh transactions, fresh decisions.
+    second = await _commit_csv(client, account_id, auto_file=True)
+    await run_jobs()
+    await client.delete(f"{IMPORTS}/{second}", headers=await _csrf(client))
+    entries = (await client.get(LOG)).json()["items"]
+    decisions = [e for e in entries if e["kind"] == "decision"]
+    voids = [e for e in entries if e["kind"] == "void"]
+    assert len(voids) == len(decisions)  # exactly one void per decision, ever
