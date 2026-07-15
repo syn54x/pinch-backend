@@ -392,3 +392,38 @@ async def test_transaction_tags_are_sorted_by_name(client) -> None:
         f"{TX}/{txn_id}", json={"tags": ["zeta", "Alpha", "mid"]}, headers=await _csrf(client)
     )
     assert [t["name"] for t in r.json()["tags"]] == ["Alpha", "mid", "zeta"]
+
+
+async def test_transaction_without_proposal_serializes_null(client) -> None:
+    await _signup(client)
+    acct = await _account(client)
+    await _import(client, acct, [("2026-01-01", "-5.00", "PLAIN")])
+    txn = (await client.get(TX)).json()["items"][0]
+    assert txn["proposal"] is None
+
+
+async def test_pending_proposal_inlines_sorted_tags(client) -> None:
+    await _signup(client)
+    acct = await _account(client)
+    await _import(client, acct, [("2026-01-01", "-5.00", "TAGGED")])
+    # The pending proposal is pipeline-owned state; seed it at the model
+    # layer — the surface under test is the list's hydration.
+    from pinch_backend.models import (
+        Ledger,
+        Proposal,
+        ProposalProvenance,
+        ProposalTag,
+        Transaction,
+    )
+
+    ledger = (await Ledger.all())[0]
+    txn = (await Transaction.all())[0]
+    proposal = await Proposal.create(
+        ledger=ledger, transaction=txn, provenance=ProposalProvenance.NONE
+    )
+    for name in ["zeta", "Alpha"]:
+        await ProposalTag.create(ledger=ledger, proposal=proposal, name=name)
+    out = (await client.get(TX)).json()["items"][0]["proposal"]
+    assert out["tags"] == ["Alpha", "zeta"]  # sorted case-insensitively
+    assert out["provenance"] == "none"
+    assert out["category"] is None

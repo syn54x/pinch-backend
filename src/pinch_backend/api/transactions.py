@@ -28,7 +28,17 @@ from pinch_backend.api.pagination import (
     Page,
     paginate_by_date,
 )
-from pinch_backend.models import Category, Ledger, Tag, Transaction, TransactionTag, utcnow
+from pinch_backend.models import (
+    Category,
+    Ledger,
+    Proposal,
+    ProposalProvenance,
+    ProposalTag,
+    Tag,
+    Transaction,
+    TransactionTag,
+    utcnow,
+)
 from pinch_backend.observability import get_logger
 from pinch_backend.tags import apply_tag_set
 
@@ -45,9 +55,19 @@ class TagRef(BaseModel):
     name: str
 
 
+class ProposalOut(BaseModel):
+    """The pending pipeline suggestion riding the transaction (M5 CP3) —
+    enough for the inbox to render from the list alone."""
+
+    category: CategoryRef | None
+    tags: list[str]
+    display_name: str | None
+    provenance: ProposalProvenance
+
+
 class TransactionOut(BaseModel):
     """What a client may see about a transaction — an allowlist (M5 CP1).
-    A ``proposal`` field is added additively in CP3."""
+    ``proposal`` inlines the pending pipeline suggestion, if any (M5 CP3)."""
 
     id: uuid.UUID
     account_id: uuid.UUID
@@ -61,6 +81,7 @@ class TransactionOut(BaseModel):
     reviewed_at: datetime | None
     category: CategoryRef | None
     tags: list[TagRef]
+    proposal: ProposalOut | None
     created_at: datetime
 
 
@@ -96,14 +117,9 @@ async def _get(ledger: Ledger, txn_id: uuid.UUID) -> Transaction:
 
 
 async def hydrate_transactions(txns: list[Transaction]) -> list[TransactionOut]:
-    """Batch-hydrate categories and tags for a page in two queries each, never
-    per-row. Public: the rules preview (CP2) reuses it."""
-    cat_ids = sorted({t.category_id for t in txns if t.category_id is not None})  # ty: ignore[unresolved-attribute]
-    cats = (
-        {c.id: c for c in await Category.where(lambda c: c.id.in_(cat_ids)).all()}
-        if cat_ids
-        else {}
-    )
+    """Batch-hydrate categories, tags, and pending proposals for a page in a
+    fixed number of queries, never per-row. Public: the rules preview (CP2)
+    reuses it."""
     txn_ids = [t.id for t in txns]
     links = (
         await TransactionTag.where(lambda tt: tt.transaction_id.in_(txn_ids)).all()
@@ -120,9 +136,46 @@ async def hydrate_transactions(txns: list[Transaction]) -> list[TransactionOut]:
         )
     for refs in by_txn.values():
         refs.sort(key=lambda ref: ref.name.casefold())
+
+    proposals = (
+        await Proposal.where(lambda p, ids=txn_ids: p.transaction_id.in_(ids)).all()
+        if txn_ids
+        else []
+    )
+    by_txn_proposal = {p.transaction_id: p for p in proposals}  # ty: ignore[unresolved-attribute]
+    proposal_ids = [p.id for p in proposals]
+    proposal_tag_rows = (
+        await ProposalTag.where(lambda pt, ids=proposal_ids: pt.proposal_id.in_(ids)).all()
+        if proposal_ids
+        else []
+    )
+    tags_by_proposal: dict[uuid.UUID, list[str]] = {}
+    for pt in sorted(proposal_tag_rows, key=lambda pt: pt.name.casefold()):
+        tags_by_proposal.setdefault(pt.proposal_id, []).append(pt.name)  # ty: ignore[unresolved-attribute]
+
+    cat_ids = sorted(
+        {t.category_id for t in txns if t.category_id is not None}  # ty: ignore[unresolved-attribute]
+        | {p.category_id for p in proposals if p.category_id is not None}  # ty: ignore[unresolved-attribute]
+    )
+    cats = (
+        {c.id: c for c in await Category.where(lambda c: c.id.in_(cat_ids)).all()}
+        if cat_ids
+        else {}
+    )
+
     result = []
     for t in txns:
         cat = cats.get(t.category_id) if t.category_id else None  # ty: ignore[unresolved-attribute]
+        proposal = by_txn_proposal.get(t.id)
+        proposal_out = None
+        if proposal is not None:
+            pcat = cats.get(proposal.category_id) if proposal.category_id else None  # ty: ignore[unresolved-attribute]
+            proposal_out = ProposalOut(
+                category=CategoryRef(id=pcat.id, name=pcat.name) if pcat else None,
+                tags=tags_by_proposal.get(proposal.id, []),
+                display_name=proposal.proposed_display_name,
+                provenance=proposal.provenance,
+            )
         result.append(
             TransactionOut(
                 id=t.id,
@@ -137,6 +190,7 @@ async def hydrate_transactions(txns: list[Transaction]) -> list[TransactionOut]:
                 reviewed_at=t.reviewed_at,
                 category=CategoryRef(id=cat.id, name=cat.name) if cat else None,
                 tags=by_txn.get(t.id, []),
+                proposal=proposal_out,
                 created_at=t.created_at,
             )
         )
