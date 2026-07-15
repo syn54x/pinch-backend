@@ -174,3 +174,9 @@ async def test_amount_narrowing_direction_either_finds_both_signs(db) -> None:
     )
     found, _ = await scan_matches(spec, ledger.id, cap=50)
     assert {t.description_raw for t in found} == {"REFUND", "CHARGE"}
+
+
+async def test_narrow_rejects_currencyless_amount_like_matches_does(db) -> None:
+    spec = _spec({"amount": {"op": "equals", "value": 950, "direction": "out"}})
+    with pytest.raises(ValueError, match="currency"):
+        await scan_matches(spec, uuid.uuid7(), cap=50)

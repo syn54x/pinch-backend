@@ -105,7 +105,7 @@ async def test_patch_replaces_condition_whole_and_enforces_actions(client) -> No
         headers=await _csrf(client),
     )
     body = r.json()
-    assert "payee" not in {k: v for k, v in body["condition"].items() if v is not None}
+    assert "payee" not in body["condition"]
     # Clearing the only action is rejected: a rule must do something.
     r2 = await client.patch(
         f"{RULES}/{rule['id']}", json={"action_add_tags": []}, headers=await _csrf(client)

@@ -488,7 +488,9 @@ class Rule(TimestampMixin, Model):
     condition: dict
     """A validated ConditionSpec (versioned); never queried into — loaded
     and evaluated in Python only."""
-    action_category: Annotated[Optional["Category"], ForeignKey(related_name="rules")] = None
+    action_category: Annotated[
+        Optional["Category"], ForeignKey(related_name="rules", index=True)
+    ] = None
     """Propose this category (indexed shadow FK: the D4 delete-block query)."""
     action_add_tags: list[str] = Field(default_factory=list)
     """Tag names to propose, unioned across matching rules (D13)."""

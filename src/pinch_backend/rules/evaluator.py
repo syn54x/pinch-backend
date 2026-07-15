@@ -84,6 +84,8 @@ def narrow(spec: "ConditionSpec", query):
                 query = query.where(lambda t, p=pattern: t.description_normalized.like(p))
     if spec.amount is not None:
         clause = spec.amount
+        if clause.currency is None:
+            raise ValueError("amount condition has no currency; specs must be storage-complete")
         query = query.where(lambda t, c=clause.currency: t.currency == c)
         lo = clause.value if clause.op == "equals" else clause.lo
         hi = clause.value if clause.op == "equals" else clause.hi
