@@ -243,3 +243,66 @@ async def test_auto_file_is_import_scoped(db) -> None:
     watcher = await Transaction.get(bystander.id)
     assert watcher.reviewed_at is None  # proposed, NOT reviewed (Q2)
     assert await _proposal_for(bystander) is not None
+
+
+async def test_auto_file_reverifies_reviewed_before_consuming(db, monkeypatch) -> None:
+    ledger, account = await _seed(db)
+    coffee = await Category.create(ledger=ledger, name="Coffee P")
+    await Rule.create(
+        ledger=ledger,
+        condition={"version": 1, "payee": {"op": "contains", "value": "starbucks"}},
+        action_category=coffee,
+    )
+    batch = await Import.create(
+        ledger=ledger,
+        account=account,
+        status=ImportStatus.COMMITTED,
+        filename="backfill.csv",
+        file_bytes=b"",
+    )
+    # Order note: the auto-file loop walks by id (uuid7 = creation order),
+    # so txn_a is created (and consumed) before txn_b — the first
+    # consume_proposal call below is always txn_a's.
+    txn_a = await _txn(ledger, account, "starbucks", source_import=batch)
+    txn_b = await _txn(ledger, account, "starbucks", source_import=batch)
+
+    await sweep_ledger(ledger.id)  # both carry proposals now, still unreviewed
+
+    real_consume = pipeline.consume_proposal
+    calls = 0
+
+    async def consume_then_interleave_once(ledger_arg, txn_arg, **kwargs):
+        # Simulate a human PATCH (reviewed: true) landing on txn_b while
+        # txn_a's auto-file consume is in flight — the race in Finding 1,
+        # deterministically interleaved instead of concurrent.
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            now = datetime(2026, 7, 1, tzinfo=UTC)
+            await Transaction.where(lambda t, tid=txn_b.id: t.id == tid).update(
+                reviewed_at=now, updated_at=now
+            )
+        return await real_consume(ledger_arg, txn_arg, **kwargs)
+
+    monkeypatch.setattr(pipeline, "consume_proposal", consume_then_interleave_once)
+
+    await sweep_ledger(ledger.id, auto_file_import_id=batch.id)
+
+    filed_a = await Transaction.get(txn_a.id)
+    assert filed_a.reviewed_at is not None
+    assert await _proposal_for(txn_a) is None  # consumed
+    entries_a = await CorrectionLogEntry.where(
+        lambda e, tid=txn_a.id: e.transaction_id == tid
+    ).all()
+    assert len(entries_a) == 1
+    assert entries_a[0].actor is CorrectionActor.AUTO
+
+    # txn_b was reviewed mid-batch by the "human" — the freshness guard
+    # must skip it, not clobber it.
+    entry_b = await CorrectionLogEntry.where(
+        lambda e, tid=txn_b.id: e.transaction_id == tid
+    ).first()
+    assert entry_b is None  # never consumed
+    assert await _proposal_for(txn_b) is not None  # proposal row untouched
+    unfiled_b = await Transaction.get(txn_b.id)
+    assert unfiled_b.category_id is None  # not resurrected by the stale batch-time txn
