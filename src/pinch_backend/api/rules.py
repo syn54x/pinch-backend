@@ -14,6 +14,7 @@ from litestar import Router, delete, get, patch, post
 from litestar.di import NamedDependency
 from litestar.exceptions import ClientException, NotFoundException
 from litestar.params import FromPath, QueryParameter
+from litestar.status_codes import HTTP_200_OK
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from pinch_backend.api.pagination import (
@@ -23,9 +24,10 @@ from pinch_backend.api.pagination import (
     Page,
     paginate,
 )
-from pinch_backend.api.transactions import CategoryRef
+from pinch_backend.api.transactions import CategoryRef, TransactionOut, hydrate_transactions
 from pinch_backend.models import Category, Ledger, Rule, RuleStatus, User
 from pinch_backend.observability import get_logger
+from pinch_backend.rules.evaluator import scan_matches
 from pinch_backend.rules.spec import ConditionSpec
 
 log = get_logger(__name__)
@@ -68,6 +70,18 @@ class RuleOut(BaseModel):
     action_add_tags: list[str]
     action_rename_to: str | None
     created_at: datetime
+
+
+PREVIEW_CAP = 50
+"""A sample, not a cursor walk (D14): enough to build a rule with evidence."""
+
+
+class RulePreviewOut(BaseModel):
+    """Up to PREVIEW_CAP existing transactions the condition would match.
+    ``truncated`` means at least one more match exists beyond the sample."""
+
+    items: list[TransactionOut]
+    truncated: bool
 
 
 def parse_condition(payload: dict, default_currency: str) -> ConditionSpec:
@@ -172,6 +186,19 @@ async def list_rules(
     return Page(items=[await _out(r) for r in rows], next_cursor=next_cursor)
 
 
+@post("/preview", status_code=HTTP_200_OK)
+async def preview_rule(
+    data: dict,
+    current_ledger: NamedDependency[Ledger],
+    current_user: NamedDependency[User],
+) -> RulePreviewOut:
+    """Dry-run a bare condition against the ledger (story 9): works before
+    the rule exists, so rules are built with evidence, not hope."""
+    spec = parse_condition(data, current_user.primary_currency)
+    found, truncated = await scan_matches(spec, current_ledger.id, cap=PREVIEW_CAP)
+    return RulePreviewOut(items=await hydrate_transactions(found), truncated=truncated)
+
+
 @get("/{rule_id:uuid}")
 async def get_rule(
     rule_id: FromPath[uuid.UUID], current_ledger: NamedDependency[Ledger]
@@ -229,5 +256,5 @@ async def delete_rule(
 
 rules_router = Router(
     path="/api/v1/rules",
-    route_handlers=[create_rule, list_rules, get_rule, update_rule, delete_rule],
+    route_handlers=[create_rule, list_rules, preview_rule, get_rule, update_rule, delete_rule],
 )
