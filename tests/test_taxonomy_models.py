@@ -1,7 +1,7 @@
 """Model-layer invariants for the M5 CP1 tables (issue #19)."""
 
 import pytest
-from ferro import OperationalError, UniqueViolationError
+from ferro import ForeignKeyViolationError, OperationalError, UniqueViolationError
 
 from pinch_backend.models import (
     Category,
@@ -41,14 +41,19 @@ async def test_category_parent_fk_restricts_delete_at_the_db(db) -> None:
     the model seam (bypassing the API guard) to prove the DB itself refuses
     the cascade rather than silently deleting the child along with it.
 
-    Raised as OperationalError, not ForeignKeyViolationError: instance
-    .delete() goes through ferro's delete_filtered RPC, which does not map
-    the RESTRICT violation's SQLSTATE to IntegrityError's subclasses the way
-    row-write paths (create/save) do — a ferro exception-mapping gap
-    (ferro-orm), not a pinch_backend defect. What matters here is that the
-    DB rejects the delete outright rather than cascading."""
+    The exception CLASS is Postgres-version-dependent, so this test accepts
+    both: ferro's delete-path classification is sensitive to the server's
+    error wording — PG 17's "violates foreign key constraint" maps to
+    ForeignKeyViolationError, while PG 18's new "violates RESTRICT setting
+    of foreign key constraint" wording falls through to OperationalError
+    with sqlstate=None (ferro-orm#306). Pin ForeignKeyViolationError alone
+    once ferro classifies by SQLSTATE. What matters here is the invariant:
+    the DB rejects the delete outright rather than cascading."""
     ledger = await _ledger(db)
     food = await Category.create(ledger=ledger, name="Food")
-    await Category.create(ledger=ledger, name="Restaurants", parent=food)
-    with pytest.raises(OperationalError):
+    child = await Category.create(ledger=ledger, name="Restaurants", parent=food)
+    with pytest.raises((ForeignKeyViolationError, OperationalError)):
         await food.delete()
+    assert await Category.get(food.id) is not None
+    fresh_child = await Category.get(child.id)
+    assert fresh_child.parent_id == food.id  # ty: ignore[unresolved-attribute]
