@@ -143,4 +143,78 @@ async def review_transaction(
     )
 
 
-reviews_router = Router(path="/api/v1/transactions", route_handlers=[review_transaction])
+class ReviewBatchIn(BaseModel):
+    """Explicit ids only (<=1,000 clears a realistic month) — never
+    accept-by-filter. Duplicates are deduped preserving order."""
+
+    ids: list[uuid.UUID] = Field(min_length=1, max_length=1000)
+
+
+class ReviewBatchOut(BaseModel):
+    accepted: int
+    skipped: int
+    proposed_rules: list[RuleOut]
+
+
+@post("/review", status_code=HTTP_200_OK)
+async def review_batch(
+    data: ReviewBatchIn, current_ledger: NamedDependency[Ledger]
+) -> ReviewBatchOut:
+    ledger_id = current_ledger.id
+    ids: list[uuid.UUID] = []
+    seen: set[uuid.UUID] = set()
+    for wanted in data.ids:
+        if wanted not in seen:
+            seen.add(wanted)
+            ids.append(wanted)
+
+    txns = await Transaction.where(
+        lambda t, wanted=ids, lid=ledger_id: (t.ledger_id == lid) & (t.id.in_(wanted))
+    ).all()
+    by_id = {t.id: t for t in txns}
+    missing = [str(i) for i in ids if i not in by_id]
+    if missing:
+        # Validate-all-first: skipped means "already reviewed", never
+        # "silently didn't exist" — a stale or foreign id fails loudly.
+        raise NotFoundException(
+            detail="Unknown transactions in batch", extra={"missing_ids": missing}
+        )
+
+    accepted = skipped = 0
+    decided: dict[str, uuid.UUID | None] = {}
+    for wanted in ids:
+        txn = by_id[wanted]
+        if txn.reviewed_at is not None:
+            skipped += 1
+            continue
+        proposal, proposal_tags = await _pending_proposal(txn.id)
+        final_category = proposal.category_id if proposal else None  # ty: ignore[unresolved-attribute]
+        await consume_proposal(
+            current_ledger,
+            txn,
+            category_id=final_category,
+            tags=dedupe_tag_names(proposal_tags),
+            display_name=proposal.proposed_display_name if proposal else None,
+            actor=CorrectionActor.USER,
+        )
+        accepted += 1
+        decided[txn.description_normalized] = final_category
+
+    proposed: list[RuleOut] = []
+    for payee, category_id in decided.items():
+        rule = await maybe_propose_rule(current_ledger, payee, category_id)
+        if rule is not None:
+            proposed.append(await rule_out(rule))
+    log.info(
+        "review.batch_completed",
+        ledger_id=str(ledger_id),
+        accepted=accepted,
+        skipped=skipped,
+        rules_proposed=len(proposed),
+    )
+    return ReviewBatchOut(accepted=accepted, skipped=skipped, proposed_rules=proposed)
+
+
+reviews_router = Router(
+    path="/api/v1/transactions", route_handlers=[review_transaction, review_batch]
+)
