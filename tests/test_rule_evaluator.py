@@ -160,6 +160,34 @@ async def test_literal_like_metacharacter_matches_exactly(db) -> None:
     assert [t.description_raw for t in found] == ["100% JUICE CO"]
 
 
+async def test_literal_backslash_metacharacter_matches_exactly(db) -> None:
+    # Postgres's default LIKE escape char is backslash: 'ab\c' LIKE '%ab\c%'
+    # is FALSE there. A payee value containing a backslash must skip LIKE
+    # narrowing (matches() decides) — otherwise the narrowed scan silently
+    # under-selects relative to matches(), breaking the "narrowing only ever
+    # over-selects" invariant.
+    ledger = await _seed(
+        db,
+        [(r"AC\ME CORP", -500, date(2026, 1, 5)), ("ACME CORP", -600, date(2026, 1, 6))],
+    )
+    spec = _spec({"payee": {"op": "contains", "value": r"ac\me"}})
+    found, _ = await scan_matches(spec, ledger.id, cap=50)
+    assert [t.description_raw for t in found] == [r"AC\ME CORP"]
+
+
+async def test_equals_narrows_unconditionally_even_with_metacharacters(db) -> None:
+    # equals narrows with `==`, never LIKE — metacharacters (%, _, \) are
+    # inert in equality, so the metacharacter skip guard doesn't apply here;
+    # equals always narrows.
+    ledger = await _seed(
+        db,
+        [("100% JUICE CO", -500, date(2026, 1, 5)), ("SHELL OIL", -600, date(2026, 1, 6))],
+    )
+    spec = _spec({"payee": {"op": "equals", "value": "100% juice co"}})
+    found, _ = await scan_matches(spec, ledger.id, cap=50)
+    assert [t.description_raw for t in found] == ["100% JUICE CO"]
+
+
 async def test_amount_narrowing_direction_either_finds_both_signs(db) -> None:
     ledger = await _seed(
         db,

@@ -90,7 +90,7 @@ def parse_condition(payload: dict, default_currency: str) -> ConditionSpec:
     is a 400 in the envelope, never a 500."""
     filled = dict(payload)
     amount = filled.get("amount")
-    if isinstance(amount, dict) and not amount.get("currency"):
+    if isinstance(amount, dict) and amount.get("currency") is None:
         filled["amount"] = amount | {"currency": default_currency}
     try:
         return ConditionSpec.model_validate(filled)
@@ -228,11 +228,17 @@ async def update_rule(
             rule.action_category_id = category.id  # ty: ignore[unresolved-attribute]
         else:
             rule.action_category_id = None  # ty: ignore[unresolved-attribute]
-    if "action_add_tags" in fields and data.action_add_tags is not None:
-        rule.action_add_tags = data.action_add_tags
+    if "action_add_tags" in fields:
+        # Present-and-null clears, same tri-state as action_category_id —
+        # subject to the same "some action must survive" invariant below.
+        rule.action_add_tags = data.action_add_tags if data.action_add_tags is not None else []
     if "action_rename_to" in fields:
         rule.action_rename_to = data.action_rename_to
-    if "status" in fields and data.status is not None:
+    if "status" in fields:
+        if data.status is None:
+            raise ClientException(detail="status cannot be null")
+        if data.status == RuleStatus.PROPOSED:
+            raise ClientException(detail="only promotion proposes a rule")
         rule.status = data.status
 
     _assert_some_action(

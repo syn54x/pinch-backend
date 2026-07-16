@@ -24,7 +24,7 @@ from pinch_backend.auth.guards import (
 )
 from pinch_backend.auth.routes import auth_router
 from pinch_backend.db import FerroSessionMiddleware, connect_database, disconnect_database
-from pinch_backend.jobs import close_job_app, open_job_app
+from pinch_backend.jobs import close_job_app, ensure_job_schema, open_job_app
 from pinch_backend.observability import configure_observability
 from pinch_backend.settings import settings
 
@@ -135,7 +135,13 @@ def create_app(*, manage_database: bool = True) -> Litestar:
             "current_user": Provide(provide_current_user),
             "current_ledger": Provide(provide_current_ledger),
         },
-        on_startup=[connect_database, open_job_app] if manage_database else [],
+        # ensure_job_schema after open_job_app: the API process may start
+        # before any worker has ever run, so it can't rely on the worker
+        # having applied Procrastinate's schema first (finding 12, M5 CP4
+        # PR review) — without this, the first post-commit defer_async in a
+        # fresh environment raises against missing tables, turning a
+        # succeeded import commit into a client-visible 500.
+        on_startup=[connect_database, open_job_app, ensure_job_schema] if manage_database else [],
         on_shutdown=[close_job_app, disconnect_database] if manage_database else [],
     )
 

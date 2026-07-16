@@ -11,6 +11,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from pinch_backend.imports.fingerprint import normalize_description
+
 
 def _check_equals_between(op: str, value: int | None, lo: int | None, hi: int | None) -> None:
     if op == "equals":
@@ -24,7 +26,7 @@ def _check_equals_between(op: str, value: int | None, lo: int | None, hi: int | 
 
 
 class PayeeCondition(BaseModel):
-    model_config = ConfigDict(use_attribute_docstrings=True)
+    model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
 
     op: Literal["equals", "contains"]
     value: str = Field(min_length=1, max_length=200)
@@ -32,9 +34,15 @@ class PayeeCondition(BaseModel):
     (imports.fingerprint.normalize_description) — matching is case- and
     whitespace-insensitive by construction."""
 
+    @model_validator(mode="after")
+    def _value_normalizes_to_something(self) -> "PayeeCondition":
+        if not normalize_description(self.value):
+            raise ValueError("value must not be blank after normalization")
+        return self
+
 
 class AmountCondition(BaseModel):
-    model_config = ConfigDict(use_attribute_docstrings=True)
+    model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
 
     op: Literal["equals", "between"]
     value: int | None = Field(default=None, gt=0)
@@ -55,7 +63,7 @@ class AmountCondition(BaseModel):
 
 
 class DayOfMonthCondition(BaseModel):
-    model_config = ConfigDict(use_attribute_docstrings=True)
+    model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
 
     op: Literal["equals", "between"]
     value: int | None = Field(default=None, ge=1, le=31)
@@ -72,7 +80,7 @@ class DayOfMonthCondition(BaseModel):
 
 
 class ConditionSpec(BaseModel):
-    model_config = ConfigDict(use_attribute_docstrings=True)
+    model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
 
     version: Literal[1] = 1
     """Schema version. Evolve ADDITIVELY (Literal[1, 2] / discriminated

@@ -67,21 +67,24 @@ SCAN_BATCH = 500
 def narrow(spec: "ConditionSpec", query):
     """Best-effort SQL pre-filter: never wrong, sometimes absent.
 
-    - payee: equality or LIKE — but only when the normalized value carries
-      no LIKE metacharacter (ferro's like() has no ESCAPE support and SQLite
-      no default escape char, so portable escaping is impossible; a %/_
-      value simply skips narrowing and lets matches() decide).
+    - payee equals: always narrows with `==` — LIKE metacharacters (and the
+      backslash escape char below) are inert in equality, so there's nothing
+      to skip.
+    - payee contains: LIKE — but only when the normalized value carries no
+      LIKE metacharacter. Postgres's default LIKE escape char is backslash,
+      and ferro's like() has no ESCAPE support, so portable escaping is
+      impossible; a value containing `%`, `_`, or `\\` simply skips
+      narrowing and lets matches() decide.
     - amount: currency equality + sign-aware magnitude range (OR for either).
     - day_of_month: no SQL (ferro has no date-part extraction — by design).
     """
     if spec.payee is not None:
         needle = normalize_description(spec.payee.value)
-        if "%" not in needle and "_" not in needle:
-            if spec.payee.op == "equals":
-                query = query.where(lambda t, n=needle: t.description_normalized == n)
-            else:
-                pattern = f"%{needle}%"
-                query = query.where(lambda t, p=pattern: t.description_normalized.like(p))
+        if spec.payee.op == "equals":
+            query = query.where(lambda t, n=needle: t.description_normalized == n)
+        elif "%" not in needle and "_" not in needle and "\\" not in needle:
+            pattern = f"%{needle}%"
+            query = query.where(lambda t, p=pattern: t.description_normalized.like(p))
     if spec.amount is not None:
         clause = spec.amount
         if clause.currency is None:

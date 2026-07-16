@@ -10,7 +10,7 @@ from datetime import datetime
 from ferro import transaction
 from litestar import Router, delete, get, post
 from litestar.di import NamedDependency
-from litestar.exceptions import HTTPException, NotFoundException
+from litestar.exceptions import ClientException, HTTPException, NotFoundException
 from litestar.params import FromPath
 from litestar.status_codes import HTTP_409_CONFLICT
 from pydantic import BaseModel, Field
@@ -45,6 +45,8 @@ def _out(t: Tag) -> TagOut:
 
 @post("/")
 async def create_tag(data: TagCreateIn, current_ledger: NamedDependency[Ledger]) -> TagOut:
+    if not data.name.strip():
+        raise ClientException(detail="Tag name cannot be blank")
     fold = data.name.strip().casefold()
     ledger_id = current_ledger.id
     existing = await Tag.where(lambda t: (t.ledger_id == ledger_id) & (t.name_fold == fold)).first()

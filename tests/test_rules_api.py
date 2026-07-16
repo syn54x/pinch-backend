@@ -1,5 +1,7 @@
 """/api/v1/rules over the public seam (M5 CP2, #20)."""
 
+from pinch_backend.models import Ledger, Rule, RuleStatus
+
 RULES = "/api/v1/rules"
 PASSWORD = "correct horse battery staple"
 
@@ -71,6 +73,42 @@ async def test_create_rejects_empty_or_versionless_garbage_condition(client) -> 
     ).status_code == 400
 
 
+async def test_create_rejects_whitespace_only_payee_value(client) -> None:
+    await _signup(client)
+    r = await _create_rule(client, condition={"payee": {"op": "contains", "value": " "}})
+    assert r.status_code == 400
+
+
+async def test_create_rejects_unknown_top_level_condition_key(client) -> None:
+    await _signup(client)
+    r = await _create_rule(
+        client,
+        condition={
+            "day_of_week": {"op": "equals", "value": 1},
+            "payee": {"op": "equals", "value": "x"},
+        },
+    )
+    assert r.status_code == 400
+
+
+async def test_create_rejects_unknown_nested_condition_key(client) -> None:
+    await _signup(client)
+    r = await _create_rule(
+        client,
+        condition={"payee": {"op": "equals", "value": "x", "case_sensitive": True}},
+    )
+    assert r.status_code == 400
+
+
+async def test_create_rejects_blank_currency_instead_of_defaulting(client) -> None:
+    await _signup(client)
+    r = await _create_rule(
+        client,
+        condition={"amount": {"op": "equals", "value": 999, "direction": "out", "currency": ""}},
+    )
+    assert r.status_code == 400
+
+
 async def test_foreign_action_category_is_a_404(client) -> None:
     await _signup(client, "a@example.com")
     cat = await _category(client, "Mine2")
@@ -111,6 +149,61 @@ async def test_patch_replaces_condition_whole_and_enforces_actions(client) -> No
         f"{RULES}/{rule['id']}", json={"action_add_tags": []}, headers=await _csrf(client)
     )
     assert r2.status_code == 400
+
+
+async def test_patch_null_add_tags_clears_them(client) -> None:
+    await _signup(client)
+    cat = await _category(client, "Groceries4")
+    rule = (await _create_rule(client, action_category_id=cat["id"])).json()
+    assert rule["action_add_tags"] == ["bulk"]
+    r = await client.patch(
+        f"{RULES}/{rule['id']}", json={"action_add_tags": None}, headers=await _csrf(client)
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["action_add_tags"] == []
+
+
+async def test_patch_null_add_tags_400s_when_it_was_the_only_action(client) -> None:
+    await _signup(client)
+    rule = (await _create_rule(client)).json()
+    r = await client.patch(
+        f"{RULES}/{rule['id']}", json={"action_add_tags": None}, headers=await _csrf(client)
+    )
+    assert r.status_code == 400
+
+
+async def test_patch_null_status_is_a_400(client) -> None:
+    await _signup(client)
+    rule = (await _create_rule(client)).json()
+    r = await client.patch(
+        f"{RULES}/{rule['id']}", json={"status": None}, headers=await _csrf(client)
+    )
+    assert r.status_code == 400
+
+
+async def test_patch_rejects_fabricated_proposed_status(client) -> None:
+    await _signup(client)
+    rule = (await _create_rule(client)).json()
+    r = await client.patch(
+        f"{RULES}/{rule['id']}", json={"status": "proposed"}, headers=await _csrf(client)
+    )
+    assert r.status_code == 400
+
+
+async def test_patch_proposed_to_active_still_works(client) -> None:
+    await _signup(client)
+    ledger = (await Ledger.all())[0]
+    rule = await Rule.create(
+        ledger=ledger,
+        status=RuleStatus.PROPOSED,
+        condition={"payee": {"op": "equals", "value": "starbucks"}},
+        action_add_tags=["coffee"],
+    )
+    r = await client.patch(
+        f"{RULES}/{rule.id}", json={"status": "active"}, headers=await _csrf(client)
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "active"
 
 
 async def test_delete_then_404(client) -> None:
@@ -200,6 +293,22 @@ async def test_preview_caps_at_50_and_flags_truncation(client) -> None:
     body = r.json()
     assert len(body["items"]) == 50
     assert body["truncated"] is True
+
+
+async def test_preview_at_exactly_the_cap_is_not_truncated(client) -> None:
+    await _signup(client)
+    await _import_rows(
+        client,
+        [("2026-01-10", f"-{i + 1}.00", f"COSTCO RUN {i}") for i in range(50)],
+    )
+    r = await client.post(
+        f"{RULES}/preview",
+        json={"payee": {"op": "contains", "value": "costco"}},
+        headers=await _csrf(client),
+    )
+    body = r.json()
+    assert len(body["items"]) == 50
+    assert body["truncated"] is False
 
 
 async def test_preview_fills_currency_and_rejects_garbage(client) -> None:

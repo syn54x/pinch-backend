@@ -29,7 +29,7 @@ from pinch_backend.api.pagination import (
     Page,
     paginate_by_date,
 )
-from pinch_backend.classification.consume import consume_proposal
+from pinch_backend.classification.consume import AlreadyReviewedError, consume_proposal
 from pinch_backend.classification.promotion import maybe_propose_rule
 from pinch_backend.imports.fingerprint import compute_fingerprint, normalize_description
 from pinch_backend.jobs import classify_ledger
@@ -94,9 +94,10 @@ class TransactionOut(BaseModel):
 class TransactionPatchIn(BaseModel):
     """User-data allowlist (M5). Only the fields present in the request body
     are applied — source data (date, amount, description, fingerprint) is not
-    addressable here."""
+    addressable here, and unknown keys are a 400 (extra="forbid"), never a
+    silently accepted no-op."""
 
-    model_config = ConfigDict(use_attribute_docstrings=True)
+    model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
 
     category_id: uuid.UUID | None = None
     """Present-and-null clears the category (→ uncategorized)."""
@@ -104,7 +105,8 @@ class TransactionPatchIn(BaseModel):
         default=None, max_length=50
     )
     """The complete tag set for the transaction; reconciled (implicit-create
-    new names, detach removed ones). Present-and-empty clears all tags. Each
+    new names, detach removed ones). Present-and-empty clears all tags, and
+    an explicit null does the same (both mean "no tags"). Each
     name is bounded to the same 100 chars POST /tags enforces on this table,
     and the set is capped so one PATCH can't mint an unbounded tag list."""
     display_name: str | None = Field(default=None, min_length=1, max_length=100)
@@ -325,14 +327,22 @@ async def patch_transaction(
             if "tags" in fields
             else await _current_tag_names(txn)
         )
-        await consume_proposal(
-            current_ledger,
-            txn,
-            category_id=txn.category_id,  # ty: ignore[unresolved-attribute]
-            tags=final_tags,
-            display_name=txn.display_name,
-            actor=CorrectionActor.USER,
-        )
+        try:
+            await consume_proposal(
+                current_ledger,
+                txn,
+                category_id=txn.category_id,  # ty: ignore[unresolved-attribute]
+                tags=final_tags,
+                display_name=txn.display_name,
+                actor=CorrectionActor.USER,
+            )
+        except AlreadyReviewedError:
+            # A concurrent decision won between this handler's reviewed_at
+            # read and consume's in-transaction CAS claim.
+            raise HTTPException(
+                status_code=HTTP_409_CONFLICT,
+                detail="Already reviewed; un-review first (PATCH reviewed: false)",
+            ) from None
         await maybe_propose_rule(
             current_ledger,
             txn.description_normalized,
@@ -372,14 +382,17 @@ class TransactionCreateIn(BaseModel):
     """Manual entry (M5 CP4): source fields + the full optional user-data
     set. Manual accounts only; the currency is always the account's. With
     category or tags the transaction is reviewed at birth; display_name and
-    notes alone are annotations, not decisions."""
+    notes alone are annotations, not decisions. Unknown keys are a 400
+    (extra="forbid")."""
 
-    model_config = ConfigDict(use_attribute_docstrings=True)
+    model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
 
     account_id: uuid.UUID
     date: date
-    amount_minor: int
-    """Signed from the account's perspective — negative is money out."""
+    amount_minor: int = Field(ge=-2_147_483_647, le=2_147_483_647)
+    """Signed from the account's perspective — negative is money out.
+    Bounded to the int4 column width so an out-of-range amount is a 400,
+    never a database error."""
     description: str = Field(min_length=1, max_length=500)
     category_id: uuid.UUID | None = None
     tags: list[Annotated[str, Field(min_length=1, max_length=100)]] | None = Field(
@@ -434,6 +447,9 @@ async def create_transaction(
             # provenance=none — the pipeline never ran. Nested transaction
             # is atomic with the outer (scratch-verified): no observable
             # state where the row exists categorized-but-unlogged.
+            # AlreadyReviewedError cannot fire here — the row was created
+            # unreviewed inside this same transaction, so no concurrent
+            # decision can have claimed it; no handler on purpose.
             await consume_proposal(
                 current_ledger,
                 txn,

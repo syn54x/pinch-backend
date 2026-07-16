@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from ferro import UniqueViolationError, transaction
 
 from pinch_backend.classification.classifier import active_classifier
-from pinch_backend.classification.consume import consume_proposal
+from pinch_backend.classification.consume import AlreadyReviewedError, consume_proposal
 from pinch_backend.classification.history import history_match
 from pinch_backend.models import (
     CorrectionActor,
@@ -161,6 +161,15 @@ async def sweep_ledger(
                     # READ COMMITTED. The unique transaction FK is a separate
                     # guard — it only protects sweep-vs-sweep races, not a
                     # sweep racing a human decision.
+                    #
+                    # Accepted residual: a review can still commit inside that
+                    # one remaining round trip (between this SELECT and the
+                    # INSERT below), leaving an orphan proposal attached to a
+                    # reviewed transaction — rendered until a later consume
+                    # (review after un-review) deletes it. No lock closes this
+                    # here by design; the decision itself is protected by
+                    # consume_proposal's in-transaction CAS claim, so the
+                    # orphan can never override or re-stamp a human decision.
                     txn_id = txn.id
                     fresh = await Transaction.where(
                         lambda t, tid=txn_id: (t.id == tid) & (t.reviewed_at == None)  # noqa: E711
@@ -211,7 +220,10 @@ async def sweep_ledger(
                     lambda p, tid=txn_id: p.transaction_id == tid
                 ).first()
                 if proposal is None:
-                    continue  # another sweep is mid-write; the retry sweeps it
+                    # No proposal on an unreviewed row of this import: a
+                    # concurrent human consume most likely took it (there is
+                    # no auto-file retry) — skipping is the correct outcome.
+                    continue
                 proposal_id = proposal.id
                 tag_names = [
                     pt.name
@@ -221,27 +233,32 @@ async def sweep_ledger(
                     .order_by(lambda pt: pt.id)
                     .all()
                 ]
-                # Freshness re-check (mirrors the write-phase guard above):
-                # the proposal/tag fetches just awaited past this batch's
-                # fetch, so a human PATCH (reviewed/category/notes) may have
-                # landed on this row in the meantime. Re-reading reviewed_at
-                # here, immediately before consuming, shrinks that window to
-                # a single round trip, and passing `fresh` (not the stale
-                # `txn`) means consume's whole-row save can't resurrect
-                # stale notes/display_name either.
+                # Freshness re-check — noise reduction, not the guard: the
+                # airtight unreviewed -> reviewed guard is consume_proposal's
+                # in-transaction CAS claim (AlreadyReviewedError below). The
+                # proposal/tag fetches just awaited past this batch's fetch,
+                # so re-reading reviewed_at here skips rows a human already
+                # decided without opening a doomed write transaction, and
+                # passing `fresh` (not the stale `txn`) means consume's
+                # whole-row save can't resurrect stale notes/display_name.
                 fresh = await Transaction.where(
                     lambda t, tid=txn_id: (t.id == tid) & (t.reviewed_at == None)  # noqa: E711
                 ).first()
                 if fresh is None:
                     continue  # reviewed while this batch was in flight — a human decided
-                await consume_proposal(
-                    ledger,
-                    fresh,
-                    category_id=proposal.category_id,  # ty: ignore[unresolved-attribute]
-                    tags=tag_names,
-                    display_name=proposal.proposed_display_name,
-                    actor=CorrectionActor.AUTO,
-                )
+                try:
+                    await consume_proposal(
+                        ledger,
+                        fresh,
+                        category_id=proposal.category_id,  # ty: ignore[unresolved-attribute]
+                        tags=tag_names,
+                        display_name=proposal.proposed_display_name,
+                        actor=CorrectionActor.AUTO,
+                    )
+                except AlreadyReviewedError:
+                    # A human decided while consume was in flight — the same
+                    # skip as `fresh is None`, one round trip later.
+                    continue
                 auto_filed += 1
         log.info(
             "import.auto_filed",

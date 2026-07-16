@@ -380,6 +380,142 @@ async def test_dismissed_tombstone_blocks_but_delete_reopens(client, run_jobs) -
     assert fresh["id"] != rule["id"]
 
 
+async def test_review_losing_the_cas_race_answers_the_same_409(client, run_jobs, monkeypatch):
+    """Finding-4 translation, single review: a concurrent decision commits
+    between the handler's 409 pre-check and consume's in-transaction claim.
+    The deterministic seam marks the row reviewed just before delegating to
+    the real consume — its CAS raises, the endpoint answers 409, and the
+    concurrent decision's data stands."""
+    from pinch_backend.api import reviews as reviews_module
+    from pinch_backend.models import Transaction, utcnow
+
+    await _signup(client)
+    account_id = await _account(client)
+    await _commit_csv(client, account_id, rows=[("2026-07-01", "-5.00", "STARBUCKS 123")])
+    await run_jobs()
+    txn = await _inbox_txn(client)
+
+    real_consume = reviews_module.consume_proposal
+
+    async def review_wins_then_delegate(ledger_arg, txn_arg, **kwargs):
+        now = utcnow()
+        await Transaction.where(lambda t, tid=txn_arg.id: t.id == tid).update(
+            reviewed_at=now, updated_at=now
+        )
+        return await real_consume(ledger_arg, txn_arg, **kwargs)
+
+    monkeypatch.setattr(reviews_module, "consume_proposal", review_wins_then_delegate)
+
+    r = await _review(client, txn["id"], {"tags": ["mine"]})
+    assert r.status_code == 409, r.text
+    after = (await client.get(f"{TX}/{txn['id']}")).json()
+    assert after["tags"] == []  # the losing review applied nothing
+    entries = (await client.get(LOG, params={"transaction_id": txn["id"]})).json()["items"]
+    assert entries == []  # no duplicate decision entry
+
+
+async def test_batch_counts_a_concurrent_decision_as_skipped(client, run_jobs, monkeypatch):
+    """Finding-4 translation, batch: consume raising AlreadyReviewedError
+    mid-batch (a concurrent decision won) counts as skipped — it IS already
+    reviewed — and that transaction feeds no promotion evidence."""
+    from pinch_backend.api import reviews as reviews_module
+    from pinch_backend.classification.consume import AlreadyReviewedError
+
+    await _signup(client)
+    account_id = await _account(client)
+    await _commit_csv(
+        client,
+        account_id,
+        rows=[("2026-07-01", "-5.00", "STARBUCKS 123"), ("2026-07-02", "-42.00", "MYSTERY CO")],
+    )
+    await run_jobs()
+    txns = await _transactions(client)
+    loser = next(t for t in txns if t["description_raw"] == "MYSTERY CO")
+
+    real_consume = reviews_module.consume_proposal
+
+    async def consume_unless_raced(ledger_arg, txn_arg, **kwargs):
+        if str(txn_arg.id) == loser["id"]:
+            raise AlreadyReviewedError(loser["id"])
+        return await real_consume(ledger_arg, txn_arg, **kwargs)
+
+    monkeypatch.setattr(reviews_module, "consume_proposal", consume_unless_raced)
+
+    r = await _batch(client, [t["id"] for t in txns])
+    assert r.status_code == 200, r.text
+    assert r.json() == {"accepted": 1, "skipped": 1, "proposed_rules": []}
+
+
+# --- Explicit-null tri-state at the review seam (PR review, finding 13):
+# present-and-null is a decision, not an omission. -------------------------
+
+
+async def _rename_rule(client, *, rename_to: str = "Starbucks") -> None:
+    r = await client.post(
+        RULES,
+        json={
+            "condition": {"payee": {"op": "contains", "value": "starbucks"}},
+            "action_rename_to": rename_to,
+        },
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 201, r.text
+
+
+async def test_null_display_name_rejects_the_proposal_rename_as_corrected(client, run_jobs) -> None:
+    await _signup(client)
+    account_id = await _account(client)
+    await _rename_rule(client)
+    txn = await _arrive(client, account_id, "01", run_jobs)
+    assert txn["proposal"]["display_name"] == "Starbucks"
+    r = await _review(client, txn["id"], {"display_name": None})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["result"] == "corrected"  # rejecting the rename IS a correction
+    assert body["transaction"]["display_name"] is None  # rename not applied
+    entries = (await client.get(LOG, params={"transaction_id": txn["id"]})).json()["items"]
+    assert entries[0]["proposal_display_name"] == "Starbucks"
+    assert entries[0]["decision_display_name"] is None
+
+
+async def test_null_category_clears_against_a_categorized_proposal(client, run_jobs) -> None:
+    await _signup(client)
+    account_id = await _account(client)
+    coffee = await _category(client, "Coffee")
+    first = await _arrive(client, account_id, "01", run_jobs)
+    await _review(client, first["id"], {"category_id": coffee})  # history seed
+    second = await _arrive(client, account_id, "02", run_jobs)
+    assert second["proposal"]["category"]["id"] == coffee
+    r = await _review(client, second["id"], {"category_id": None})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["result"] == "corrected"  # uncategorized-accept against a proposed category
+    assert body["transaction"]["category"] is None
+    assert body["transaction"]["reviewed_at"] is not None
+
+
+async def test_empty_and_null_tags_both_clear_against_a_tagged_proposal(client, run_jobs) -> None:
+    await _signup(client)
+    account_id = await _account(client)
+    r = await client.post(
+        RULES,
+        json={
+            "condition": {"payee": {"op": "contains", "value": "starbucks"}},
+            "action_add_tags": ["treat"],
+        },
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 201, r.text
+    for day, tags_value in (("01", []), ("02", None)):
+        txn = await _arrive(client, account_id, day, run_jobs)
+        assert txn["proposal"]["tags"] == ["treat"]
+        reviewed = await _review(client, txn["id"], {"tags": tags_value})
+        assert reviewed.status_code == 200, reviewed.text
+        body = reviewed.json()
+        assert body["result"] == "corrected"  # dropping the proposal's tags is a diff
+        assert body["transaction"]["tags"] == []
+
+
 async def test_consume_leaves_notes_untouched(client, run_jobs) -> None:
     """Non-vacuous (CP3 debt): notes carries a real value through review."""
     await _signup(client)
