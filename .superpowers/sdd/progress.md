@@ -113,3 +113,20 @@ All 19 findings addressed in one combined commit (4 sequential fix groups, per-g
 - Major 3: narrow() skips contains-narrowing on backslash too; equals always narrows (== not LIKE); docstring de-sqlite'd
 - Major 4: consume_proposal CAS claim (UPDATE ... WHERE reviewed_at IS NULL) + AlreadyReviewedError; callers translate (409/skip/continue); orphan-proposal residual documented in pipeline phase-1 comment (accepted)
 - Minors/nits 5-19 all fixed: delete-reassign e2e tests, sibling-name trim+casefold, tags blank-name 400, payee normalize-nonempty, spec extra=forbid, Transaction.category index, amount_minor int4 bounds, API-startup ensure_job_schema, tri-state pinned/aligned (txn tags null-clears; review null-display=corrected; rules null add_tags clears + null status 400s), extra=forbid on txn body models, status=proposed fabrication 400, stale comments fixed, preview-cap + tampered-cursor tests
+
+# M6 — execution ledger
+
+PRD: #24 • Branch: m6-transfers-splits (PR #30) • Sessions started 2026-07-16
+
+## CP0 (#25): ferro scratch-verification spike
+CP0: complete (findings comment posted 2026-07-16; scratch scripts run against Postgres 18 and deleted). Verdict 2/4:
+- cap 1 (two nullable unique FKs on one model): VERIFIED — unique=True per FK, enforcement via per-column unique index, UniqueViolationError on occupied re-reference, NULLs don't collide. Note: ferro on_delete defaults to CASCADE — CP2's Transfer model should spell its choice explicitly.
+- cap 2 (EXISTS membership from Transaction root): MISS — BackRefs never enter __ferro_relation_specs__ (forward-FK-only traversal); in_() rejects subqueries. PRD 0008 → ferro-orm#307.
+- cap 3 (OR across left-joined child): MISS — same root cause. PRD 0009 → ferro-orm#308.
+- cap 4 (on_delete=CASCADE): VERIFIED — DDL emits ON DELETE CASCADE; lines die with their transaction.
+
+## Slice status after CP0
+- CP1 (#26): BLOCKED by ferro-orm#308 (native edge wired, db id). Do not start; no id-materialization workaround (ADR-0003).
+- CP2 (#27): BLOCKED by ferro-orm#307 (native edge wired). Same rule.
+- CP4 (#29): additionally blocked by ferro-orm#307 (history-stage extension) — edge wired.
+- Resume protocol (the CP3/ferro#302 precedent): when ferro ships, bump the floor in pyproject → uv sync → re-run the two upstream-issue repros to confirm the verified spelling → proceed with CP1/CP2 TDD. Both upstream issues carry runnable repros.

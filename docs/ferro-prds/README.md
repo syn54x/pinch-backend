@@ -13,3 +13,7 @@ upstream issue body is the canonical PRD; the drafts here are historical.
 | 0003 | JSONB columns | filed: [ferro-orm#260](https://github.com/syn54x/ferro-orm/issues/260) |
 | 0004 | Static typing for shadow FK columns & relation traversal | filed: [ferro-orm#290](https://github.com/syn54x/ferro-orm/issues/290) |
 | 0005 | `bulk_create` chunking under backend bind-parameter limits | delivered in 0.16.1: [ferro-orm#298](https://github.com/syn54x/ferro-orm/issues/298) |
+| 0006 | `CREATE TABLE` ordering around self-referential FKs | delivered in 0.16.2: [ferro-orm#302](https://github.com/syn54x/ferro-orm/issues/302) |
+| 0007 | DELETE-path FK-violation exception mapping | filed: [ferro-orm#306](https://github.com/syn54x/ferro-orm/issues/306) |
+| 0008 | Reverse-relation membership predicates (EXISTS) | filed: [ferro-orm#307](https://github.com/syn54x/ferro-orm/issues/307) — blocks M6 #27, #29 |
+| 0009 | OR-composition across a left-joined reverse child | filed: [ferro-orm#308](https://github.com/syn54x/ferro-orm/issues/308) — blocks M6 #26 |
