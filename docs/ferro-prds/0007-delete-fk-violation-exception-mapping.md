@@ -9,23 +9,19 @@ category-delete API guards (PR #23 review, finding 2).
 
 ## Summary
 
-ferro maps Postgres FK violations (SQLSTATE class 23503) into its exception
-hierarchy on the **save** path but not on either **delete** path. An INSERT
-with a dangling FK raises `ForeignKeyViolationError` (an `IntegrityError`
-subclass, as documented); the same 23503 violation triggered by deleting a
-RESTRICT-referenced parent — via instance `.delete()` or filtered
-`.where(...).delete()` — surfaces as bare `OperationalError`.
+> **Corrected 2026-07-16** (after the CI-vs-local divergence): the original
+> framing ("delete paths never map") was too broad. The behavior is
+> **Postgres-version-dependent**: on PG 17 the delete path classifies the
+> RESTRICT violation correctly (`ForeignKeyViolationError`); on PG 18.4 the
+> same operation surfaces `OperationalError` with `sqlstate=None`. PG 18
+> changed the RESTRICT message wording ("violates **RESTRICT setting of**
+> foreign key constraint"), so classification evidently keys on message
+> text rather than SQLSTATE, and the SQLSTATE isn't propagated on the
+> fallback wrap. The save path is unaffected (INSERT wording unchanged in
+> PG 18). Two asks: classify by SQLSTATE (23503), and carry `sqlstate`
+> even when classification misses.
 
-Callers who use `RESTRICT` as a DB-level backstop (the natural pairing with
-request-time guards) cannot catch FK violations uniformly: the same
-integrity failure is an `IntegrityError` on one path and an operational
-error on the other. Pinch's test for the backstop is currently pinned to
-`OperationalError` (`tests/test_taxonomy_models.py::
-test_category_parent_fk_restricts_delete_at_the_db`) with a comment noting
-it's asserting the wrong contract on purpose — it should flip to
-`ForeignKeyViolationError` when this is fixed.
-
-## Minimal repro (ferro 0.16.2, Postgres 17)
+## Minimal repro (ferro 0.16.2; run against Postgres 18 to see the miss)
 
 ```python
 import asyncio, uuid
@@ -104,8 +100,9 @@ at once, not just FK violations.
 
 ## Impact on Pinch when fixed
 
-Flip the pinned exception in
+Already made version-agnostic in `d033032`:
 `tests/test_taxonomy_models.py::test_category_parent_fk_restricts_delete_at_the_db`
-from `OperationalError` to `ForeignKeyViolationError` and delete its
-apology comment. No production code change — the API guards answer 409
-before the backstop can fire; the backstop firing is a loud 500 either way.
+accepts either class and pins the invariant (delete refused, rows intact).
+When ferro classifies by SQLSTATE, narrow it to `ForeignKeyViolationError`
+alone. CI and dev are now both on postgres:18 (the version skew that hid
+this is closed).
