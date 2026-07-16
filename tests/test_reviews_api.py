@@ -261,3 +261,85 @@ async def test_read_scope_pat_is_refused_by_review_with_403(client) -> None:
         headers=_bearer(token),
     )
     assert r.status_code == 403
+
+
+async def _batch(client, ids: list[str]):
+    return await client.post(f"{TX}/review", json={"ids": ids}, headers=await _csrf(client))
+
+
+async def test_batch_counts_are_honest_and_idempotent(client, run_jobs) -> None:
+    await _signup(client)
+    account_id = await _account(client)
+    await _commit_csv(
+        client,
+        account_id,
+        rows=[
+            ("2026-07-01", "-5.00", "STARBUCKS 123"),
+            ("2026-07-02", "-42.00", "MYSTERY CO"),
+            ("2026-07-03", "-7.00", "PEETS"),
+        ],
+    )
+    await run_jobs()
+    ids = [t["id"] for t in await _transactions(client)]
+    await _review(client, ids[0])  # one already reviewed
+    r = await _batch(client, ids)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"accepted": 2, "skipped": 1, "proposed_rules": []}
+    again = await _batch(client, ids)
+    assert again.json() == {"accepted": 0, "skipped": 3, "proposed_rules": []}
+    assert all(t["reviewed_at"] is not None for t in await _transactions(client))
+
+
+async def test_batch_unknown_id_404s_and_consumes_nothing(client, run_jobs) -> None:
+    import uuid as _uuid
+
+    await _signup(client)
+    account_id = await _account(client)
+    await _commit_csv(client, account_id)
+    await run_jobs()
+    ids = [t["id"] for t in await _transactions(client)]
+    ghost = str(_uuid.uuid7())
+    r = await _batch(client, [*ids, ghost])
+    assert r.status_code == 404
+    assert ghost in str(r.json())
+    assert all(t["reviewed_at"] is None for t in await _transactions(client))
+
+
+async def test_batch_duplicate_ids_count_once(client, run_jobs) -> None:
+    await _signup(client)
+    account_id = await _account(client)
+    await _commit_csv(client, account_id, rows=[("2026-07-01", "-5.00", "STARBUCKS 123")])
+    await run_jobs()
+    (txn,) = await _transactions(client)
+    r = await _batch(client, [txn["id"], txn["id"]])
+    assert r.json()["accepted"] == 1
+    assert r.json()["skipped"] == 0
+
+
+async def test_batch_cap_1000(client) -> None:
+    import uuid as _uuid
+
+    await _signup(client)
+    r = await _batch(client, [str(_uuid.uuid7()) for _ in range(1001)])
+    assert r.status_code == 400
+
+
+async def test_batch_accepting_a_third_history_proposal_promotes(client, run_jobs) -> None:
+    await _signup(client)
+    account_id = await _account(client)
+    coffee = await _category(client, "Coffee")
+    await _commit_csv(client, account_id, rows=[("2026-07-01", "-5.00", "STARBUCKS 123")])
+    await run_jobs()
+    await _review(client, (await _inbox_txn(client))["id"], {"category_id": coffee})
+    await _commit_csv(
+        client,
+        account_id,
+        rows=[("2026-07-02", "-6.00", "STARBUCKS 123"), ("2026-07-03", "-7.00", "STARBUCKS 123")],
+    )
+    await run_jobs()
+    pending = [t["id"] for t in await _transactions(client) if t["reviewed_at"] is None]
+    r = await _batch(client, pending)
+    body = r.json()
+    assert body["accepted"] == 2
+    assert len(body["proposed_rules"]) == 1  # one check per distinct payee
+    assert body["proposed_rules"][0]["condition"]["payee"]["value"] == "starbucks 123"
