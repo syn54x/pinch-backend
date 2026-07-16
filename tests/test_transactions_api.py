@@ -402,6 +402,142 @@ async def test_transaction_without_proposal_serializes_null(client) -> None:
     assert txn["proposal"] is None
 
 
+# --- PATCH integration: reviewing consumes, un-reviewing defers (M5 CP4,
+# #22). The invariant every later test relies on: *setting reviewed always
+# consumes and logs* — PATCH reviewed:true on an unreviewed transaction
+# consumes the pending proposal with the post-PATCH state as the decision;
+# PATCH reviewed:false on a reviewed one clears and defers classify_ledger
+# after the commit; no-op transitions do neither. ------------------------
+
+LOG = "/api/v1/correction-log"
+RULES = "/api/v1/rules"
+CATEGORIES = "/api/v1/categories"
+
+
+async def _category(client, name: str) -> str:
+    r = await client.post(CATEGORIES, json={"name": name}, headers=await _csrf(client))
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+async def _patch(client, txn_id: str, body: dict):
+    return await client.patch(f"{TX}/{txn_id}", json=body, headers=await _csrf(client))
+
+
+async def _log_entries(client, txn_id: str) -> list[dict]:
+    r = await client.get(LOG, params={"transaction_id": txn_id})
+    assert r.status_code == 200, r.text
+    return r.json()["items"]
+
+
+async def _review(client, txn_id: str, body: dict | None = None):
+    return await client.post(f"{TX}/{txn_id}/review", json=body or {}, headers=await _csrf(client))
+
+
+async def _seeded_inbox_txn(client, account_id: str, *, day: str = "01") -> dict:
+    """Commit one STARBUCKS 123 row for `day`, run the sweep, and return the
+    unreviewed transaction dict — proposal attached via the real import ->
+    classify pipeline, never seeded at the model layer."""
+    from pinch_backend.jobs import job_app
+
+    await _import(client, account_id, [(f"2026-01-{day}", "-5.00", "STARBUCKS 123")])
+    await job_app.run_worker_async(wait=False, listen_notify=False, install_signal_handlers=False)
+    items = (await client.get(f"{TX}?limit=100")).json()["items"]
+    return next(
+        i for i in items if i["description_raw"] == "STARBUCKS 123" and i["reviewed_at"] is None
+    )
+
+
+async def test_patch_reviewed_true_consumes_the_pending_proposal(client, run_jobs) -> None:
+    await _signup(client)
+    account_id = await _account(client)
+    txn = await _seeded_inbox_txn(client, account_id)
+    assert txn["proposal"] is not None
+    r = await _patch(client, txn["id"], {"reviewed": True})
+    assert r.status_code == 200, r.text
+    after = (await client.get(f"{TX}/{txn['id']}")).json()
+    assert after["reviewed_at"] is not None
+    assert after["proposal"] is None  # consumed, not left attached (CP3 wart closed)
+    entries = await _log_entries(client, txn["id"])
+    assert len(entries) == 1
+    assert entries[0]["kind"] == "decision"
+    assert entries[0]["actor"] == "user"
+    assert entries[0]["proposal_provenance"] == "none"  # nothing matched this payee
+    assert entries[0]["decision_category_id"] is None  # the user set nothing
+
+
+async def test_patch_category_plus_reviewed_logs_the_final_state(client, run_jobs) -> None:
+    await _signup(client)
+    account_id = await _account(client)
+    coffee = await _category(client, "Coffee")
+    txn = await _seeded_inbox_txn(client, account_id)
+    r = await _patch(client, txn["id"], {"category_id": coffee, "reviewed": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["category"]["id"] == coffee
+    entries = await _log_entries(client, txn["id"])
+    assert entries[0]["decision_category_id"] == coffee
+
+
+async def test_three_patch_reviews_of_a_payee_promote(client, run_jobs) -> None:
+    """PATCH-review appends user-actor decisions: promotion evidence."""
+    await _signup(client)
+    account_id = await _account(client)
+    coffee = await _category(client, "Coffee")
+    for day in ("01", "02", "03"):
+        txn = await _seeded_inbox_txn(client, account_id, day=day)
+        await _patch(client, txn["id"], {"category_id": coffee, "reviewed": True})
+    proposed = (await client.get(RULES, params={"status": "proposed"})).json()["items"]
+    assert len(proposed) == 1
+    assert proposed[0]["condition"]["payee"] == {"op": "equals", "value": "starbucks 123"}
+
+
+async def test_patch_reviewed_true_without_tags_keeps_existing_tags_in_the_log(
+    client, run_jobs
+) -> None:
+    await _signup(client)
+    account_id = await _account(client)
+    txn = await _seeded_inbox_txn(client, account_id)
+    await _patch(client, txn["id"], {"tags": ["morning"]})
+    await _patch(client, txn["id"], {"reviewed": True})
+    entries = await _log_entries(client, txn["id"])
+    assert entries[0]["decision_tags"] == ["morning"]  # the current set, not []
+
+
+async def test_unreview_defers_a_sweep_and_the_roundtrip_appends(
+    client, run_jobs, job_connector
+) -> None:
+    await _signup(client)
+    account_id = await _account(client)
+    txn = await _seeded_inbox_txn(client, account_id)
+    await _review(client, txn["id"])
+    assert len(await _log_entries(client, txn["id"])) == 1
+    before = len(job_connector.jobs)
+    r = await _patch(client, txn["id"], {"reviewed": False})
+    assert r.status_code == 200, r.text
+    assert len(job_connector.jobs) == before + 1  # un-review defers the sweep
+    await run_jobs()
+    reproposed = (await client.get(f"{TX}/{txn['id']}")).json()
+    assert reproposed["reviewed_at"] is None
+    assert reproposed["proposal"] is not None  # the sweep re-proposed
+    await _review(client, txn["id"])
+    entries = await _log_entries(client, txn["id"])
+    assert len(entries) == 2  # re-review appends; earlier entries stand
+
+
+async def test_noop_reviewed_transitions_neither_defer_nor_log(
+    client, run_jobs, job_connector
+) -> None:
+    await _signup(client)
+    account_id = await _account(client)
+    txn = await _seeded_inbox_txn(client, account_id)
+    before = len(job_connector.jobs)
+    await _patch(client, txn["id"], {"reviewed": False})  # already unreviewed
+    assert len(job_connector.jobs) == before  # no defer
+    await _patch(client, txn["id"], {"reviewed": True})
+    await _patch(client, txn["id"], {"reviewed": True})  # already reviewed
+    assert len(await _log_entries(client, txn["id"])) == 1  # exactly one decision
+
+
 async def test_pending_proposal_inlines_sorted_tags(client) -> None:
     await _signup(client)
     acct = await _account(client)
