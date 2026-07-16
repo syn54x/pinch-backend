@@ -249,7 +249,14 @@ async def update_rule(
 async def delete_rule(
     rule_id: FromPath[uuid.UUID], current_ledger: NamedDependency[Ledger]
 ) -> None:
-    """Hard delete: rules carry no history (disable is the soft option)."""
+    """Delete = forget this ever happened. A proposed or dismissed rule's
+    promotion tombstone is erased along with it, so the same payee can be
+    re-proposed from scratch (promotion.maybe_propose_rule only sees rules
+    that still exist) — deleting a dismissed rule is therefore the only
+    undo for a fat-fingered dismiss. Contrast `PATCH status: dismissed`,
+    which means never ask again: the tombstone stays and keeps blocking
+    re-proposal. Rules carry no history either way (disable/dismiss is the
+    soft option; this is the hard one)."""
     rule = await _get(current_ledger, rule_id)
     await rule.delete()
     log.info("rule.deleted", rule_id=str(rule_id), ledger_id=str(current_ledger.id))

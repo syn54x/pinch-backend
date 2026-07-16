@@ -108,6 +108,14 @@ async def _inbox_txn(client) -> dict:
     return items[0]
 
 
+async def _arrive(client, account_id: str, day: str, run_jobs) -> dict:
+    """Commit one STARBUCKS 123 row dated 2026-07-{day} and run the sweep;
+    returns the freshly-arrived (unreviewed) transaction."""
+    await _commit_csv(client, account_id, rows=[(f"2026-07-{day}", "-5.00", "STARBUCKS 123")])
+    await run_jobs()
+    return await _inbox_txn(client)
+
+
 async def test_empty_body_accepts_the_proposal_as_is(client, run_jobs) -> None:
     await _signup(client)
     account_id = await _account(client)
@@ -343,3 +351,44 @@ async def test_batch_accepting_a_third_history_proposal_promotes(client, run_job
     assert body["accepted"] == 2
     assert len(body["proposed_rules"]) == 1  # one check per distinct payee
     assert body["proposed_rules"][0]["condition"]["payee"]["value"] == "starbucks 123"
+
+
+async def test_dismissed_tombstone_blocks_but_delete_reopens(client, run_jobs) -> None:
+    """Dismiss = never again; delete = forget, re-proposal possible."""
+    await _signup(client)
+    account_id = await _account(client)
+    coffee = await _category(client, "Coffee")
+    rule = None
+    for day in ("01", "02", "03"):
+        txn = await _arrive(client, account_id, day, run_jobs)
+        r = await _review(client, txn["id"], {"category_id": coffee})
+        rule = r.json()["proposed_rule"]
+    assert rule is not None
+    dismissed = await client.patch(
+        f"{RULES}/{rule['id']}", json={"status": "dismissed"}, headers=await _csrf(client)
+    )
+    assert dismissed.status_code == 200, dismissed.text
+    txn = await _arrive(client, account_id, "04", run_jobs)
+    r = await _review(client, txn["id"], {"category_id": coffee})
+    assert r.json()["proposed_rule"] is None  # the tombstone covers the payee
+    deleted = await client.delete(f"{RULES}/{rule['id']}", headers=await _csrf(client))
+    assert deleted.status_code == 204, deleted.text
+    txn = await _arrive(client, account_id, "05", run_jobs)
+    r = await _review(client, txn["id"], {"category_id": coffee})
+    fresh = r.json()["proposed_rule"]
+    assert fresh is not None  # the ledger forgot: a fresh mint
+    assert fresh["id"] != rule["id"]
+
+
+async def test_consume_leaves_notes_untouched(client, run_jobs) -> None:
+    """Non-vacuous (CP3 debt): notes carries a real value through review."""
+    await _signup(client)
+    account_id = await _account(client)
+    txn = await _arrive(client, account_id, "01", run_jobs)
+    await client.patch(
+        f"{TX}/{txn['id']}", json={"notes": "check this"}, headers=await _csrf(client)
+    )
+    assert (await _review(client, txn["id"])).status_code == 200
+    after = (await client.get(f"{TX}/{txn['id']}")).json()
+    assert after["notes"] == "check this"
+    assert after["reviewed_at"] is not None
