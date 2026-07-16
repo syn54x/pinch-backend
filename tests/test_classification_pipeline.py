@@ -306,3 +306,63 @@ async def test_auto_file_reverifies_reviewed_before_consuming(db, monkeypatch) -
     assert await _proposal_for(txn_b) is not None  # proposal row untouched
     unfiled_b = await Transaction.get(txn_b.id)
     assert unfiled_b.category_id is None  # not resurrected by the stale batch-time txn
+
+
+async def test_auto_file_skips_a_row_reviewed_after_the_freshness_check(db, monkeypatch) -> None:
+    """The CAS backstop behind the caller-side re-check (PR review finding
+    4): the "human" review commits AFTER auto-file's freshness re-check
+    passed — this seam marks the row reviewed just before delegating to the
+    real consume, whose in-transaction claim raises AlreadyReviewedError.
+    The sweep must treat that like the `fresh is None` skip: no crash, no
+    overwrite, and it keeps filing the rest of the batch."""
+    ledger, account = await _seed(db)
+    coffee = await Category.create(ledger=ledger, name="Coffee P")
+    await Rule.create(
+        ledger=ledger,
+        condition={"version": 1, "payee": {"op": "contains", "value": "starbucks"}},
+        action_category=coffee,
+    )
+    batch = await Import.create(
+        ledger=ledger,
+        account=account,
+        status=ImportStatus.COMMITTED,
+        filename="backfill.csv",
+        file_bytes=b"",
+    )
+    # uuid7 walk order: txn_a is consumed first (see the order note above).
+    txn_a = await _txn(ledger, account, "starbucks", source_import=batch)
+    txn_b = await _txn(ledger, account, "starbucks", source_import=batch)
+
+    await sweep_ledger(ledger.id)  # both carry proposals now, still unreviewed
+
+    real_consume = pipeline.consume_proposal
+
+    async def review_wins_then_delegate(ledger_arg, txn_arg, **kwargs):
+        if txn_arg.id == txn_a.id:
+            now = datetime(2026, 7, 1, tzinfo=UTC)
+            await Transaction.where(lambda t, tid=txn_a.id: t.id == tid).update(
+                reviewed_at=now, updated_at=now
+            )
+        return await real_consume(ledger_arg, txn_arg, **kwargs)
+
+    monkeypatch.setattr(pipeline, "consume_proposal", review_wins_then_delegate)
+
+    await sweep_ledger(ledger.id, auto_file_import_id=batch.id)
+
+    # txn_a: the human won inside the last round trip — nothing written.
+    assert (
+        await CorrectionLogEntry.where(lambda e, tid=txn_a.id: e.transaction_id == tid).count() == 0
+    )
+    assert await _proposal_for(txn_a) is not None  # proposal row untouched
+    assert (await Transaction.get(txn_a.id)).category_id is None  # not overwritten
+
+    # txn_b: the sweep continued past the loss and filed it normally.
+    filed_b = await Transaction.get(txn_b.id)
+    assert filed_b.reviewed_at is not None
+    assert filed_b.category_id == coffee.id
+    assert await _proposal_for(txn_b) is None  # consumed
+    entries_b = await CorrectionLogEntry.where(
+        lambda e, tid=txn_b.id: e.transaction_id == tid
+    ).all()
+    assert len(entries_b) == 1
+    assert entries_b[0].actor is CorrectionActor.AUTO

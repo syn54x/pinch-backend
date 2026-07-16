@@ -174,6 +174,27 @@ async def test_connected_account_answers_409(client, db):
     assert r.status_code == 409
 
 
+async def test_amount_beyond_the_int4_column_is_a_400_not_a_500(client):
+    """amount_minor is bounded to the integer column width (PR review
+    finding 11): an out-of-range amount is a client error, never a database
+    error surfacing as a 500."""
+    await _signup(client)
+    account_id = await _account(client)
+    r = await _manual(client, account_id, {"amount_minor": 2**40})
+    assert r.status_code == 400
+    r2 = await _manual(client, account_id, {"amount_minor": -(2**40)})
+    assert r2.status_code == 400
+
+
+async def test_manual_entry_rejects_unknown_keys(client):
+    """extra="forbid" (PR review finding 16): the payload's currency is
+    never accepted (the account's always wins), so sending one is a 400."""
+    await _signup(client)
+    account_id = await _account(client)
+    r = await _manual(client, account_id, {"currency": "EUR"})
+    assert r.status_code == 400
+
+
 async def test_account_tenancy_and_category_404(client):
     import uuid as _uuid
 

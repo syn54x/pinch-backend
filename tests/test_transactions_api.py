@@ -104,6 +104,19 @@ async def test_composite_cursor_pages_across_a_day_boundary(client) -> None:
     assert len(set(seen)) == 3  # no dupes, no gaps across the boundary
 
 
+async def test_tampered_cursor_answers_400_at_the_http_seam(client) -> None:
+    """Garbage and syntactically-valid-base64-but-wrong-payload cursors are
+    client errors (PR review finding 19b) — never a 500."""
+    import base64
+
+    await _signup(client)
+    r = await client.get(f"{TX}?cursor=garbage")
+    assert r.status_code == 400
+    wrong_payload = base64.urlsafe_b64encode(b"not-a-date|nor-a-uuid").decode()
+    r2 = await client.get(f"{TX}?cursor={wrong_payload}")
+    assert r2.status_code == 400
+
+
 async def test_other_ledger_transaction_is_a_404(client) -> None:
     await _signup(client, "a@example.com")
     acct = await _account(client)
@@ -236,6 +249,28 @@ async def test_patch_tag_reconcile_detaches_and_is_idempotent(client) -> None:
     # clear all
     r3 = await client.patch(f"{TX}/{txn_id}", json={"tags": []}, headers=await _csrf(client))
     assert r3.json()["tags"] == []
+
+
+async def test_patch_explicit_null_tags_clears_all(client) -> None:
+    """Present-and-null means the same as present-and-empty: no tags (the
+    blessed tri-state, PR review finding 13)."""
+    txn_id = await _one_txn(client)
+    await client.patch(f"{TX}/{txn_id}", json={"tags": ["a", "b"]}, headers=await _csrf(client))
+    r = await client.patch(f"{TX}/{txn_id}", json={"tags": None}, headers=await _csrf(client))
+    assert r.status_code == 200, r.text
+    assert r.json()["tags"] == []
+
+
+async def test_patch_rejects_source_data_and_unknown_keys(client) -> None:
+    """extra="forbid": source data is not addressable here, and a typo'd key
+    must never answer 200 as a silent no-op (PR review finding 16)."""
+    txn_id = await _one_txn(client)
+    r = await client.patch(f"{TX}/{txn_id}", json={"amount_minor": 1}, headers=await _csrf(client))
+    assert r.status_code == 400
+    r2 = await client.patch(
+        f"{TX}/{txn_id}", json={"display_nam": "typo"}, headers=await _csrf(client)
+    )
+    assert r2.status_code == 400
 
 
 # --- Filter round-trip tests (added per Task 9 review): the category/tag/
@@ -538,6 +573,35 @@ async def test_noop_reviewed_transitions_neither_defer_nor_log(
     again = await _patch(client, txn["id"], {"reviewed": True})  # already reviewed
     assert again.json()["reviewed_at"] == reviewed_at  # timestamp not bumped
     assert len(await _log_entries(client, txn["id"])) == 1  # exactly one decision
+
+
+async def test_patch_review_losing_the_cas_race_answers_409(client, run_jobs, monkeypatch):
+    """Finding-4 translation, PATCH path: a concurrent decision commits
+    between this handler's reviewed_at read and consume's in-transaction
+    claim — the CAS raises and PATCH answers the same 409 as review."""
+    from pinch_backend.api import transactions as transactions_module
+    from pinch_backend.models import Transaction, utcnow
+
+    await _signup(client)
+    account_id = await _account(client)
+    txn = await _seeded_inbox_txn(client, account_id)
+
+    real_consume = transactions_module.consume_proposal
+
+    async def review_wins_then_delegate(ledger_arg, txn_arg, **kwargs):
+        now = utcnow()
+        await Transaction.where(lambda t, tid=txn_arg.id: t.id == tid).update(
+            reviewed_at=now, updated_at=now
+        )
+        return await real_consume(ledger_arg, txn_arg, **kwargs)
+
+    monkeypatch.setattr(transactions_module, "consume_proposal", review_wins_then_delegate)
+
+    r = await _patch(client, txn["id"], {"reviewed": True, "notes": "loser"})
+    assert r.status_code == 409, r.text
+    assert (await _log_entries(client, txn["id"])) == []  # no duplicate decision
+    after = (await client.get(f"{TX}/{txn['id']}")).json()
+    assert after["notes"] is None  # the losing PATCH applied nothing
 
 
 async def test_patch_reviewed_true_carries_forward_a_previously_set_category(

@@ -64,6 +64,25 @@ def test_currency_is_optional_on_the_wire() -> None:
     assert spec.amount.currency is None
 
 
+def test_whitespace_only_payee_value_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="blank"):
+        ConditionSpec.model_validate({"payee": {"op": "contains", "value": " "}})
+
+
+def test_unknown_condition_key_is_rejected_loudly() -> None:
+    with pytest.raises(ValidationError):
+        ConditionSpec.model_validate(
+            {"day_of_week": {"op": "equals", "value": 1}, "payee": {"op": "equals", "value": "x"}}
+        )
+
+
+def test_unknown_nested_condition_key_is_rejected_loudly() -> None:
+    with pytest.raises(ValidationError):
+        ConditionSpec.model_validate(
+            {"payee": {"op": "equals", "value": "x", "case_sensitive": True}}
+        )
+
+
 def test_all_three_types_compose() -> None:
     spec = ConditionSpec.model_validate(
         {

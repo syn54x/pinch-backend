@@ -27,6 +27,12 @@ async def test_create_and_list_tag(client) -> None:
     assert "Vacation-2026" in {t["name"] for t in listing.json()["items"]}
 
 
+async def test_whitespace_only_name_is_rejected(client) -> None:
+    await _signup(client)
+    r = await client.post(TAGS, json={"name": " "}, headers=await _csrf(client))
+    assert r.status_code == 400
+
+
 async def test_casefold_collision_is_rejected(client) -> None:
     await _signup(client)
     await client.post(TAGS, json={"name": "Vacation"}, headers=await _csrf(client))

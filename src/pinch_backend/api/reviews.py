@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from pinch_backend.api.rules import RuleOut, rule_out
 from pinch_backend.api.transactions import TransactionOut, hydrate_transactions
-from pinch_backend.classification.consume import consume_proposal
+from pinch_backend.classification.consume import AlreadyReviewedError, consume_proposal
 from pinch_backend.classification.promotion import maybe_propose_rule
 from pinch_backend.models import (
     Category,
@@ -35,13 +35,19 @@ from pinch_backend.tags import dedupe_tag_names
 
 log = get_logger(__name__)
 
+ALREADY_REVIEWED_DETAIL = "Already reviewed; un-review first (PATCH reviewed: false)"
+"""One 409 message for both paths to it: the pre-check fast path and
+consume's in-transaction CAS losing to a concurrent decision."""
+
 
 class ReviewIn(BaseModel):
     """The FINAL user data. Field-present merge against the proposal: an
     absent field means "the proposal's value", a present one is the user's
     final word. Empty body accepts as-is. notes is not reviewable — that is
-    PATCH's job, and clearing display_name likewise (consume applies
-    display_name only when not None)."""
+    PATCH's job. An explicit ``"display_name": null`` REJECTS the proposal's
+    rename (a correction; the rename is not applied — consume applies
+    display_name only when not None); clearing an already-applied override
+    is PATCH's job."""
 
     model_config = ConfigDict(use_attribute_docstrings=True)
 
@@ -88,10 +94,8 @@ async def review_transaction(
     if txn is None:
         raise NotFoundException(detail="No such transaction")
     if txn.reviewed_at is not None:
-        raise HTTPException(
-            status_code=HTTP_409_CONFLICT,
-            detail="Already reviewed; un-review first (PATCH reviewed: false)",
-        )
+        # Fast path; the airtight guard is consume's CAS claim below.
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail=ALREADY_REVIEWED_DETAIL)
 
     body = data if data is not None else ReviewIn()
     fields = data.model_fields_set if data is not None else set()
@@ -112,20 +116,30 @@ async def review_transaction(
     final_tags = dedupe_tag_names(list(body.tags or []) if "tags" in fields else proposal_tags)
     final_display = body.display_name if "display_name" in fields else prop_display
 
+    # An explicit null display_name against a proposal that HAS a rename is
+    # a correction too: the user rejected the rename (it is not applied).
+    display_rejected = (
+        "display_name" in fields and body.display_name is None and prop_display is not None
+    )
     corrected = (
         final_category != prop_category_id
         or {t.casefold() for t in final_tags} != {t.casefold() for t in proposal_tags}
         or (final_display is not None and final_display != prop_display)
+        or display_rejected
     )
 
-    await consume_proposal(
-        current_ledger,
-        txn,
-        category_id=final_category,
-        tags=final_tags,
-        display_name=final_display,
-        actor=CorrectionActor.USER,
-    )
+    try:
+        await consume_proposal(
+            current_ledger,
+            txn,
+            category_id=final_category,
+            tags=final_tags,
+            display_name=final_display,
+            actor=CorrectionActor.USER,
+        )
+    except AlreadyReviewedError:
+        # A concurrent decision won between the pre-check and the claim.
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail=ALREADY_REVIEWED_DETAIL) from None
     rule = await maybe_propose_rule(current_ledger, txn.description_normalized, final_category)
 
     result: Literal["accepted", "corrected"] = "corrected" if corrected else "accepted"
@@ -189,14 +203,21 @@ async def review_batch(
             continue
         proposal, proposal_tags = await _pending_proposal(txn.id)
         final_category = proposal.category_id if proposal else None  # ty: ignore[unresolved-attribute]
-        await consume_proposal(
-            current_ledger,
-            txn,
-            category_id=final_category,
-            tags=dedupe_tag_names(proposal_tags),
-            display_name=proposal.proposed_display_name if proposal else None,
-            actor=CorrectionActor.USER,
-        )
+        try:
+            await consume_proposal(
+                current_ledger,
+                txn,
+                category_id=final_category,
+                tags=dedupe_tag_names(proposal_tags),
+                display_name=proposal.proposed_display_name if proposal else None,
+                actor=CorrectionActor.USER,
+            )
+        except AlreadyReviewedError:
+            # A concurrent decision won ⇒ it IS already reviewed — the same
+            # honest skip as the pre-check above; and a decision this batch
+            # didn't make must not feed the promotion evidence below.
+            skipped += 1
+            continue
         accepted += 1
         decided[txn.description_normalized] = final_category
 

@@ -1,6 +1,15 @@
 """Consuming a proposal into user data + the correction log (PRD M5 D13):
-log entry -> apply -> reviewed_at -> delete the Proposal, one database
+claim -> log entry -> apply -> delete the Proposal, one database
 transaction. CP3's auto-file calls this; CP4's review endpoints wrap it.
+
+The unreviewed -> reviewed transition guard lives HERE: the first write in
+the transaction is an atomic compare-and-set claim on ``reviewed_at IS NULL``
+(the api/imports.py commit-CAS precedent), so every caller inherits it. A
+concurrent decision makes the claim come back empty and consume raises
+:class:`AlreadyReviewedError` instead of writing over the winner — callers'
+own reviewed_at checks are fast paths and noise reduction, never the guard.
+The mirror residual (a sweep inserting a proposal onto a just-reviewed row)
+is accepted and documented at pipeline.py's phase-1 freshness comment.
 
 The caller supplies the FINAL user data (auto-file passes the proposal's own
 values; review passes the user's, possibly corrected). Tag rows are minted
@@ -36,6 +45,12 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 
+class AlreadyReviewedError(Exception):
+    """The in-transaction claim found the transaction already reviewed — a
+    concurrent decision won. Callers translate: the review endpoints answer
+    409, the batch counts a skip, auto-file moves to the next row."""
+
+
 async def consume_proposal(
     ledger: Ledger,
     txn: Transaction,
@@ -66,6 +81,18 @@ async def consume_proposal(
     )
 
     async with transaction():
+        # Atomic claim (CAS): the UPDATE locks the row and re-evaluates the
+        # predicate against its current version under READ COMMITTED, so —
+        # unlike the pre-transaction fetches above or any caller-side check —
+        # it cannot pass on a stale reviewed_at. Zero rows claimed means a
+        # concurrent decision already reviewed this transaction: nothing
+        # below may run over it.
+        stamp = utcnow()
+        claimed = await Transaction.where(
+            lambda t, tid=txn_id: (t.id == tid) & (t.reviewed_at == None)  # noqa: E711
+        ).update(reviewed_at=stamp, updated_at=stamp)
+        if claimed == 0:
+            raise AlreadyReviewedError(f"transaction {txn_id} is already reviewed")
         entry = await CorrectionLogEntry.create(
             ledger=ledger,
             transaction_id=txn.id,
@@ -91,7 +118,10 @@ async def consume_proposal(
         txn.category_id = category_id  # ty: ignore[unresolved-attribute]
         if display_name is not None:
             txn.display_name = display_name
-        txn.reviewed_at = utcnow()
+        # The claim already stamped the row; the full-row save below must
+        # re-write the same stamp, not a second utcnow() or a stale value.
+        txn.reviewed_at = stamp
+        txn.updated_at = stamp
         await txn.save()
         await apply_tag_set(ledger, txn, tags)
         if proposal is not None:

@@ -412,8 +412,14 @@ class Transaction(TimestampMixin, Model):
     trim of description_raw, via imports.fingerprint.normalize_description.
     Source data, computed at write, indexed per-ledger for CP3 history
     matching. Non-null — first deploy runs on an empty schema, so no backfill."""
-    category: Annotated[Optional["Category"], ForeignKey(related_name="transactions")] = None
-    """User data (M5): the assigned category, or NULL for uncategorized."""
+    category: Annotated[
+        Optional["Category"],
+        ForeignKey(related_name="transactions", on_delete="SET NULL", index=True),
+    ] = None
+    """User data (M5): the assigned category, or NULL for uncategorized.
+    DB-level ON DELETE SET NULL: a guard miss on category delete uncategorizes
+    the transaction rather than deleting it — the safety net behind the API's
+    guarded reassignment path (PR #23 review)."""
     display_name: str | None = None
     """User data: an override of description_raw for display; NULL shows the
     raw description (an override, never a copy — source rewrites shine through)."""
@@ -442,8 +448,13 @@ class Category(TimestampMixin, Model):
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="categories", index=True)]
     name: str
-    parent: Annotated[Optional["Category"], ForeignKey(related_name="children")] = None
-    """The verified ferro 0.16.1 self-FK spelling. NULL = a top-level node."""
+    parent: Annotated[
+        Optional["Category"], ForeignKey(related_name="children", on_delete="RESTRICT")
+    ] = None
+    """The verified ferro 0.16.1 self-FK spelling. NULL = a top-level node.
+    DB-level ON DELETE RESTRICT: children already block deletion at the API
+    (409); this makes the DB refuse it too rather than cascading silently if
+    that guard is ever missed (PR #23 review)."""
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
@@ -523,9 +534,12 @@ class Rule(TimestampMixin, Model):
     """A validated ConditionSpec (versioned); never queried into — loaded
     and evaluated in Python only."""
     action_category: Annotated[
-        Optional["Category"], ForeignKey(related_name="rules", index=True)
+        Optional["Category"], ForeignKey(related_name="rules", on_delete="RESTRICT", index=True)
     ] = None
-    """Propose this category (indexed shadow FK: the D4 delete-block query)."""
+    """Propose this category (indexed shadow FK: the D4 delete-block query).
+    DB-level ON DELETE RESTRICT: targeting rules already block category
+    deletion at the API (409); this backs it at the DB in case that guard is
+    ever missed (PR #23 review)."""
     action_add_tags: list[str] = Field(default_factory=list)
     """Tag names to propose, unioned across matching rules (D13)."""
     action_rename_to: str | None = None
@@ -548,9 +562,13 @@ class Proposal(TimestampMixin, Model):
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="proposals", index=True)]
     transaction: Annotated["Transaction", ForeignKey(related_name="proposals", unique=True)]
-    category: Annotated[Optional["Category"], ForeignKey(related_name="proposals", index=True)] = (
-        None
-    )
+    category: Annotated[
+        Optional["Category"], ForeignKey(related_name="proposals", on_delete="SET NULL", index=True)
+    ] = None
+    """DB-level ON DELETE SET NULL: a slipped pending proposal must not be
+    cascade-deleted when its category goes away — the API re-points or
+    empties it in the guarded delete path; this is the backstop (PR #23
+    review)."""
     proposed_display_name: str | None = None
     provenance: ProposalProvenance = ProposalProvenance.NONE
     provenance_detail: dict | None = None

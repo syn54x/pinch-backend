@@ -14,7 +14,7 @@ from litestar import Router, delete, get, patch, post
 from litestar.di import NamedDependency
 from litestar.exceptions import ClientException, NotFoundException
 from litestar.params import FromPath
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from pinch_backend import taxonomy
 from pinch_backend.api.pagination import (
@@ -58,6 +58,12 @@ class CategoryUpdateIn(BaseModel):
     """True to apply parent_id (including null → top level). Distinguishes
     "move to top level" from "don't touch the parent" without a sentinel."""
 
+    @model_validator(mode="after")
+    def _parent_id_requires_reparent(self) -> "CategoryUpdateIn":
+        if "parent_id" in self.model_fields_set and not self.reparent:
+            raise ValueError("parent_id requires reparent: true")
+        return self
+
 
 class CategoryDeleteIn(BaseModel):
     model_config = ConfigDict(use_attribute_docstrings=True)
@@ -97,11 +103,14 @@ async def _assert_sibling_name_free(
     ledger_id: uuid.UUID, parent_id: uuid.UUID | None, name: str, exclude: uuid.UUID | None
 ) -> None:
     """Sibling names are unique (works for null and non-null parents, which a
-    DB unique on a nullable column cannot guarantee alone)."""
+    DB unique on a nullable column cannot guarantee alone). Compared
+    trimmed+casefolded — same identity rule as Tag.name_fold — so "Coffee "
+    and "coffee" collide; stored casing is preserved as-entered."""
     siblings = await Category.where(
         lambda c: (c.ledger_id == ledger_id) & (c.parent_id == parent_id)
     ).all()
-    if any(s.name == name and s.id != exclude for s in siblings):
+    fold = name.strip().casefold()
+    if any(s.name.strip().casefold() == fold and s.id != exclude for s in siblings):
         raise ClientException(detail="A sibling category already has that name")
 
 
@@ -178,6 +187,10 @@ async def delete_category(
     body — unusual for DELETE; some proxies strip DELETE bodies, so scripting
     clients should send it explicitly."""
     category = await _get(current_ledger, category_id)
+    if data.reassign_to == category_id:
+        raise ClientException(
+            detail="Cannot reassign a category's transactions to itself", status_code=409
+        )
     child = await Category.where(lambda c: c.parent_id == category_id).first()
     if child is not None:
         raise ClientException(

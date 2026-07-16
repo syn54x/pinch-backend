@@ -251,6 +251,153 @@ async def test_delete_repoints_pending_proposals(client) -> None:
     assert p.provenance is ProposalProvenance.RULE  # re-point keeps provenance
 
 
+async def _seed_transaction_in(category_id: str | None):
+    """A transaction directly categorized under ``category_id`` (or
+    uncategorized when None), for delete-reassignment tests. Model-layer: an
+    existing user-categorized transaction, not the pipeline's proposal state."""
+    import uuid as _uuid
+    from datetime import date as _date
+
+    from pinch_backend.models import Account, AccountKind, Category, Ledger, Transaction
+
+    ledger = (await Ledger.all())[0]
+    account = await Account.create(ledger=ledger, kind=AccountKind.DEPOSITORY, label="Chk")
+    category = await Category.get(_uuid.UUID(category_id)) if category_id else None
+    txn = await Transaction.create(
+        ledger=ledger,
+        account=account,
+        category=category,
+        date=_date(2026, 7, 1),
+        amount_minor=-100,
+        currency="USD",
+        description_raw="X",
+        description_normalized="x",
+        fingerprint=f"fp-{_uuid.uuid4().hex[:8]}",
+    )
+    return txn
+
+
+async def test_delete_reassign_to_self_is_rejected(client) -> None:
+    """Finding 1 regression: reassigning a category's transactions to itself
+    must not be treated as a no-op that lets the cascade delete fire —
+    every FK defaults to ferro's CASCADE, so category.delete() would take the
+    transaction (and its tags/proposals) down with it."""
+    from pinch_backend.models import Transaction
+
+    await _signup(client)
+    cat = (await _create(client, "SelfTarget")).json()
+    txn = await _seed_transaction_in(cat["id"])
+
+    r = await client.request(
+        "DELETE",
+        f"{CATEGORIES}/{cat['id']}",
+        json={"reassign_to": cat["id"]},
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 409, r.text
+
+    still_there = await client.get(f"{CATEGORIES}/{cat['id']}")
+    assert still_there.status_code == 200
+
+    reloaded = await Transaction.get(txn.id)
+    assert str(reloaded.category_id) == cat["id"]  # ty: ignore[unresolved-attribute]
+
+
+async def test_delete_reassigns_transactions_to_target(client) -> None:
+    """Finding 5: the delete's core effect — reassignment of live
+    transactions — was untested; the prior test used a category with zero
+    transactions."""
+    from pinch_backend.models import Transaction
+
+    await _signup(client)
+    src = (await _create(client, "SrcWithTxns")).json()
+    dst = (await _create(client, "DstWithTxns")).json()
+    t1 = await _seed_transaction_in(src["id"])
+    t2 = await _seed_transaction_in(src["id"])
+
+    r = await client.request(
+        "DELETE",
+        f"{CATEGORIES}/{src['id']}",
+        json={"reassign_to": dst["id"]},
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 204, r.text
+
+    for txn in (t1, t2):
+        reloaded = await Transaction.get(txn.id)
+        assert str(reloaded.category_id) == dst["id"]  # ty: ignore[unresolved-attribute]
+
+
+async def test_delete_with_null_disposition_uncategorizes_transactions(client) -> None:
+    """Finding 5: the null-disposition path of delete's core effect."""
+    from pinch_backend.models import Transaction
+
+    await _signup(client)
+    src = (await _create(client, "SrcToUncategorize")).json()
+    t1 = await _seed_transaction_in(src["id"])
+    t2 = await _seed_transaction_in(src["id"])
+
+    r = await client.request(
+        "DELETE",
+        f"{CATEGORIES}/{src['id']}",
+        json={"reassign_to": None},
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 204, r.text
+
+    for txn in (t1, t2):
+        reloaded = await Transaction.get(txn.id)
+        assert reloaded.category_id is None  # ty: ignore[unresolved-attribute]
+
+
+async def test_create_duplicate_sibling_name_is_rejected(client) -> None:
+    """Finding 5: _assert_sibling_name_free's create-time path was untested
+    via the API."""
+    await _signup(client)
+    await _create(client, "Coffee")
+    r = await _create(client, "Coffee")
+    assert r.status_code == 400, r.text
+
+
+async def test_create_duplicate_sibling_name_case_and_whitespace_variant_is_rejected(
+    client,
+) -> None:
+    """Finding 6: sibling comparison must trim + casefold, matching the Tag
+    precedent, so "Coffee" and " coffee " collide."""
+    await _signup(client)
+    await _create(client, "Coffee")
+    r = await _create(client, " coffee ")
+    assert r.status_code == 400, r.text
+
+
+async def test_rename_onto_sibling_name_case_variant_is_rejected(client) -> None:
+    """Finding 5/6: _assert_sibling_name_free's rename-time path, with a
+    case-variant collision."""
+    await _signup(client)
+    await _create(client, "Foo")
+    b = (await _create(client, "Bar")).json()
+    r = await client.patch(
+        f"{CATEGORIES}/{b['id']}",
+        json={"name": "foo"},
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 400, r.text
+
+
+async def test_update_parent_id_without_reparent_flag_is_rejected(client) -> None:
+    """Finding 15: parent_id without reparent: true used to be a silent
+    200 no-op; it must now be rejected outright."""
+    await _signup(client)
+    a = (await _create(client, "A")).json()
+    b = (await _create(client, "B")).json()
+    r = await client.patch(
+        f"{CATEGORIES}/{b['id']}",
+        json={"parent_id": a["id"]},
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 400, r.text
+
+
 async def test_delete_with_null_disposition_empties_proposals(client) -> None:
     from pinch_backend.models import Proposal, ProposalProvenance
 
