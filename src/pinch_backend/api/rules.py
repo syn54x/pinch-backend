@@ -127,7 +127,8 @@ async def _resolve_category(ledger: Ledger, category_id: uuid.UUID) -> Category:
     return category
 
 
-async def _out(rule: Rule) -> RuleOut:
+async def rule_out(rule: Rule) -> RuleOut:
+    """Public: review responses embed the minted rule (M5 CP4)."""
     category = None
     if rule.action_category_id is not None:  # ty: ignore[unresolved-attribute]
         row = await Category.get(rule.action_category_id)  # ty: ignore[unresolved-attribute]
@@ -166,7 +167,7 @@ async def create_rule(
         action_rename_to=data.action_rename_to,
     )
     log.info("rule.created", rule_id=str(rule.id), ledger_id=str(current_ledger.id))
-    return await _out(rule)
+    return await rule_out(rule)
 
 
 @get("/")
@@ -183,7 +184,7 @@ async def list_rules(
         wanted = status
         query = query.where(lambda r, s=wanted: r.status == s)
     rows, next_cursor = await paginate(query, cursor=cursor, limit=limit)
-    return Page(items=[await _out(r) for r in rows], next_cursor=next_cursor)
+    return Page(items=[await rule_out(r) for r in rows], next_cursor=next_cursor)
 
 
 @post("/preview", status_code=HTTP_200_OK)
@@ -203,7 +204,7 @@ async def preview_rule(
 async def get_rule(
     rule_id: FromPath[uuid.UUID], current_ledger: NamedDependency[Ledger]
 ) -> RuleOut:
-    return await _out(await _get(current_ledger, rule_id))
+    return await rule_out(await _get(current_ledger, rule_id))
 
 
 @patch("/{rule_id:uuid}")
@@ -241,7 +242,7 @@ async def update_rule(
     )
     await rule.save()
     log.info("rule.updated", rule_id=str(rule.id), ledger_id=str(current_ledger.id))
-    return await _out(rule)
+    return await rule_out(rule)
 
 
 @delete("/{rule_id:uuid}")

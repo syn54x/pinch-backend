@@ -49,3 +49,17 @@ async def apply_tag_set(ledger: Ledger, txn: "Transaction", names: list[str]) ->
     for tg in wanted:
         if tg.id not in existing_ids:
             await TransactionTag.create(ledger=ledger, transaction=txn, tag=tg)
+
+
+def dedupe_tag_names(names: list[str]) -> list[str]:
+    """Trim + casefold-dedupe, first casing wins — the same fold rule as
+    resolve_tags. Review payloads normalize BEFORE consume (M5 CP4) so
+    decision_tags logs exactly the applied set, never a raw superset."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in names:
+        fold = name.strip().casefold()
+        if fold and fold not in seen:
+            seen.add(fold)
+            out.append(name.strip())
+    return out
