@@ -1,6 +1,7 @@
 # PRD 0007: DELETE paths don't map FK violations into the IntegrityError hierarchy
 
-> **Filed:** not yet — draft.
+> **Filed:** [ferro-orm#306](https://github.com/syn54x/ferro-orm/issues/306)
+> (2026-07-16).
 
 **Requested by:** Pinch • **Blocks:** nothing (annoyance, not a blocker) —
 found at M5 CP4 while adding `on_delete="RESTRICT"` backstops behind the
