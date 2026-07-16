@@ -14,10 +14,11 @@ from datetime import date, datetime
 from typing import Annotated
 
 from ferro import transaction
-from litestar import Router, get, patch
+from litestar import Router, get, patch, post
 from litestar.di import NamedDependency
-from litestar.exceptions import NotFoundException
+from litestar.exceptions import HTTPException, NotFoundException
 from litestar.params import FromPath, QueryParameter
+from litestar.status_codes import HTTP_409_CONFLICT
 from pydantic import BaseModel, ConfigDict, Field
 
 from pinch_backend import taxonomy
@@ -30,8 +31,10 @@ from pinch_backend.api.pagination import (
 )
 from pinch_backend.classification.consume import consume_proposal
 from pinch_backend.classification.promotion import maybe_propose_rule
+from pinch_backend.imports.fingerprint import compute_fingerprint, normalize_description
 from pinch_backend.jobs import classify_ledger
 from pinch_backend.models import (
+    Account,
     Category,
     CorrectionActor,
     Ledger,
@@ -365,7 +368,101 @@ async def patch_transaction(
     return out
 
 
+class TransactionCreateIn(BaseModel):
+    """Manual entry (M5 CP4): source fields + the full optional user-data
+    set. Manual accounts only; the currency is always the account's. With
+    category or tags the transaction is reviewed at birth; display_name and
+    notes alone are annotations, not decisions."""
+
+    model_config = ConfigDict(use_attribute_docstrings=True)
+
+    account_id: uuid.UUID
+    date: date
+    amount_minor: int
+    """Signed from the account's perspective — negative is money out."""
+    description: str = Field(min_length=1, max_length=500)
+    category_id: uuid.UUID | None = None
+    tags: list[Annotated[str, Field(min_length=1, max_length=100)]] | None = Field(
+        default=None, max_length=50
+    )
+    display_name: str | None = Field(default=None, min_length=1, max_length=100)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+@post("/")
+async def create_transaction(
+    data: TransactionCreateIn, current_ledger: NamedDependency[Ledger]
+) -> TransactionOut:
+    ledger_id = current_ledger.id
+    wanted_account = data.account_id
+    account = await Account.where(
+        lambda a, aid=wanted_account, lid=ledger_id: (a.id == aid) & (a.ledger_id == lid)
+    ).first()
+    if account is None:
+        raise NotFoundException(detail="No such account")
+    if account.connection_id is not None:  # ty: ignore[unresolved-attribute]
+        raise HTTPException(
+            status_code=HTTP_409_CONFLICT, detail="Manual entry is for manual accounts"
+        )
+    if data.category_id is not None:
+        wanted = data.category_id
+        category = await Category.where(
+            lambda c, cid=wanted, lid=ledger_id: (c.id == cid) & (c.ledger_id == lid)
+        ).first()
+        if category is None:
+            raise NotFoundException(detail="No such category")
+
+    decided = data.category_id is not None or bool(data.tags)
+    tags = dedupe_tag_names(list(data.tags or []))
+    async with transaction():
+        txn = await Transaction.create(
+            ledger=current_ledger,
+            account=account,
+            date=data.date,
+            amount_minor=data.amount_minor,
+            currency=account.currency,
+            description_raw=data.description,
+            description_normalized=normalize_description(data.description),
+            fingerprint=compute_fingerprint(
+                account.id, data.date, data.amount_minor, data.description
+            ),
+            display_name=data.display_name,
+            notes=data.notes,
+        )
+        if decided:
+            # Reviewed at birth: no proposal exists, so consume snapshots
+            # provenance=none — the pipeline never ran. Nested transaction
+            # is atomic with the outer (scratch-verified): no observable
+            # state where the row exists categorized-but-unlogged.
+            await consume_proposal(
+                current_ledger,
+                txn,
+                category_id=data.category_id,
+                tags=tags,
+                display_name=data.display_name,
+                actor=CorrectionActor.USER,
+            )
+    rule = None
+    if decided:
+        rule = await maybe_propose_rule(
+            current_ledger, txn.description_normalized, data.category_id
+        )
+    else:
+        await classify_ledger.configure(lock=f"ledger:{ledger_id}").defer_async(
+            ledger_id=str(ledger_id), auto_file_import_id=None
+        )
+    log.info(
+        "transaction.created",
+        transaction_id=str(txn.id),
+        ledger_id=str(ledger_id),
+        reviewed=decided,
+        promoted_rule_id=str(rule.id) if rule else None,
+    )
+    (out,) = await hydrate_transactions([txn])
+    return out
+
+
 transactions_router = Router(
     path="/api/v1/transactions",
-    route_handlers=[list_transactions, get_transaction, patch_transaction],
+    route_handlers=[list_transactions, get_transaction, patch_transaction, create_transaction],
 )
