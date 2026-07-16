@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17
+        image: postgres:18  # match local-pg (dev runs 18; PG18 changed FK-violation wording — ferro-orm#306)
         env:
           POSTGRES_PASSWORD: password
         ports:
