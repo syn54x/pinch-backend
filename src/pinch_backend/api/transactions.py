@@ -41,7 +41,6 @@ from pinch_backend.models import (
     Tag,
     Transaction,
     TransactionTag,
-    utcnow,
 )
 from pinch_backend.observability import get_logger
 from pinch_backend.tags import apply_tag_set, dedupe_tag_names
@@ -344,8 +343,12 @@ async def patch_transaction(
                 txn.display_name = data.display_name
             if "notes" in fields:
                 txn.notes = data.notes
-            if "reviewed" in fields:
-                txn.reviewed_at = utcnow() if data.reviewed else None
+            if unreviewing:
+                # Transition-only write: reviewed:true here can only mean
+                # already-reviewed (a no-op — never bump the original review
+                # timestamp), and reviewed:false on an unreviewed row is
+                # None -> None, safe to skip.
+                txn.reviewed_at = None
             await txn.save()
             if "tags" in fields:
                 await apply_tag_set(current_ledger, txn, data.tags or [])
