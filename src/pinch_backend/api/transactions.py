@@ -28,8 +28,12 @@ from pinch_backend.api.pagination import (
     Page,
     paginate_by_date,
 )
+from pinch_backend.classification.consume import consume_proposal
+from pinch_backend.classification.promotion import maybe_propose_rule
+from pinch_backend.jobs import classify_ledger
 from pinch_backend.models import (
     Category,
+    CorrectionActor,
     Ledger,
     Proposal,
     ProposalProvenance,
@@ -40,7 +44,7 @@ from pinch_backend.models import (
     utcnow,
 )
 from pinch_backend.observability import get_logger
-from pinch_backend.tags import apply_tag_set
+from pinch_backend.tags import apply_tag_set, dedupe_tag_names
 
 log = get_logger(__name__)
 
@@ -114,6 +118,16 @@ async def _get(ledger: Ledger, txn_id: uuid.UUID) -> Transaction:
     if txn is None:
         raise NotFoundException(detail="No such transaction")
     return txn
+
+
+async def _current_tag_names(txn: Transaction) -> list[str]:
+    txn_id = txn.id
+    links = await TransactionTag.where(lambda tt, tid=txn_id: tt.transaction_id == tid).all()
+    tag_ids = sorted({link.tag_id for link in links})  # ty: ignore[unresolved-attribute]
+    if not tag_ids:
+        return []
+    rows = await Tag.where(lambda t, ids=tag_ids: t.id.in_(ids)).all()
+    return sorted((t.name for t in rows), key=str.casefold)
 
 
 async def hydrate_transactions(txns: list[Transaction]) -> list[TransactionOut]:
@@ -290,19 +304,58 @@ async def patch_transaction(
             raise NotFoundException(detail="No such category")
         category_id = category.id
 
-    async with transaction():
+    reviewing = "reviewed" in fields and data.reviewed is True and txn.reviewed_at is None
+    unreviewing = "reviewed" in fields and data.reviewed is False and txn.reviewed_at is not None
+
+    if reviewing:
+        # Setting reviewed always consumes and logs (M5 CP4): the pending
+        # proposal is consumed with the transaction's post-PATCH state as
+        # the decision — the final state IS the decision. consume_proposal
+        # saves the row, so in-memory mutations ride its transaction.
         if "category_id" in fields:
             txn.category_id = category_id  # ty: ignore[unresolved-attribute]
         if "display_name" in fields:
             txn.display_name = data.display_name
         if "notes" in fields:
             txn.notes = data.notes
-        if "reviewed" in fields:
-            txn.reviewed_at = utcnow() if data.reviewed else None
-        await txn.save()
-
-        if "tags" in fields:
-            await apply_tag_set(current_ledger, txn, data.tags or [])
+        final_tags = (
+            dedupe_tag_names(list(data.tags or []))
+            if "tags" in fields
+            else await _current_tag_names(txn)
+        )
+        await consume_proposal(
+            current_ledger,
+            txn,
+            category_id=txn.category_id,  # ty: ignore[unresolved-attribute]
+            tags=final_tags,
+            display_name=txn.display_name,
+            actor=CorrectionActor.USER,
+        )
+        await maybe_propose_rule(
+            current_ledger,
+            txn.description_normalized,
+            txn.category_id,  # ty: ignore[unresolved-attribute]
+        )
+    else:
+        async with transaction():
+            if "category_id" in fields:
+                txn.category_id = category_id  # ty: ignore[unresolved-attribute]
+            if "display_name" in fields:
+                txn.display_name = data.display_name
+            if "notes" in fields:
+                txn.notes = data.notes
+            if "reviewed" in fields:
+                txn.reviewed_at = utcnow() if data.reviewed else None
+            await txn.save()
+            if "tags" in fields:
+                await apply_tag_set(current_ledger, txn, data.tags or [])
+        if unreviewing:
+            # Deferred AFTER the transaction commits (the imports.py
+            # precedent) so the round-trip is prompt: un-review -> sweep
+            # re-proposes -> re-review appends; earlier entries stand.
+            await classify_ledger.configure(lock=f"ledger:{current_ledger.id}").defer_async(
+                ledger_id=str(current_ledger.id), auto_file_import_id=None
+            )
 
     log.info("transaction.updated", transaction_id=str(txn.id), ledger_id=str(current_ledger.id))
     (out,) = await hydrate_transactions([txn])
