@@ -114,7 +114,7 @@ inequality, or display_name inequality with body-absent/None counting as
 accepted. Structured events `review.accepted` / `review.corrected`.
 
 **`POST /api/v1/transactions/review`** — `ReviewBatchIn`: `{ids: [uuid]}`,
-1–1,000 (422 outside), duplicates deduped preserving order. Validate all
+1–1,000 (400 outside), duplicates deduped preserving order. Validate all
 ids against the ledger in one query; any miss → 404 with the missing ids in
 `extra`, nothing consumed. Then per id, in list order: `reviewed_at` set →
 `skipped++`; else consume accept-as-is (final = proposal values; missing
@@ -230,7 +230,7 @@ live network anywhere.
   category; 409 already-reviewed.
 - **Batch review**: honest counts; already-reviewed skip idempotently;
   unknown id → 404 with ids in extra, nothing consumed; duplicate ids
-  deduped; >1,000 → 422; promotion once per distinct payee;
+  deduped; >1,000 → 400; promotion once per distinct payee;
   `proposed_rules` in the response.
 - **PATCH integration**: `reviewed: true` consumes (proposal gone, log
   entry with post-PATCH decision snapshot, promotion counts it);
