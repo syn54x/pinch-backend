@@ -167,17 +167,24 @@ docs, and conversation. Implementation details do not belong in this file.
 - **Pending / Posted** — a transaction's settlement state at the institution.
   Pending transactions are ingested and shown from day one; posting replaces
   the pending record (with user-data inheritance) rather than duplicating it.
-- **Split line** — a division of a transaction into parts, each with its own
-  amount and category, summing exactly to the transaction amount. The
-  "exactly one category" rule formally applies to the split line; an unsplit
+- **Split line** — a division of a transaction into parts (at least two),
+  each with its own amount and category, summing exactly to the transaction
+  amount. Splitting never creates or replaces transactions: the original
+  transaction persists as the anchor, its source data untouched, and its own
+  category is vacated while lines exist — exactly one layer holds categories,
+  so double-counting stays impossible. When line categories share an ancestor
+  (a Walmart run split into Groceries children), the category hierarchy is
+  the container — never a second category on the parent. An unsplit
   transaction is the degenerate single-line case. Reporting operates on
   lines. (Roadmap: Penny proposes splits from an uploaded receipt.)
 - **Reimbursement** — money returned to the user offsetting an earlier
   expense. Not yet first-class: the convention is to categorize the incoming
   credit to the same category as the original expense, netting it out.
-- **Transfer** — a link between exactly two transactions of the same user
-  (opposite signs, matching amounts) marking the pair as money movement
-  between accounts, not income or expense. Reports exclude transfers by
-  default. A transaction may also be marked as a transfer whose counterparty
-  is untracked (the other account isn't in Pinch); it is still excluded from
-  spending.
+- **Transfer** — a link marking money movement between accounts, not income
+  or expense: either exactly two transactions of the same ledger (opposite
+  signs, equal amounts, same currency, different accounts), or one
+  transaction whose counterparty is **untracked** (the other account isn't
+  in Pinch). A transaction belongs to at most one transfer, carries no
+  category while in one — being a transfer *is* its classification — and
+  cannot be both split and in a transfer. Reports exclude transfers by
+  default.
