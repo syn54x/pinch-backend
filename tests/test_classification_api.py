@@ -223,3 +223,27 @@ async def test_repeated_undo_cycles_keep_one_void_per_decision(client, run_jobs)
     decisions = [e for e in entries if e["kind"] == "decision"]
     voids = [e for e in entries if e["kind"] == "void"]
     assert len(voids) == len(decisions)  # exactly one void per decision, ever
+
+
+async def test_auto_filed_decisions_feed_history(client, run_jobs) -> None:
+    """CP3 debt: an auto-filed transaction is a legitimate history source."""
+    await _signup(client)
+    account_id = await _account(client)
+    coffee = await _category(client, "Coffee Z")
+    await _rule(client, contains="starbucks", category_id=coffee)
+    await _commit_csv(
+        client, account_id, rows=[("2026-07-01", "-5.00", "STARBUCKS 123")], auto_file=True
+    )
+    await run_jobs()
+    (auto_filed,) = await _transactions(client)
+    assert auto_filed["reviewed_at"] is not None
+    assert auto_filed["category"]["id"] == coffee
+    # Remove the rule: history is now the only possible category source.
+    rules = (await client.get(RULES)).json()["items"]
+    deleted = await client.delete(f"{RULES}/{rules[0]['id']}", headers=await _csrf(client))
+    assert deleted.status_code == 204, deleted.text
+    await _commit_csv(client, account_id, rows=[("2026-07-02", "-6.00", "STARBUCKS 123")])
+    await run_jobs()
+    fresh = [t for t in await _transactions(client) if t["reviewed_at"] is None]
+    assert fresh[0]["proposal"]["provenance"] == "history"
+    assert fresh[0]["proposal"]["category"]["id"] == coffee

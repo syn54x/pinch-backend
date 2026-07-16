@@ -29,10 +29,14 @@ async def _signup(client, email="taylor@example.com") -> None:
     assert resp.status_code == 201, resp.text
 
 
-async def _seed_entries(email="taylor@example.com") -> Ledger:
+async def _ledger_for(email="taylor@example.com") -> Ledger:
     user = await User.where(lambda u, e=email: u.email == e).first()
     member = (await user.memberships.all())[0]
-    ledger = await Ledger.get(member.ledger_id)
+    return await Ledger.get(member.ledger_id)
+
+
+async def _seed_entries(email="taylor@example.com") -> Ledger:
+    ledger = await _ledger_for(email)
     txn_id = uuid.uuid7()
     decision = await CorrectionLogEntry.create(
         ledger=ledger,
@@ -94,3 +98,56 @@ async def test_log_is_ledger_scoped(client, db) -> None:
         await _signup(other, email="other@example.com")
         items = (await other.get("/api/v1/correction-log")).json()["items"]
         assert items == []
+
+
+async def test_multi_page_cursor_walk(client, db) -> None:
+    """CP3 debt: the id-keyset cursor walks this endpoint page by page."""
+    await _signup(client)
+    ledger = await _ledger_for()
+    for _ in range(3):
+        await CorrectionLogEntry.create(
+            ledger=ledger,
+            transaction_id=uuid.uuid7(),
+            kind=CorrectionKind.DECISION,
+            actor=CorrectionActor.USER,
+        )
+    first = (await client.get("/api/v1/correction-log", params={"limit": 2})).json()
+    assert len(first["items"]) == 2
+    assert first["next_cursor"] is not None
+    second = (
+        await client.get(
+            "/api/v1/correction-log", params={"limit": 2, "cursor": first["next_cursor"]}
+        )
+    ).json()
+    assert len(second["items"]) == 1
+    assert second["next_cursor"] is None
+    seen = {e["id"] for e in first["items"]} | {e["id"] for e in second["items"]}
+    assert len(seen) == 3  # no overlap, nothing dropped
+
+
+async def test_combined_filters(client, db) -> None:
+    """CP3 debt: transaction_id + actor + kind compose (AND semantics)."""
+    await _signup(client)
+    ledger = await _ledger_for()
+    txn_id = uuid.uuid7()
+    other_id = uuid.uuid7()
+    await CorrectionLogEntry.create(
+        ledger=ledger,
+        transaction_id=txn_id,
+        kind=CorrectionKind.DECISION,
+        actor=CorrectionActor.USER,
+    )
+    await CorrectionLogEntry.create(
+        ledger=ledger,
+        transaction_id=other_id,
+        kind=CorrectionKind.DECISION,
+        actor=CorrectionActor.USER,
+    )
+    params = {"transaction_id": str(txn_id), "actor": "user", "kind": "decision"}
+    items = (await client.get("/api/v1/correction-log", params=params)).json()["items"]
+    assert [e["transaction_id"] for e in items] == [str(txn_id)]
+    # Same transaction_id + kind, but actor no longer matches: AND, not OR.
+    none = (await client.get("/api/v1/correction-log", params=params | {"actor": "auto"})).json()[
+        "items"
+    ]
+    assert none == []
