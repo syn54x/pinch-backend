@@ -533,9 +533,29 @@ async def test_noop_reviewed_transitions_neither_defer_nor_log(
     before = len(job_connector.jobs)
     await _patch(client, txn["id"], {"reviewed": False})  # already unreviewed
     assert len(job_connector.jobs) == before  # no defer
-    await _patch(client, txn["id"], {"reviewed": True})
-    await _patch(client, txn["id"], {"reviewed": True})  # already reviewed
+    first = await _patch(client, txn["id"], {"reviewed": True})
+    reviewed_at = first.json()["reviewed_at"]
+    again = await _patch(client, txn["id"], {"reviewed": True})  # already reviewed
+    assert again.json()["reviewed_at"] == reviewed_at  # timestamp not bumped
     assert len(await _log_entries(client, txn["id"])) == 1  # exactly one decision
+
+
+async def test_patch_reviewed_true_carries_forward_a_previously_set_category(
+    client, run_jobs
+) -> None:
+    """Reviewing without category_id in the body logs the transaction's
+    CURRENT category — the post-PATCH state is the decision, whether the
+    category rode this PATCH or an earlier one."""
+    await _signup(client)
+    account_id = await _account(client)
+    coffee = await _category(client, "Coffee")
+    txn = await _seeded_inbox_txn(client, account_id)
+    await _patch(client, txn["id"], {"category_id": coffee})
+    r = await _patch(client, txn["id"], {"reviewed": True})  # no category_id here
+    assert r.status_code == 200, r.text
+    entries = await _log_entries(client, txn["id"])
+    assert len(entries) == 1
+    assert entries[0]["decision_category_id"] == coffee  # carried forward
 
 
 async def test_pending_proposal_inlines_sorted_tags(client) -> None:
