@@ -30,6 +30,7 @@ from pinch_backend.models import (
     Proposal,
     ProposalProvenance,
     Rule,
+    SplitLine,
     Transaction,
     utcnow,
 )
@@ -209,6 +210,12 @@ async def delete_category(
     cid = category.id
     async with transaction():
         await Transaction.where(lambda t: t.category_id == cid).update(
+            category_id=target.id if target else None, updated_at=utcnow()
+        )
+        # The guarded disposition extends to split lines (M6 CP1): re-pointed
+        # at the target, or nulled to an uncategorized line. The FK's SET NULL
+        # remains the backstop if this path is ever missed.
+        await SplitLine.where(lambda ln: ln.category_id == cid).update(
             category_id=target.id if target else None, updated_at=utcnow()
         )
         # Pending proposals follow the disposition (PRD M5 D4): re-pointed at
