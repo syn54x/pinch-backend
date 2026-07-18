@@ -138,3 +138,33 @@ CP0: complete (findings comment posted 2026-07-16; scratch scripts run against P
 - CP2 (#27): complete (commit 8eaa3ba; 10 tests in test_transfers_api.py; suite 446 green). Pair-shape rejections 422 (issue-specified for same-sign; extended to the class: unequal magnitude, mixed currency, same account, zero amount, duplicate id); occupied 409 (pre-check + UniqueViolationError race catch); Transfer FKs explicit ON DELETE CASCADE (dissolution backstop; CP3 wires reopen-the-survivor); GET /transfers uses uuid7 keyset paginate with left_join both sides for either-side account_id; TransferKind lives in api/transfers.py (derived, never stored) — CP3's decision_transfer imports it from there.
 - Deliberately NOT here (CP3 #28): split×transfer 409 both directions, review-body splits/transfer, consume awareness, log columns, undo wiring beyond the DB CASCADE.
 - Suite 446 green at push (424 base + 12 splits + 10 transfers). PR #30 updated.
+
+## Session 2026-07-18 (continued): CP3 + CP4
+- CP3 (#28): complete (commit 3ba9a5e; 10 tests in test_review_splits_transfers.py; suite 456 green).
+  Key design: consume_proposal is STATE-AWARE — reads the txn's split/transfer state inside its
+  transaction, forces category None, snapshots decision_splits/decision_transfer (JSONB,
+  names-not-FKs, ids as strings). All consume callers inherit awareness. Counterpart review wraps
+  establish_transfer + two consumes in one outer transaction; AlreadyReviewedError on either side
+  rolls the whole motion back to a 409. Session decisions (flag in review):
+  - Already-reviewed counterpart → 409 pointing at POST /transfers (strict; PRD presumed both unreviewed).
+  - Review-with-splits document failures reuse the PUT rules → 400; mutual-exclusivity conflicts → 422
+    (issue-specified). Exclusivity counts non-null values (explicit category_id:null + transfer is legal).
+  - Undo voids the survivor's transfer decision entries even if the survivor was un-reviewed meanwhile;
+    reopen (reviewed_at NULL) only applies when it was reviewed; a re-classify job is deferred when
+    any survivor reopened.
+- CP4 (#29): complete (commit f4a81af; 9 tests in test_transfer_flywheel.py incl. the milestone
+  acceptance e2e; suite 465 green). NOT cut — promotion shipped. Session decisions (flag in review):
+  - action_mark_transfer + action_category on ONE rule → 400 (self-contradictory law; cross-rule
+    precedence is the pipeline's).
+  - Zero-amount txns never get transfer proposals: the rule clause skips them (falls through to
+    category stages) and the history transfer signal is likewise unproposable onto them.
+  - consume(apply_proposed_transfer=True) on review accept paths, batch, auto-file; False on PATCH
+    and when the user's final word was an explicit category. Since-split/since-linked accepted
+    WITHOUT a transfer (exclusivity respected, one-round-trip TOCTOU residual documented in-code,
+    same class as pipeline phase-1).
+  - Accept-of-transfer-proposal reports result=accepted; any other shape mismatch (incl. proposed
+    transfer but decided category, or linked instead of untracked) reports corrected.
+  - Promotion transfer votes: every standing vote must be kind=untracked; linked filings are
+    deviations for transfer promotion (not just categories/splits).
+- M6 COMPLETE pending review: all 5 CPs on PR #30, 465 green, pushed. Closes #25–#29 at merge.
+- MERGED 2026-07-18: PR #30 rebase-merged to main (bfc3a88..f4a81af); #25-#29 closed; branch deleted.
