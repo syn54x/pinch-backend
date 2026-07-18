@@ -29,7 +29,7 @@ from pinch_backend.api.pagination import (
     Page,
     paginate_by_date,
 )
-from pinch_backend.api.transfers import TransferKind, kind_of
+from pinch_backend.api.transfers import TransferKind, assert_not_in_transfer, kind_of
 from pinch_backend.classification.consume import AlreadyReviewedError, consume_proposal
 from pinch_backend.classification.promotion import maybe_propose_rule
 from pinch_backend.imports.fingerprint import compute_fingerprint, normalize_description
@@ -507,7 +507,7 @@ MAX_SPLIT_LINES = 100
 surface. Same bounded-input stance as the 50-tag cap on PATCH."""
 
 
-def _validate_split_document(txn: Transaction, data: list[SplitLineIn]) -> None:
+def validate_split_document(txn: Transaction, data: list[SplitLineIn]) -> None:
     """The whole-document invariants (PRD M6): validates-all-first — any
     failure rejects the document before anything persists. A zero-amount
     parent is unsplittable by construction: no nonzero parent-signed line
@@ -531,6 +531,38 @@ def _validate_split_document(txn: Transaction, data: list[SplitLineIn]) -> None:
         )
 
 
+async def resolve_split_categories(ledger: Ledger, data: list[SplitLineIn]) -> None:
+    """Every named line category must exist in the acting ledger — a foreign
+    or unknown id is a 404 with no existence leak. Public: the review-with-
+    splits motion (CP3) validates the same document."""
+    wanted = sorted({line.category_id for line in data if line.category_id is not None})
+    if not wanted:
+        return
+    ledger_id = ledger.id
+    found = await Category.where(
+        lambda c, ids=wanted, lid=ledger_id: (c.id.in_(ids)) & (c.ledger_id == lid)
+    ).all()
+    if len(found) < len(wanted):
+        raise NotFoundException(detail="No such category")
+
+
+async def replace_split_lines(ledger: Ledger, txn: Transaction, data: list[SplitLineIn]) -> None:
+    """Swap the split document wholesale and vacate the parent category.
+    Callers wrap in a transaction (put_splits' own, or the review motion's
+    outer one — CP3); validation happens before this is reached."""
+    txn_id = txn.id
+    await SplitLine.where(lambda ln, tid=txn_id: ln.transaction_id == tid).delete()
+    for line in data:
+        await SplitLine.create(
+            ledger=ledger,
+            transaction=txn,
+            amount_minor=line.amount_minor,
+            category_id=line.category_id,
+            memo=line.memo,
+        )
+    txn.category_id = None  # ty: ignore[unresolved-attribute]
+
+
 @put("/{txn_id:uuid}/splits")
 async def put_splits(
     txn_id: FromPath[uuid.UUID],
@@ -542,28 +574,12 @@ async def put_splits(
     holds categories), and never touches review state or the correction log
     — edits edit, review reviews. Line ids are not durable across a re-PUT."""
     txn = await _get(current_ledger, txn_id)
-    _validate_split_document(txn, data)
-
-    wanted = sorted({line.category_id for line in data if line.category_id is not None})
-    if wanted:
-        ledger_id = current_ledger.id
-        found = await Category.where(
-            lambda c, ids=wanted, lid=ledger_id: (c.id.in_(ids)) & (c.ledger_id == lid)
-        ).all()
-        if len(found) < len(wanted):
-            raise NotFoundException(detail="No such category")
+    await assert_not_in_transfer(txn_id)  # split x transfer exclusivity (CP3)
+    validate_split_document(txn, data)
+    await resolve_split_categories(current_ledger, data)
 
     async with transaction():
-        await SplitLine.where(lambda ln, tid=txn_id: ln.transaction_id == tid).delete()
-        for line in data:
-            await SplitLine.create(
-                ledger=current_ledger,
-                transaction=txn,
-                amount_minor=line.amount_minor,
-                category_id=line.category_id,
-                memo=line.memo,
-            )
-        txn.category_id = None  # ty: ignore[unresolved-attribute]
+        await replace_split_lines(current_ledger, txn, data)
         await txn.save()
     log.info(
         "transaction.split",

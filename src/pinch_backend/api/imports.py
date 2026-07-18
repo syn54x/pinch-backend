@@ -55,6 +55,7 @@ from pinch_backend.models import (
     Proposal,
     ProposalTag,
     Transaction,
+    Transfer,
     utcnow,
 )
 from pinch_backend.observability import get_logger
@@ -578,11 +579,65 @@ async def delete_import(
     batch = await _get_import(current_ledger, import_id)
     undone = batch.status is ImportStatus.COMMITTED
     batch_id = batch.id
+    survivors_reopened = 0
     async with transaction():
         txn_ids = [
             t.id for t in await Transaction.where(lambda t: t.source_import_id == batch_id).all()
         ]
         if txn_ids:
+            # Transfers referencing a retracted transaction dissolve (M6 CP3);
+            # a surviving linked counterpart is REOPENED — a silently-restored-
+            # to-spending row is report pollution — and its transfer decision
+            # entry is voided: the decision was made against a transaction
+            # that no longer exists. Runs before the transaction delete so the
+            # link rows still name their members (the FK CASCADE stays the
+            # backstop, not the mechanism).
+            doomed = set(txn_ids)
+            affected = await Transfer.where(
+                lambda tr, ids=txn_ids: (
+                    (tr.outflow_transaction_id.in_(ids)) | (tr.inflow_transaction_id.in_(ids))
+                )
+            ).all()
+            for link in affected:
+                members = (link.outflow_transaction_id, link.inflow_transaction_id)  # ty: ignore[unresolved-attribute]
+                survivor_ids = [m for m in members if m is not None and m not in doomed]
+                await link.delete()
+                for survivor_id in survivor_ids:
+                    reopened = await Transaction.where(
+                        lambda t, sid=survivor_id: (t.id == sid) & (t.reviewed_at != None)  # noqa: E711
+                    ).update(reviewed_at=None, updated_at=utcnow())
+                    survivors_reopened += reopened
+                    decisions = (
+                        await CorrectionLogEntry.where(
+                            lambda e, sid=survivor_id: (
+                                (e.transaction_id == sid) & (e.kind == CorrectionKind.DECISION)
+                            )
+                        )
+                        .order_by(lambda e: e.id)
+                        .all()
+                    )
+                    decision_ids = [d.id for d in decisions]
+                    voided = (
+                        {
+                            v.voids
+                            for v in await CorrectionLogEntry.where(
+                                lambda v, ids=decision_ids: v.voids.in_(ids)
+                            ).all()
+                        }
+                        if decision_ids
+                        else set()
+                    )
+                    for decision in decisions:
+                        if decision.id in voided or decision.decision_transfer is None:
+                            continue
+                        await CorrectionLogEntry.create(
+                            ledger=current_ledger,
+                            transaction_id=decision.transaction_id,
+                            kind=CorrectionKind.VOID,
+                            actor=CorrectionActor.USER,
+                            voids=decision.id,
+                            void_reason="transfer counterpart removed by import undo",
+                        )
             # Retraction over CP3's tables (the M4 forward contract, bound
             # here): proposals die with their transactions; log entries are
             # voided with a later entry, never deleted.
@@ -627,11 +682,18 @@ async def delete_import(
         await Transaction.where(lambda t: t.source_import_id == batch_id).delete()
         await ImportRow.where(lambda r: r.import_batch_id == batch_id).delete()
         await batch.delete()
+    if survivors_reopened:
+        # A reopened survivor is back in the inbox and needs a fresh proposal
+        # — deferred AFTER the transaction commits (the un-review precedent).
+        await classify_ledger.configure(lock=f"ledger:{current_ledger.id}").defer_async(
+            ledger_id=str(current_ledger.id), auto_file_import_id=None
+        )
     log.info(
         "import.undone" if undone else "import.discarded",
         import_id=str(batch_id),
         ledger_id=str(current_ledger.id),
         status=batch.status.value,
+        transfer_survivors_reopened=survivors_reopened,
     )
 
 

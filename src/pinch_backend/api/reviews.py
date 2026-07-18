@@ -11,15 +11,24 @@ module can import rules/transactions helpers without a cycle."""
 import uuid
 from typing import Annotated, Literal
 
+from ferro import transaction
 from litestar import Router, post
 from litestar.di import NamedDependency
-from litestar.exceptions import HTTPException, NotFoundException
+from litestar.exceptions import ClientException, HTTPException, NotFoundException
 from litestar.params import FromPath
-from litestar.status_codes import HTTP_200_OK, HTTP_409_CONFLICT
+from litestar.status_codes import HTTP_200_OK, HTTP_409_CONFLICT, HTTP_422_UNPROCESSABLE_ENTITY
 from pydantic import BaseModel, ConfigDict, Field
 
 from pinch_backend.api.rules import RuleOut, rule_out
-from pinch_backend.api.transactions import TransactionOut, hydrate_transactions
+from pinch_backend.api.transactions import (
+    SplitLineIn,
+    TransactionOut,
+    hydrate_transactions,
+    replace_split_lines,
+    resolve_split_categories,
+    validate_split_document,
+)
+from pinch_backend.api.transfers import assert_not_in_transfer, establish_transfer
 from pinch_backend.classification.consume import AlreadyReviewedError, consume_proposal
 from pinch_backend.classification.promotion import maybe_propose_rule
 from pinch_backend.models import (
@@ -40,6 +49,17 @@ ALREADY_REVIEWED_DETAIL = "Already reviewed; un-review first (PATCH reviewed: fa
 consume's in-transaction CAS losing to a concurrent decision."""
 
 
+class ReviewTransferIn(BaseModel):
+    """The transfer decision (M6 CP3), in exactly one form:
+    ``{"untracked": true}`` (the counterparty isn't in Pinch) or
+    ``{"counterpart": <transaction id>}`` (link the named pair)."""
+
+    model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
+
+    untracked: bool | None = None
+    counterpart: uuid.UUID | None = None
+
+
 class ReviewIn(BaseModel):
     """The FINAL user data. Field-present merge against the proposal: an
     absent field means "the proposal's value", a present one is the user's
@@ -47,7 +67,8 @@ class ReviewIn(BaseModel):
     PATCH's job. An explicit ``"display_name": null`` REJECTS the proposal's
     rename (a correction; the rename is not applied — consume applies
     display_name only when not None); clearing an already-applied override
-    is PATCH's job."""
+    is PATCH's job. ``splits`` and ``transfer`` (M6 CP3) are one-motion
+    decisions, mutually exclusive with ``category_id`` and each other."""
 
     model_config = ConfigDict(use_attribute_docstrings=True)
 
@@ -56,6 +77,12 @@ class ReviewIn(BaseModel):
         default=None, max_length=50
     )
     display_name: str | None = Field(default=None, min_length=1, max_length=100)
+    splits: list[SplitLineIn] | None = None
+    transfer: ReviewTransferIn | None = None
+
+
+def _mutual_exclusion(detail: str) -> ClientException:
+    return ClientException(detail=detail, status_code=HTTP_422_UNPROCESSABLE_ENTITY)
 
 
 class ReviewOut(BaseModel):
@@ -100,6 +127,24 @@ async def review_transaction(
     body = data if data is not None else ReviewIn()
     fields = data.model_fields_set if data is not None else set()
 
+    # One decision shape per motion (M6 CP3): category, splits, or transfer.
+    shapes = sum(
+        (
+            "category_id" in fields and body.category_id is not None,
+            body.splits is not None,
+            body.transfer is not None,
+        )
+    )
+    if shapes > 1:
+        raise _mutual_exclusion("category_id, splits, and transfer are mutually exclusive")
+    if body.transfer is not None:
+        untracked = body.transfer.untracked is True
+        if untracked == (body.transfer.counterpart is not None):
+            raise _mutual_exclusion(
+                'The transfer decision takes exactly one form: {"untracked": true} '
+                'or {"counterpart": <transaction id>}'
+            )
+
     if "category_id" in fields and body.category_id is not None:
         wanted = body.category_id
         category = await Category.where(
@@ -129,18 +174,93 @@ async def review_transaction(
     )
 
     try:
-        await consume_proposal(
-            current_ledger,
-            txn,
-            category_id=final_category,
-            tags=final_tags,
-            display_name=final_display,
-            actor=CorrectionActor.USER,
-        )
+        if body.splits is not None:
+            # One-motion split: the same document rules as PUT /splits, plus
+            # the consume — one database transaction end to end.
+            await assert_not_in_transfer(txn.id)
+            validate_split_document(txn, body.splits)
+            await resolve_split_categories(current_ledger, body.splits)
+            async with transaction():
+                await replace_split_lines(current_ledger, txn, body.splits)
+                entry = await consume_proposal(
+                    current_ledger,
+                    txn,
+                    category_id=None,
+                    tags=final_tags,
+                    display_name=final_display,
+                    actor=CorrectionActor.USER,
+                )
+        elif body.transfer is not None and body.transfer.untracked is True:
+            async with transaction():
+                await establish_transfer(current_ledger, [txn])
+                entry = await consume_proposal(
+                    current_ledger,
+                    txn,
+                    category_id=None,
+                    tags=final_tags,
+                    display_name=final_display,
+                    actor=CorrectionActor.USER,
+                )
+        elif body.transfer is not None:
+            counterpart_id = body.transfer.counterpart
+            if counterpart_id == txn.id:
+                raise _mutual_exclusion("A transaction cannot be its own counterpart")
+            counterpart = await Transaction.where(
+                lambda t, cid=counterpart_id, lid=ledger_id: (t.id == cid) & (t.ledger_id == lid)
+            ).first()
+            if counterpart is None:
+                raise NotFoundException(detail="No such transaction")
+            if counterpart.reviewed_at is not None:
+                # The one-motion contract consumes BOTH sides; an already-
+                # decided counterpart can still be linked, via POST /transfers.
+                raise HTTPException(
+                    status_code=HTTP_409_CONFLICT,
+                    detail="Counterpart is already reviewed; link it via POST /transfers instead",
+                )
+            counterpart_proposal, counterpart_tags = await _pending_proposal(counterpart.id)
+            async with transaction():
+                # Both proposals consumed, both reviewed, two log entries, one
+                # database transaction — accept-by-explicit-id, never filter.
+                await establish_transfer(current_ledger, [txn, counterpart])
+                entry = await consume_proposal(
+                    current_ledger,
+                    txn,
+                    category_id=None,
+                    tags=final_tags,
+                    display_name=final_display,
+                    actor=CorrectionActor.USER,
+                )
+                await consume_proposal(
+                    current_ledger,
+                    counterpart,
+                    category_id=None,
+                    tags=dedupe_tag_names(counterpart_tags),
+                    display_name=(
+                        counterpart_proposal.proposed_display_name if counterpart_proposal else None
+                    ),
+                    actor=CorrectionActor.USER,
+                )
+        else:
+            entry = await consume_proposal(
+                current_ledger,
+                txn,
+                category_id=final_category,
+                tags=final_tags,
+                display_name=final_display,
+                actor=CorrectionActor.USER,
+            )
     except AlreadyReviewedError:
-        # A concurrent decision won between the pre-check and the claim.
+        # A concurrent decision won between the pre-check and the claim (on
+        # either side of a linked motion — the whole write rolled back).
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail=ALREADY_REVIEWED_DETAIL) from None
-    rule = await maybe_propose_rule(current_ledger, txn.description_normalized, final_category)
+
+    # The entry is what actually happened: a decision that landed as a split
+    # or transfer deviates from any category-shaped (or empty) proposal.
+    if entry.decision_splits is not None or entry.decision_transfer is not None:
+        corrected = True
+    rule = await maybe_propose_rule(
+        current_ledger, txn.description_normalized, entry.decision_category_id
+    )
 
     result: Literal["accepted", "corrected"] = "corrected" if corrected else "accepted"
     log.info(
@@ -204,7 +324,7 @@ async def review_batch(
         proposal, proposal_tags = await _pending_proposal(txn.id)
         final_category = proposal.category_id if proposal else None  # ty: ignore[unresolved-attribute]
         try:
-            await consume_proposal(
+            entry = await consume_proposal(
                 current_ledger,
                 txn,
                 category_id=final_category,
@@ -219,7 +339,10 @@ async def review_batch(
             skipped += 1
             continue
         accepted += 1
-        decided[txn.description_normalized] = final_category
+        # What was DECIDED, not what was proposed: on a split or transferred
+        # transaction consume never applies the category (M6 CP3), and the
+        # promotion evidence below must see that truth.
+        decided[txn.description_normalized] = entry.decision_category_id
 
     proposed: list[RuleOut] = []
     for payee, category_id in decided.items():

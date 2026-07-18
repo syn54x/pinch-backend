@@ -51,6 +51,8 @@ class CorrectionLogEntryOut(BaseModel):
     decision_category_name: str | None
     decision_tags: list[str]
     decision_display_name: str | None
+    decision_splits: list[dict] | None
+    decision_transfer: dict | None
     voids: uuid.UUID | None
     void_reason: str | None
     created_at: datetime
@@ -78,6 +80,8 @@ def _out(e: CorrectionLogEntry) -> CorrectionLogEntryOut:
         decision_category_name=e.decision_category_name,
         decision_tags=e.decision_tags,
         decision_display_name=e.decision_display_name,
+        decision_splits=e.decision_splits,
+        decision_transfer=e.decision_transfer,
         voids=e.voids,
         void_reason=e.void_reason,
         created_at=e.created_at,

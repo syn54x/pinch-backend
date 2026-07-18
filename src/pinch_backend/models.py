@@ -706,6 +706,17 @@ class CorrectionLogEntry(TimestampMixin, Model):
     decision_category_name: str | None = None
     decision_tags: list[str] = Field(default_factory=list)
     decision_display_name: str | None = None
+    decision_splits: list[dict] | None = None
+    """The split document decided at review (M6 CP3): a JSONB list of
+    ``{amount_minor, category_id, category_name, memo}`` snapshots —
+    names-not-FKs, ids as strings-of-record only. Null when the decision
+    wasn't a split. A split decision carries no decision_category, so it
+    reads as a deviation for category promotion by construction."""
+    decision_transfer: dict | None = None
+    """The transfer membership decided at review (M6 CP3):
+    ``{kind: linked|untracked, counterpart_transaction_id,
+    counterpart_account_id}`` — a snapshot, surviving dissolution and
+    counterpart deletion. Null when the decision wasn't a transfer."""
     # Void bookkeeping (kind=void only).
     voids: uuid.UUID | None = Field(default=None, index=True)
     """The entry this one retracts — a bare id, same reasoning as
