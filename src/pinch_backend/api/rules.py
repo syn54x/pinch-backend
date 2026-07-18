@@ -44,6 +44,9 @@ class RuleCreateIn(BaseModel):
     action_category_id: uuid.UUID | None = None
     action_add_tags: TagNames = Field(default_factory=list, max_length=50)
     action_rename_to: str | None = Field(default=None, min_length=1, max_length=100)
+    action_mark_transfer: bool = False
+    """Propose an untracked transfer (M6 CP4); mutually exclusive with
+    action_category_id — one rule, one classification stance."""
 
 
 class RulePatchIn(BaseModel):
@@ -57,6 +60,7 @@ class RulePatchIn(BaseModel):
     """Present-and-null clears the category action."""
     action_add_tags: TagNames | None = Field(default=None, max_length=50)
     action_rename_to: str | None = Field(default=None, min_length=1, max_length=100)
+    action_mark_transfer: bool | None = None
     status: RuleStatus | None = None
 
 
@@ -69,6 +73,7 @@ class RuleOut(BaseModel):
     action_category: CategoryRef | None
     action_add_tags: list[str]
     action_rename_to: str | None
+    action_mark_transfer: bool
     created_at: datetime
 
 
@@ -104,11 +109,18 @@ def parse_condition(payload: dict, default_currency: str) -> ConditionSpec:
         ) from None
 
 
-def _assert_some_action(
-    category_id: uuid.UUID | None, add_tags: list[str], rename_to: str | None
+def _assert_coherent_actions(
+    category_id: uuid.UUID | None,
+    add_tags: list[str],
+    rename_to: str | None,
+    mark_transfer: bool,
 ) -> None:
-    if category_id is None and not add_tags and rename_to is None:
+    if category_id is None and not add_tags and rename_to is None and not mark_transfer:
         raise ClientException(detail="A rule must carry at least one action")
+    if category_id is not None and mark_transfer:
+        # One rule, one classification stance — cross-rule precedence is the
+        # pipeline's job; a self-contradictory rule is a user error.
+        raise ClientException(detail="A rule cannot both set a category and mark a transfer")
 
 
 async def _get(ledger: Ledger, rule_id: uuid.UUID) -> Rule:
@@ -140,6 +152,7 @@ async def rule_out(rule: Rule) -> RuleOut:
         action_category=category,
         action_add_tags=rule.action_add_tags,
         action_rename_to=rule.action_rename_to,
+        action_mark_transfer=rule.action_mark_transfer,
         created_at=rule.created_at,
     )
 
@@ -153,7 +166,12 @@ async def create_rule(
     """A user-created rule is law immediately (status=active): consent by
     authorship. PROPOSED is what CP4's promotion mints."""
     spec = parse_condition(data.condition, current_user.primary_currency)
-    _assert_some_action(data.action_category_id, data.action_add_tags, data.action_rename_to)
+    _assert_coherent_actions(
+        data.action_category_id,
+        data.action_add_tags,
+        data.action_rename_to,
+        data.action_mark_transfer,
+    )
     category = (
         await _resolve_category(current_ledger, data.action_category_id)
         if data.action_category_id
@@ -165,6 +183,7 @@ async def create_rule(
         action_category=category,
         action_add_tags=data.action_add_tags,
         action_rename_to=data.action_rename_to,
+        action_mark_transfer=data.action_mark_transfer,
     )
     log.info("rule.created", rule_id=str(rule.id), ledger_id=str(current_ledger.id))
     return await rule_out(rule)
@@ -234,6 +253,10 @@ async def update_rule(
         rule.action_add_tags = data.action_add_tags if data.action_add_tags is not None else []
     if "action_rename_to" in fields:
         rule.action_rename_to = data.action_rename_to
+    if "action_mark_transfer" in fields:
+        if data.action_mark_transfer is None:
+            raise ClientException(detail="action_mark_transfer cannot be null; use false")
+        rule.action_mark_transfer = data.action_mark_transfer
     if "status" in fields:
         if data.status is None:
             raise ClientException(detail="status cannot be null")
@@ -241,10 +264,11 @@ async def update_rule(
             raise ClientException(detail="only promotion proposes a rule")
         rule.status = data.status
 
-    _assert_some_action(
+    _assert_coherent_actions(
         rule.action_category_id,  # ty: ignore[unresolved-attribute]
         rule.action_add_tags,
         rule.action_rename_to,
+        rule.action_mark_transfer,
     )
     await rule.save()
     log.info("rule.updated", rule_id=str(rule.id), ledger_id=str(current_ledger.id))

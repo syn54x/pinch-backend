@@ -122,7 +122,13 @@ async def consume_proposal(
     tags: list[str],
     display_name: str | None,
     actor: CorrectionActor,
+    apply_proposed_transfer: bool = False,
 ) -> CorrectionLogEntry:
+    """``apply_proposed_transfer`` is the accept-as-is switch for a
+    transfer-shaped proposal (M6 CP4): True on the review endpoints' accept
+    paths and auto-file — consuming creates the one-sided Transfer; False
+    where the caller's data IS the decision (PATCH review, or an explicit
+    category/splits/transfer decision replacing the proposal)."""
     txn_id = txn.id
     proposal = await Proposal.where(lambda p, tid=txn_id: p.transaction_id == tid).first()
     proposal_tags: list[str] = []
@@ -156,6 +162,37 @@ async def consume_proposal(
         ).update(reviewed_at=stamp, updated_at=stamp)
         if claimed == 0:
             raise AlreadyReviewedError(f"transaction {txn_id} is already reviewed")
+        if (
+            apply_proposed_transfer
+            and proposal is not None
+            and proposal.proposed_transfer
+            and txn.amount_minor != 0
+        ):
+            # Consume respects exclusivity (M6 CP4): a since-split or
+            # since-linked transaction is accepted WITHOUT a transfer — the
+            # standing state wins, and the snapshot below records it. The
+            # one-round-trip window between this check and the insert is the
+            # same accepted TOCTOU class as pipeline.py's phase-1 note; the
+            # unique FK indexes keep a race from ever double-linking.
+            already_split = (
+                await SplitLine.where(lambda ln, tid=txn_id: ln.transaction_id == tid).first()
+                is not None
+            )
+            already_linked = (
+                await Transfer.where(
+                    lambda tr, tid=txn_id: (
+                        (tr.outflow_transaction_id == tid) | (tr.inflow_transaction_id == tid)
+                    )
+                ).first()
+                is not None
+            )
+            if not already_split and not already_linked:
+                negative = txn.amount_minor < 0
+                await Transfer.create(
+                    ledger=ledger,
+                    outflow_transaction_id=txn_id if negative else None,
+                    inflow_transaction_id=None if negative else txn_id,
+                )
         # Split/transfer awareness (M6 CP3): when the transaction ends up
         # split or in a transfer, the category layer is not this row's to
         # hold — the caller's category is not applied, and the decision is

@@ -47,6 +47,7 @@ class ProposalDraft:
     detail: dict | None
     tag_names: list[str]
     display_name: str | None
+    proposed_transfer: bool = False
 
 
 async def classify_transaction(
@@ -72,6 +73,22 @@ async def classify_transaction(
     if matching:
         detail["rule_ids"] = [str(rule.id) for rule, _ in matching]
 
+    # Precedence: transfer beats category (M6 CP4, the one new clause in the
+    # per-action-type table) — any matching mark-transfer rule makes the
+    # proposal transfer-shaped and suppresses history/AI. Zero-amount
+    # transactions are unlinkable, so the clause never fires for them and
+    # the category stages proceed.
+    transfer_rule = next((rule for rule, _ in matching if rule.action_mark_transfer), None)
+    if transfer_rule is not None and txn.amount_minor != 0:
+        return ProposalDraft(
+            category_id=None,
+            provenance=ProposalProvenance.RULE,
+            detail=detail,
+            tag_names=tag_names,
+            display_name=display_name,
+            proposed_transfer=True,
+        )
+
     category_rule = next(
         (rule for rule, _ in matching if rule.action_category_id is not None),  # ty: ignore[unresolved-attribute]
         None,
@@ -86,7 +103,9 @@ async def classify_transaction(
         )
 
     hit = await history_match(txn.ledger_id, txn.description_normalized)  # ty: ignore[unresolved-attribute]
-    if hit is not None:
+    # A hit with no category IS the untracked-transfer signal (see
+    # history_match) — unproposable onto a zero-amount transaction.
+    if hit is not None and (hit.category_id is not None or txn.amount_minor != 0):  # ty: ignore[unresolved-attribute]
         detail["matched_transaction_id"] = str(hit.id)
         return ProposalDraft(
             category_id=hit.category_id,  # ty: ignore[unresolved-attribute]
@@ -94,6 +113,7 @@ async def classify_transaction(
             detail=detail,
             tag_names=tag_names,
             display_name=display_name,
+            proposed_transfer=hit.category_id is None,  # ty: ignore[unresolved-attribute]
         )
 
     ai_category = await active_classifier.classify(txn)
@@ -185,6 +205,7 @@ async def sweep_ledger(
                         transaction=txn,
                         category_id=draft.category_id,
                         proposed_display_name=draft.display_name,
+                        proposed_transfer=draft.proposed_transfer,
                         provenance=draft.provenance,
                         provenance_detail=draft.detail,
                     )
@@ -254,6 +275,7 @@ async def sweep_ledger(
                         tags=tag_names,
                         display_name=proposal.proposed_display_name,
                         actor=CorrectionActor.AUTO,
+                        apply_proposed_transfer=True,  # auto-file applies as-is (CP4)
                     )
                 except AlreadyReviewedError:
                     # A human decided while consume was in flight — the same

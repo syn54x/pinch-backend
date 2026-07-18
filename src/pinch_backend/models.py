@@ -622,6 +622,12 @@ class Rule(TimestampMixin, Model):
     """Tag names to propose, unioned across matching rules (D13)."""
     action_rename_to: str | None = None
     """Proposed display_name override."""
+    action_mark_transfer: bool = False
+    """Propose an UNTRACKED transfer (M6 CP4) — a rule sees one transaction
+    and cannot know a counterpart; linked-pair proposing is M7's detector.
+    Precedence: transfer beats category — any matching mark-transfer rule
+    makes the proposal transfer-shaped and suppresses the category stages.
+    Mutually exclusive with action_category at the API (contradictory law)."""
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
@@ -648,6 +654,11 @@ class Proposal(TimestampMixin, Model):
     empties it in the guarded delete path; this is the backstop (PR #23
     review)."""
     proposed_display_name: str | None = None
+    proposed_transfer: bool = False
+    """The pipeline proposes marking this an UNTRACKED transfer (M6 CP4);
+    category is NULL when set — the shapes are exclusive on the proposal
+    exactly as they are on the decision. Consuming it creates the one-sided
+    Transfer (unless the transaction was split or linked in the meantime)."""
     provenance: ProposalProvenance = ProposalProvenance.NONE
     provenance_detail: dict | None = None
     """Snapshots, never FKs (PRD M5 D11): contributing rule ids as strings,
