@@ -59,12 +59,19 @@ def _covers(rule: Rule, payee: str) -> bool:
 
 
 async def maybe_propose_rule(
-    ledger: Ledger, payee: str, category_id: "uuid.UUID | None"
+    ledger: Ledger,
+    payee: str,
+    category_id: "uuid.UUID | None",
+    *,
+    untracked_transfer: bool = False,
 ) -> Rule | None:
     """The inline promotion check. ``category_id`` is the just-decided
-    category (Y); the just-appended log entry is already evidence because
-    this runs after the consume transaction commits."""
-    if category_id is None:
+    category (Y), or ``untracked_transfer`` marks the just-decided untracked
+    transfer filing (M6 CP4) — identical trigger shape, reading
+    decision_transfer instead of decision_category. Splits, linked transfers,
+    and shrugs trigger nothing; the just-appended log entry is already
+    evidence because this runs after the consume transaction commits."""
+    if category_id is None and not untracked_transfer:
         return None
     if not payee or len(payee) > _MAX_PAYEE_CONDITION_LENGTH:
         return None
@@ -94,8 +101,19 @@ async def maybe_propose_rule(
     votes = [e for e in latest.values() if e.actor == CorrectionActor.USER]
     if len(votes) < MIN_PROMOTION_DECISIONS:
         return None
-    if any(vote.decision_category_id != category_id for vote in votes):
-        return None  # one deviation kills (uncategorized was a decision too)
+    if untracked_transfer:
+        # All-time consistency for the transfer shape: every standing vote
+        # must be an untracked-transfer filing. Category filings, splits, and
+        # linked transfers are all deviations — mixed treatment mints nothing.
+        if any(
+            vote.decision_transfer is None or vote.decision_transfer.get("kind") != "untracked"
+            for vote in votes
+        ):
+            return None
+    elif any(vote.decision_category_id != category_id for vote in votes):
+        # One deviation kills (uncategorized was a decision too; split and
+        # transfer filings carry no decision_category, so they land here).
+        return None
 
     rules = await Rule.where(lambda r, lid=ledger_id: r.ledger_id == lid).all()
     if any(_covers(rule, payee) for rule in rules):
@@ -106,14 +124,16 @@ async def maybe_propose_rule(
         ledger=ledger,
         status=RuleStatus.PROPOSED,
         condition=condition.model_dump(exclude_none=True),
-        action_category_id=category_id,
+        action_category_id=None if untracked_transfer else category_id,
+        action_mark_transfer=untracked_transfer,
     )
     log.info(
         "rule.promoted",
         rule_id=str(rule.id),
         ledger_id=str(ledger_id),
         payee=payee,
-        category_id=str(category_id),
+        category_id=str(category_id) if category_id else None,
+        mark_transfer=untracked_transfer,
         decisions=len(votes),
     )
     return rule

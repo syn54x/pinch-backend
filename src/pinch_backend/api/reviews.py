@@ -241,6 +241,8 @@ async def review_transaction(
                     actor=CorrectionActor.USER,
                 )
         else:
+            # Accept-as-is of a transfer-shaped proposal creates the untracked
+            # Transfer (M6 CP4) — unless the user's final word was a category.
             entry = await consume_proposal(
                 current_ledger,
                 txn,
@@ -248,6 +250,9 @@ async def review_transaction(
                 tags=final_tags,
                 display_name=final_display,
                 actor=CorrectionActor.USER,
+                apply_proposed_transfer=not (
+                    "category_id" in fields and body.category_id is not None
+                ),
             )
     except AlreadyReviewedError:
         # A concurrent decision won between the pre-check and the claim (on
@@ -255,11 +260,24 @@ async def review_transaction(
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail=ALREADY_REVIEWED_DETAIL) from None
 
     # The entry is what actually happened: a decision that landed as a split
-    # or transfer deviates from any category-shaped (or empty) proposal.
-    if entry.decision_splits is not None or entry.decision_transfer is not None:
+    # or transfer deviates from the proposal — unless the proposal itself was
+    # transfer-shaped and the decision is the matching untracked link (CP4).
+    prop_transfer = bool(proposal and proposal.proposed_transfer)
+    decided_untracked = (
+        entry.decision_transfer is not None and entry.decision_transfer["kind"] == "untracked"
+    )
+    shape_accepted = prop_transfer and decided_untracked
+    if (
+        entry.decision_splits is not None or entry.decision_transfer is not None
+    ) and not shape_accepted:
         corrected = True
+    if prop_transfer and entry.decision_transfer is None:
+        corrected = True  # the transfer proposal was rejected
     rule = await maybe_propose_rule(
-        current_ledger, txn.description_normalized, entry.decision_category_id
+        current_ledger,
+        txn.description_normalized,
+        entry.decision_category_id,
+        untracked_transfer=decided_untracked,
     )
 
     result: Literal["accepted", "corrected"] = "corrected" if corrected else "accepted"
@@ -315,7 +333,7 @@ async def review_batch(
         )
 
     accepted = skipped = 0
-    decided: dict[str, uuid.UUID | None] = {}
+    decided: dict[str, tuple[uuid.UUID | None, bool]] = {}
     for wanted in ids:
         txn = by_id[wanted]
         if txn.reviewed_at is not None:
@@ -331,6 +349,7 @@ async def review_batch(
                 tags=dedupe_tag_names(proposal_tags),
                 display_name=proposal.proposed_display_name if proposal else None,
                 actor=CorrectionActor.USER,
+                apply_proposed_transfer=True,  # accept-as-is IS the batch (CP4)
             )
         except AlreadyReviewedError:
             # A concurrent decision won ⇒ it IS already reviewed — the same
@@ -342,11 +361,16 @@ async def review_batch(
         # What was DECIDED, not what was proposed: on a split or transferred
         # transaction consume never applies the category (M6 CP3), and the
         # promotion evidence below must see that truth.
-        decided[txn.description_normalized] = entry.decision_category_id
+        decided[txn.description_normalized] = (
+            entry.decision_category_id,
+            entry.decision_transfer is not None and entry.decision_transfer["kind"] == "untracked",
+        )
 
     proposed: list[RuleOut] = []
-    for payee, category_id in decided.items():
-        rule = await maybe_propose_rule(current_ledger, payee, category_id)
+    for payee, (category_id, untracked) in decided.items():
+        rule = await maybe_propose_rule(
+            current_ledger, payee, category_id, untracked_transfer=untracked
+        )
         if rule is not None:
             proposed.append(await rule_out(rule))
     log.info(

@@ -92,6 +92,7 @@ class ProposalOut(BaseModel):
     category: CategoryRef | None
     tags: list[str]
     display_name: str | None
+    proposed_transfer: bool
     provenance: ProposalProvenance
 
 
@@ -283,6 +284,7 @@ async def hydrate_transactions(txns: list[Transaction]) -> list[TransactionOut]:
                 category=CategoryRef(id=pcat.id, name=pcat.name) if pcat else None,
                 tags=tags_by_proposal.get(proposal.id, []),
                 display_name=proposal.proposed_display_name,
+                proposed_transfer=proposal.proposed_transfer,
                 provenance=proposal.provenance,
             )
         result.append(
