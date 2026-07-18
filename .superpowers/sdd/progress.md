@@ -130,3 +130,11 @@ CP0: complete (findings comment posted 2026-07-16; scratch scripts run against P
 - CP2 (#27): BLOCKED by ferro-orm#307 (native edge wired). Same rule.
 - CP4 (#29): additionally blocked by ferro-orm#307 (history-stage extension) — edge wired.
 - Resume protocol (the CP3/ferro#302 precedent): when ferro ships, bump the floor in pyproject → uv sync → re-run the two upstream-issue repros to confirm the verified spelling → proceed with CP1/CP2 TDD. Both upstream issues carry runnable repros.
+
+## Resume 2026-07-18: ferro 0.17.0 unblocked CP1/CP2
+- ferro 0.17.0 shipped PRDs 0008/0009 as existence tests (.exists() on reverse/M2M relations, correlated EXISTS, root-shaped) + uniform ~ negation; ferro-orm#307/#308 closed. Floor bumped (d1fd6f4), both repros re-verified by scratch on Postgres 18; re-verification comment on #25.
+- Verified spellings now in use: is_transfer = t.transfer_out.exists() | t.transfer_in.exists() (false via ~); line-aware category filter = (t.category_id.in_(ids)) | (t.split_lines.exists(lambda ln: ln.category_id.in_(ids))). Reverse relations are tested-never-traversed (t.lines.category_id stays a build error); in_(subquery) and left_join-on-reverse stay loud TypeErrors.
+- CP1 (#26): complete (commit 314c709; 12 tests in test_splits_api.py; suite 436 green). Splits document 400s (repo convention — issue named no codes); DELETE on unsplit txn = 404; MAX_SPLIT_LINES=100 cap (bounded-input stance, unspecced — flag in review); memo max 500.
+- CP2 (#27): complete (commit 8eaa3ba; 10 tests in test_transfers_api.py; suite 446 green). Pair-shape rejections 422 (issue-specified for same-sign; extended to the class: unequal magnitude, mixed currency, same account, zero amount, duplicate id); occupied 409 (pre-check + UniqueViolationError race catch); Transfer FKs explicit ON DELETE CASCADE (dissolution backstop; CP3 wires reopen-the-survivor); GET /transfers uses uuid7 keyset paginate with left_join both sides for either-side account_id; TransferKind lives in api/transfers.py (derived, never stored) — CP3's decision_transfer imports it from there.
+- Deliberately NOT here (CP3 #28): split×transfer 409 both directions, review-body splits/transfer, consume awareness, log columns, undo wiring beyond the DB CASCADE.
+- Suite 446 green at push (424 base + 12 splits + 10 transfers). PR #30 updated.

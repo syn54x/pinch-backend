@@ -29,10 +29,12 @@ from pinch_backend.api.pagination import (
     Page,
     paginate,
 )
-from pinch_backend.models import Ledger, Transaction, Transfer
+from pinch_backend.models import Ledger, SplitLine, Transaction, Transfer
 from pinch_backend.observability import get_logger
 
 log = get_logger(__name__)
+
+OCCUPIED_DETAIL = "A transaction belongs to at most one transfer; dissolve the existing one first"
 
 
 class TransferKind(StrEnum):
@@ -83,22 +85,28 @@ def _unprocessable(detail: str) -> ClientException:
     return ClientException(detail=detail, status_code=HTTP_422_UNPROCESSABLE_ENTITY)
 
 
-@post("/")
-async def create_transfer(
-    data: TransferCreateIn, current_ledger: NamedDependency[Ledger]
-) -> TransferOut:
-    ids = list(data.transaction_ids)
-    if len(ids) != len(set(ids)):
-        raise _unprocessable("A linked transfer needs two distinct transactions")
-    ledger_id = current_ledger.id
-    txns = await Transaction.where(
-        lambda t, wanted=ids, lid=ledger_id: (t.id.in_(wanted)) & (t.ledger_id == lid)
-    ).all()
-    if len(txns) < len(ids):
-        # Cross-ledger and nonexistent ids answer identically — a foreign id's
-        # existence is never confirmed.
-        raise NotFoundException(detail="No such transaction")
+async def assert_not_in_transfer(txn_id: "uuid.UUID") -> None:
+    """Split x transfer exclusivity, transfer side (M6 CP3): a transaction
+    already in a transfer refuses a split document. Public: put_splits and
+    the review-with-splits motion both guard through this."""
+    occupied = await Transfer.where(
+        lambda tr, tid=txn_id: (
+            (tr.outflow_transaction_id == tid) | (tr.inflow_transaction_id == tid)
+        )
+    ).first()
+    if occupied is not None:
+        raise ClientException(
+            detail="Transaction is in a transfer; dissolve it before splitting",
+            status_code=HTTP_409_CONFLICT,
+        )
 
+
+async def establish_transfer(ledger: Ledger, txns: list[Transaction]) -> Transfer:
+    """Validate and create a transfer link, vacating the members' categories
+    — the one implementation behind POST /transfers and the review-with-
+    transfer motion (CP3). Raises 422 on pair-shape violations, 409 on a
+    split member or an occupied one. Opens a transaction that nests under a
+    caller's, so a review motion stays one atomic write."""
     for txn in txns:
         if txn.amount_minor == 0:
             raise _unprocessable("Zero-amount transactions cannot be linked as transfers")
@@ -120,36 +128,61 @@ async def create_transfer(
         (only,) = txns
         outflow, inflow = (only, None) if only.amount_minor < 0 else (None, only)
 
+    member_ids = [t.id for t in txns]
+    split_member = await SplitLine.where(
+        lambda ln, ids=member_ids: ln.transaction_id.in_(ids)
+    ).first()
+    if split_member is not None:
+        # Split x transfer exclusivity, split side (CP3).
+        raise ClientException(
+            detail="Split transactions cannot join a transfer; unsplit first",
+            status_code=HTTP_409_CONFLICT,
+        )
+
     # Friendly pre-check; the unique FK indexes remain the race-proof
     # enforcement (CP0-verified) — a concurrent winner surfaces below as
     # UniqueViolationError and answers the same 409.
     occupied = await Transfer.where(
-        lambda tr, wanted=ids: (
+        lambda tr, wanted=member_ids: (
             (tr.outflow_transaction_id.in_(wanted)) | (tr.inflow_transaction_id.in_(wanted))
         )
     ).first()
     if occupied is not None:
-        raise ClientException(
-            detail="A transaction belongs to at most one transfer; dissolve the existing one first",
-            status_code=HTTP_409_CONFLICT,
-        )
+        raise ClientException(detail=OCCUPIED_DETAIL, status_code=HTTP_409_CONFLICT)
 
     try:
         async with transaction():
             transfer = await Transfer.create(
-                ledger=current_ledger,
+                ledger=ledger,
                 outflow_transaction_id=outflow.id if outflow else None,
                 inflow_transaction_id=inflow.id if inflow else None,
             )
             # In a transfer => category NULL, both sides (creation vacates).
             for txn in txns:
-                txn.category_id = None  # ty: ignore[invalid-assignment]
+                txn.category_id = None  # ty: ignore[unresolved-attribute]
                 await txn.save()
     except UniqueViolationError:
-        raise ClientException(
-            detail="A transaction belongs to at most one transfer; dissolve the existing one first",
-            status_code=HTTP_409_CONFLICT,
-        ) from None
+        raise ClientException(detail=OCCUPIED_DETAIL, status_code=HTTP_409_CONFLICT) from None
+    return transfer
+
+
+@post("/")
+async def create_transfer(
+    data: TransferCreateIn, current_ledger: NamedDependency[Ledger]
+) -> TransferOut:
+    ids = list(data.transaction_ids)
+    if len(ids) != len(set(ids)):
+        raise _unprocessable("A linked transfer needs two distinct transactions")
+    ledger_id = current_ledger.id
+    txns = await Transaction.where(
+        lambda t, wanted=ids, lid=ledger_id: (t.id.in_(wanted)) & (t.ledger_id == lid)
+    ).all()
+    if len(txns) < len(ids):
+        # Cross-ledger and nonexistent ids answer identically — a foreign id's
+        # existence is never confirmed.
+        raise NotFoundException(detail="No such transaction")
+
+    transfer = await establish_transfer(current_ledger, list(txns))
     log.info(
         "transfer.created",
         transfer_id=str(transfer.id),

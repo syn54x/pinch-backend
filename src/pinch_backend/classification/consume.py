@@ -33,7 +33,9 @@ from pinch_backend.models import (
     Proposal,
     ProposalProvenance,
     ProposalTag,
+    SplitLine,
     Transaction,
+    Transfer,
     utcnow,
 )
 from pinch_backend.observability import get_logger
@@ -49,6 +51,67 @@ class AlreadyReviewedError(Exception):
     """The in-transaction claim found the transaction already reviewed — a
     concurrent decision won. Callers translate: the review endpoints answer
     409, the batch counts a skip, auto-file moves to the next row."""
+
+
+async def _split_transfer_state(
+    txn_id: "uuid.UUID",
+) -> tuple[list[dict] | None, dict | None]:
+    """The transaction's split/transfer state as log-ready snapshots (M6
+    CP3): names-not-FKs, ids as strings. Read inside consume's transaction so
+    the snapshot and the claim see one version of the row's world."""
+    lines = (
+        await SplitLine.where(lambda ln, tid=txn_id: ln.transaction_id == tid)
+        .order_by(lambda ln: ln.id)
+        .all()
+    )
+    decision_splits = None
+    if lines:
+        line_cat_ids = sorted(
+            {ln.category_id for ln in lines if ln.category_id is not None}  # ty: ignore[unresolved-attribute]
+        )
+        line_names = (
+            {
+                c.id: c.name
+                for c in await Category.where(lambda c, ids=line_cat_ids: c.id.in_(ids)).all()
+            }
+            if line_cat_ids
+            else {}
+        )
+        decision_splits = [
+            {
+                "amount_minor": ln.amount_minor,
+                "category_id": str(ln.category_id) if ln.category_id else None,  # ty: ignore[unresolved-attribute]
+                "category_name": line_names.get(ln.category_id),  # ty: ignore[unresolved-attribute]
+                "memo": ln.memo,
+            }
+            for ln in lines
+        ]
+
+    transfer = await Transfer.where(
+        lambda tr, tid=txn_id: (
+            (tr.outflow_transaction_id == tid) | (tr.inflow_transaction_id == tid)
+        )
+    ).first()
+    decision_transfer = None
+    if transfer is not None:
+        counterpart_id = (
+            transfer.inflow_transaction_id  # ty: ignore[unresolved-attribute]
+            if transfer.outflow_transaction_id == txn_id  # ty: ignore[unresolved-attribute]
+            else transfer.outflow_transaction_id  # ty: ignore[unresolved-attribute]
+        )
+        counterpart_account_id = None
+        if counterpart_id is not None:
+            counterpart = await Transaction.where(lambda t, cid=counterpart_id: t.id == cid).first()
+            if counterpart is not None:
+                counterpart_account_id = counterpart.account_id  # ty: ignore[unresolved-attribute]
+        decision_transfer = {
+            "kind": "linked" if counterpart_id is not None else "untracked",
+            "counterpart_transaction_id": str(counterpart_id) if counterpart_id else None,
+            "counterpart_account_id": (
+                str(counterpart_account_id) if counterpart_account_id else None
+            ),
+        }
+    return decision_splits, decision_transfer
 
 
 async def consume_proposal(
@@ -93,6 +156,13 @@ async def consume_proposal(
         ).update(reviewed_at=stamp, updated_at=stamp)
         if claimed == 0:
             raise AlreadyReviewedError(f"transaction {txn_id} is already reviewed")
+        # Split/transfer awareness (M6 CP3): when the transaction ends up
+        # split or in a transfer, the category layer is not this row's to
+        # hold — the caller's category is not applied, and the decision is
+        # logged as what it actually was, never a fake "uncategorized" shrug.
+        decision_splits, decision_transfer = await _split_transfer_state(txn_id)
+        if decision_splits is not None or decision_transfer is not None:
+            category_id = None
         entry = await CorrectionLogEntry.create(
             ledger=ledger,
             transaction_id=txn.id,
@@ -114,6 +184,8 @@ async def consume_proposal(
             decision_category_name=names.get(category_id),
             decision_tags=list(tags),
             decision_display_name=display_name,
+            decision_splits=decision_splits,
+            decision_transfer=decision_transfer,
         )
         txn.category_id = category_id  # ty: ignore[unresolved-attribute]
         if display_name is not None:
