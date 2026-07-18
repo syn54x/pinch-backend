@@ -150,6 +150,7 @@ class Ledger(TimestampMixin, Model):
     proposals: Relation[list["Proposal"]] = BackRef()
     proposal_tags: Relation[list["ProposalTag"]] = BackRef()
     correction_log_entries: Relation[list["CorrectionLogEntry"]] = BackRef()
+    split_lines: Relation[list["SplitLine"]] = BackRef()
 
 
 class User(TimestampMixin, Model):
@@ -433,6 +434,7 @@ class Transaction(TimestampMixin, Model):
 
     transaction_tags: Relation[list["TransactionTag"]] = BackRef()
     proposals: Relation[list["Proposal"]] = BackRef()
+    split_lines: Relation[list["SplitLine"]] = BackRef()
 
 
 class Category(TimestampMixin, Model):
@@ -462,6 +464,43 @@ class Category(TimestampMixin, Model):
     transactions: Relation[list["Transaction"]] = BackRef()
     rules: Relation[list["Rule"]] = BackRef()
     proposals: Relation[list["Proposal"]] = BackRef()
+    split_lines: Relation[list["SplitLine"]] = BackRef()
+
+
+class SplitLine(TimestampMixin, Model):
+    """One line of a split transaction (PRD M6 #26, CONTEXT.md: Split line).
+
+    Lines are the split — at least two, each nonzero and parent-signed,
+    summing exactly to the parent amount, enforced at the API (the document
+    validates whole or not at all). The parent transaction persists untouched
+    as the anchor with its own category vacated while lines exist: exactly
+    one layer holds categories. Tags, notes, display name stay parent-level.
+    Line ids are not durable — a re-PUT replaces the document wholesale.
+    """
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    ledger: Annotated[Ledger, ForeignKey(related_name="split_lines", index=True)]
+    """The tenancy column (ADR-0002), denormalized so row-level security has
+    one ownership column on every domain table."""
+    transaction: Annotated[
+        "Transaction", ForeignKey(related_name="split_lines", on_delete="CASCADE", index=True)
+    ]
+    """DB-level ON DELETE CASCADE (scratch-verified at CP0): lines die with
+    their transaction — the import-undo path needs no line bookkeeping."""
+    amount_minor: int
+    """Integer minor units, parent-signed; the parent's currency is the
+    line's currency (no column — one document, one currency)."""
+    category: Annotated[
+        Optional["Category"],
+        ForeignKey(related_name="split_lines", on_delete="SET NULL", index=True),
+    ] = None
+    """NULL = an uncategorized line (legal — the taxonomy may be empty).
+    DB-level ON DELETE SET NULL backstop behind the API's guarded
+    category-delete disposition, same stance as Transaction.category."""
+    memo: str | None = None
+    """Optional free-form label for the line ("tires", "groceries half")."""
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class Tag(TimestampMixin, Model):

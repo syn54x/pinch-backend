@@ -14,9 +14,9 @@ from datetime import date, datetime
 from typing import Annotated
 
 from ferro import transaction
-from litestar import Router, get, patch, post
+from litestar import Router, delete, get, patch, post, put
 from litestar.di import NamedDependency
-from litestar.exceptions import HTTPException, NotFoundException
+from litestar.exceptions import ClientException, HTTPException, NotFoundException
 from litestar.params import FromPath, QueryParameter
 from litestar.status_codes import HTTP_409_CONFLICT
 from pydantic import BaseModel, ConfigDict, Field
@@ -41,6 +41,7 @@ from pinch_backend.models import (
     Proposal,
     ProposalProvenance,
     ProposalTag,
+    SplitLine,
     Tag,
     Transaction,
     TransactionTag,
@@ -59,6 +60,16 @@ class CategoryRef(BaseModel):
 class TagRef(BaseModel):
     id: uuid.UUID
     name: str
+
+
+class SplitLineOut(BaseModel):
+    """One line of the split document (M6 CP1) — amount, resolved category,
+    memo. No line id: ids are not durable across a re-PUT, so nothing a
+    client could hold is exposed."""
+
+    amount_minor: int
+    category: CategoryRef | None
+    memo: str | None
 
 
 class ProposalOut(BaseModel):
@@ -88,6 +99,10 @@ class TransactionOut(BaseModel):
     category: CategoryRef | None
     tags: list[TagRef]
     proposal: ProposalOut | None
+    splits: list[SplitLineOut] | None
+    """The split document in creation order, or null when unsplit (M6 CP1).
+    Non-null implies ``category`` is null — exactly one layer holds
+    categories."""
     created_at: datetime
 
 
@@ -171,9 +186,17 @@ async def hydrate_transactions(txns: list[Transaction]) -> list[TransactionOut]:
     for pt in sorted(proposal_tag_rows, key=lambda pt: pt.name.casefold()):
         tags_by_proposal.setdefault(pt.proposal_id, []).append(pt.name)  # ty: ignore[unresolved-attribute]
 
+    lines = (
+        await SplitLine.where(lambda ln: ln.transaction_id.in_(txn_ids)).all() if txn_ids else []
+    )
+    lines_by_txn: dict[uuid.UUID, list[SplitLine]] = {}
+    for ln in sorted(lines, key=lambda ln: ln.id):  # uuid7: creation = document order
+        lines_by_txn.setdefault(ln.transaction_id, []).append(ln)  # ty: ignore[unresolved-attribute]
+
     cat_ids = sorted(
         {t.category_id for t in txns if t.category_id is not None}  # ty: ignore[unresolved-attribute]
         | {p.category_id for p in proposals if p.category_id is not None}  # ty: ignore[unresolved-attribute]
+        | {ln.category_id for ln in lines if ln.category_id is not None}  # ty: ignore[unresolved-attribute]
     )
     cats = (
         {c.id: c for c in await Category.where(lambda c: c.id.in_(cat_ids)).all()}
@@ -184,6 +207,23 @@ async def hydrate_transactions(txns: list[Transaction]) -> list[TransactionOut]:
     result = []
     for t in txns:
         cat = cats.get(t.category_id) if t.category_id else None  # ty: ignore[unresolved-attribute]
+        txn_lines = lines_by_txn.get(t.id)
+        splits_out = (
+            [
+                SplitLineOut(
+                    amount_minor=ln.amount_minor,
+                    category=(
+                        CategoryRef(id=lcat.id, name=lcat.name)
+                        if ln.category_id and (lcat := cats.get(ln.category_id))  # ty: ignore[unresolved-attribute]
+                        else None
+                    ),
+                    memo=ln.memo,
+                )
+                for ln in txn_lines
+            ]
+            if txn_lines
+            else None
+        )
         proposal = by_txn_proposal.get(t.id)
         proposal_out = None
         if proposal is not None:
@@ -209,6 +249,7 @@ async def hydrate_transactions(txns: list[Transaction]) -> list[TransactionOut]:
                 category=CategoryRef(id=cat.id, name=cat.name) if cat else None,
                 tags=by_txn.get(t.id, []),
                 proposal=proposal_out,
+                splits=splits_out,
                 created_at=t.created_at,
             )
         )
@@ -251,7 +292,16 @@ async def list_transactions(
     if category_id:
         subtree = await taxonomy.collect_descendant_ids(list(category_id), ledger_id)
         ids = sorted(subtree)
-        query = query.where(lambda t: t.category_id.in_(ids))
+        # Line-aware (M6 CP1): a split transaction matches through any line's
+        # category — splits must never make transactions less findable. The
+        # existence test renders a correlated EXISTS (root-shaped, ferro
+        # 0.17.0), so a multi-line split still matches once.
+        query = query.where(
+            lambda t: (
+                (t.category_id.in_(ids))
+                | (t.split_lines.exists(lambda ln: ln.category_id.in_(ids)))
+            )
+        )
     if tag:
         wanted = list(tag)
         wanted_folds = sorted({name.strip().casefold() for name in wanted})
@@ -378,6 +428,110 @@ async def patch_transaction(
     return out
 
 
+class SplitLineIn(BaseModel):
+    """One line of the split document (M6 CP1). Unknown keys are a 400
+    (extra="forbid")."""
+
+    model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
+
+    amount_minor: int = Field(ge=-2_147_483_647, le=2_147_483_647)
+    """Signed from the account's perspective, same convention as the parent;
+    bounded to the int4 column width so an out-of-range amount is a 400."""
+    category_id: uuid.UUID | None = None
+    """NULL = an uncategorized line (legal — same rule as transactions)."""
+    memo: str | None = Field(default=None, min_length=1, max_length=500)
+    """Optional free-form label. Empty is rejected — omit or null instead."""
+
+
+MAX_SPLIT_LINES = 100
+"""Document cap: a split is a receipt's worth of lines, not a bulk-insert
+surface. Same bounded-input stance as the 50-tag cap on PATCH."""
+
+
+def _validate_split_document(txn: Transaction, data: list[SplitLineIn]) -> None:
+    """The whole-document invariants (PRD M6): validates-all-first — any
+    failure rejects the document before anything persists. A zero-amount
+    parent is unsplittable by construction: no nonzero parent-signed line
+    set can sum to zero."""
+    if len(data) < 2:
+        raise ClientException(detail="A split needs at least two lines")
+    if len(data) > MAX_SPLIT_LINES:
+        raise ClientException(detail=f"A split is capped at {MAX_SPLIT_LINES} lines")
+    parent_negative = txn.amount_minor < 0
+    for line in data:
+        if line.amount_minor == 0:
+            raise ClientException(detail="Split lines must be nonzero")
+        if (line.amount_minor < 0) != parent_negative:
+            raise ClientException(detail="Split lines must carry the parent transaction's sign")
+    total = sum(line.amount_minor for line in data)
+    if total != txn.amount_minor:
+        raise ClientException(
+            detail=(
+                f"Split lines must sum exactly to the parent amount ({total} != {txn.amount_minor})"
+            )
+        )
+
+
+@put("/{txn_id:uuid}/splits")
+async def put_splits(
+    txn_id: FromPath[uuid.UUID],
+    data: list[SplitLineIn],
+    current_ledger: NamedDependency[Ledger],
+) -> TransactionOut:
+    """Replace the split document wholesale (M6 CP1): one atomic write that
+    validates-all-first, vacates the parent category (exactly one layer
+    holds categories), and never touches review state or the correction log
+    — edits edit, review reviews. Line ids are not durable across a re-PUT."""
+    txn = await _get(current_ledger, txn_id)
+    _validate_split_document(txn, data)
+
+    wanted = sorted({line.category_id for line in data if line.category_id is not None})
+    if wanted:
+        ledger_id = current_ledger.id
+        found = await Category.where(
+            lambda c, ids=wanted, lid=ledger_id: (c.id.in_(ids)) & (c.ledger_id == lid)
+        ).all()
+        if len(found) < len(wanted):
+            raise NotFoundException(detail="No such category")
+
+    async with transaction():
+        await SplitLine.where(lambda ln, tid=txn_id: ln.transaction_id == tid).delete()
+        for line in data:
+            await SplitLine.create(
+                ledger=current_ledger,
+                transaction=txn,
+                amount_minor=line.amount_minor,
+                category_id=line.category_id,
+                memo=line.memo,
+            )
+        txn.category_id = None  # ty: ignore[unresolved-attribute]
+        await txn.save()
+    log.info(
+        "transaction.split",
+        transaction_id=str(txn.id),
+        ledger_id=str(current_ledger.id),
+        lines=len(data),
+    )
+    (out,) = await hydrate_transactions([txn])
+    return out
+
+
+@delete("/{txn_id:uuid}/splits")
+async def delete_splits(
+    txn_id: FromPath[uuid.UUID],
+    current_ledger: NamedDependency[Ledger],
+) -> None:
+    """Unsplit (M6 CP1): the lines go, the parent stays exactly as it is —
+    uncategorized (vacating is not undone) and with its review state
+    untouched. An unsplit transaction has no split document to delete: 404."""
+    txn = await _get(current_ledger, txn_id)
+    existing = await SplitLine.where(lambda ln, tid=txn_id: ln.transaction_id == tid).count()
+    if existing == 0:
+        raise NotFoundException(detail="Transaction is not split")
+    await SplitLine.where(lambda ln, tid=txn_id: ln.transaction_id == tid).delete()
+    log.info("transaction.unsplit", transaction_id=str(txn.id), ledger_id=str(current_ledger.id))
+
+
 class TransactionCreateIn(BaseModel):
     """Manual entry (M5 CP4): source fields + the full optional user-data
     set. Manual accounts only; the currency is always the account's. With
@@ -480,5 +634,12 @@ async def create_transaction(
 
 transactions_router = Router(
     path="/api/v1/transactions",
-    route_handlers=[list_transactions, get_transaction, patch_transaction, create_transaction],
+    route_handlers=[
+        list_transactions,
+        get_transaction,
+        patch_transaction,
+        create_transaction,
+        put_splits,
+        delete_splits,
+    ],
 )
