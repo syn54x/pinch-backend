@@ -151,6 +151,7 @@ class Ledger(TimestampMixin, Model):
     proposal_tags: Relation[list["ProposalTag"]] = BackRef()
     correction_log_entries: Relation[list["CorrectionLogEntry"]] = BackRef()
     split_lines: Relation[list["SplitLine"]] = BackRef()
+    transfers: Relation[list["Transfer"]] = BackRef()
 
 
 class User(TimestampMixin, Model):
@@ -435,6 +436,11 @@ class Transaction(TimestampMixin, Model):
     transaction_tags: Relation[list["TransactionTag"]] = BackRef()
     proposals: Relation[list["Proposal"]] = BackRef()
     split_lines: Relation[list["SplitLine"]] = BackRef()
+    # One-to-one reverse sides of Transfer's unique FKs: a transaction is the
+    # outflow of at most one transfer and the inflow of at most one — and the
+    # API keeps it to one transfer total (membership queries test both).
+    transfer_out: "Transfer" = BackRef()
+    transfer_in: "Transfer" = BackRef()
 
 
 class Category(TimestampMixin, Model):
@@ -499,6 +505,39 @@ class SplitLine(TimestampMixin, Model):
     category-delete disposition, same stance as Transaction.category."""
     memo: str | None = None
     """Optional free-form label for the line ("tires", "groceries half")."""
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class Transfer(TimestampMixin, Model):
+    """A link marking money movement between accounts, not income or expense
+    (PRD M6 #27, CONTEXT.md: Transfer).
+
+    Structurally directional sides: both present = linked pair (opposite
+    signs, equal magnitudes, same currency, same ledger, different accounts —
+    API-enforced), exactly one = untracked counterparty. The unique FKs ARE
+    the at-most-one-transfer-per-transaction rule, DB-enforced under races.
+    Spending exclusion derives from membership (an existence test over both
+    columns) — never a flag that could drift. No date constraint: settlement
+    lag is real; date windows are M7's detector heuristic, not a model
+    invariant.
+    """
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    ledger: Annotated[Ledger, ForeignKey(related_name="transfers", index=True)]
+    outflow_transaction: Annotated[
+        Optional["Transaction"],
+        ForeignKey(related_name="transfer_out", unique=True, on_delete="CASCADE"),
+    ] = None
+    """The negative side (money out). Explicit ON DELETE CASCADE (ferro's
+    default, chosen deliberately at CP0): a member transaction's deletion
+    dissolves the link row at the DB — the backstop behind the import-undo
+    wiring (CP3), which additionally reopens a surviving counterpart."""
+    inflow_transaction: Annotated[
+        Optional["Transaction"],
+        ForeignKey(related_name="transfer_in", unique=True, on_delete="CASCADE"),
+    ] = None
+    """The positive side (money in). Same stance as outflow_transaction."""
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 

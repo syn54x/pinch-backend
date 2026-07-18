@@ -29,6 +29,7 @@ from pinch_backend.api.pagination import (
     Page,
     paginate_by_date,
 )
+from pinch_backend.api.transfers import TransferKind, kind_of
 from pinch_backend.classification.consume import AlreadyReviewedError, consume_proposal
 from pinch_backend.classification.promotion import maybe_propose_rule
 from pinch_backend.imports.fingerprint import compute_fingerprint, normalize_description
@@ -45,6 +46,7 @@ from pinch_backend.models import (
     Tag,
     Transaction,
     TransactionTag,
+    Transfer,
 )
 from pinch_backend.observability import get_logger
 from pinch_backend.tags import apply_tag_set, dedupe_tag_names
@@ -70,6 +72,17 @@ class SplitLineOut(BaseModel):
     amount_minor: int
     category: CategoryRef | None
     memo: str | None
+
+
+class TransferRef(BaseModel):
+    """The transfer membership riding the transaction (M6 CP2): enough for
+    the register to render the link without a second request. Counterpart
+    fields are null on an untracked transfer."""
+
+    id: uuid.UUID
+    kind: TransferKind
+    counterpart_transaction_id: uuid.UUID | None
+    counterpart_account_id: uuid.UUID | None
 
 
 class ProposalOut(BaseModel):
@@ -103,6 +116,9 @@ class TransactionOut(BaseModel):
     """The split document in creation order, or null when unsplit (M6 CP1).
     Non-null implies ``category`` is null — exactly one layer holds
     categories."""
+    transfer: TransferRef | None
+    """Transfer membership, or null (M6 CP2). Non-null implies ``category``
+    is null — being a transfer is the classification."""
     created_at: datetime
 
 
@@ -193,6 +209,27 @@ async def hydrate_transactions(txns: list[Transaction]) -> list[TransactionOut]:
     for ln in sorted(lines, key=lambda ln: ln.id):  # uuid7: creation = document order
         lines_by_txn.setdefault(ln.transaction_id, []).append(ln)  # ty: ignore[unresolved-attribute]
 
+    transfers = (
+        await Transfer.where(
+            lambda tr: (
+                (tr.outflow_transaction_id.in_(txn_ids)) | (tr.inflow_transaction_id.in_(txn_ids))
+            )
+        ).all()
+        if txn_ids
+        else []
+    )
+    transfer_by_txn: dict[uuid.UUID, Transfer] = {}
+    for tr in transfers:
+        for member in (tr.outflow_transaction_id, tr.inflow_transaction_id):  # ty: ignore[unresolved-attribute]
+            if member is not None:
+                transfer_by_txn[member] = tr
+    # Counterpart account ids: the other side may not be on this page.
+    counterpart_ids = sorted(set(transfer_by_txn) - set(txn_ids))
+    account_by_txn = {t.id: t.account_id for t in txns}  # ty: ignore[unresolved-attribute]
+    if counterpart_ids:
+        others = await Transaction.where(lambda t, ids=counterpart_ids: t.id.in_(ids)).all()
+        account_by_txn |= {t.id: t.account_id for t in others}  # ty: ignore[unresolved-attribute]
+
     cat_ids = sorted(
         {t.category_id for t in txns if t.category_id is not None}  # ty: ignore[unresolved-attribute]
         | {p.category_id for p in proposals if p.category_id is not None}  # ty: ignore[unresolved-attribute]
@@ -224,6 +261,20 @@ async def hydrate_transactions(txns: list[Transaction]) -> list[TransactionOut]:
             if txn_lines
             else None
         )
+        transfer = transfer_by_txn.get(t.id)
+        transfer_ref = None
+        if transfer is not None:
+            counterpart = (
+                transfer.inflow_transaction_id  # ty: ignore[unresolved-attribute]
+                if transfer.outflow_transaction_id == t.id  # ty: ignore[unresolved-attribute]
+                else transfer.outflow_transaction_id  # ty: ignore[unresolved-attribute]
+            )
+            transfer_ref = TransferRef(
+                id=transfer.id,
+                kind=kind_of(transfer),
+                counterpart_transaction_id=counterpart,
+                counterpart_account_id=account_by_txn.get(counterpart) if counterpart else None,
+            )
         proposal = by_txn_proposal.get(t.id)
         proposal_out = None
         if proposal is not None:
@@ -250,6 +301,7 @@ async def hydrate_transactions(txns: list[Transaction]) -> list[TransactionOut]:
                 tags=by_txn.get(t.id, []),
                 proposal=proposal_out,
                 splits=splits_out,
+                transfer=transfer_ref,
                 created_at=t.created_at,
             )
         )
@@ -266,6 +318,7 @@ async def list_transactions(
     category_id: Annotated[list[uuid.UUID] | None, QueryParameter()] = None,
     uncategorized: Annotated[bool | None, QueryParameter()] = None,
     tag: Annotated[list[str] | None, QueryParameter()] = None,
+    is_transfer: Annotated[bool | None, QueryParameter()] = None,
     cursor: CursorParam = None,
     limit: LimitParam = DEFAULT_PAGE_LIMIT,
 ) -> Page[TransactionOut]:
@@ -289,6 +342,12 @@ async def list_transactions(
         query = query.where(lambda t: t.category_id == None)  # noqa: E711
     elif uncategorized is False:
         query = query.where(lambda t: t.category_id != None)  # noqa: E711
+    # Membership derives spending exclusion — one existence test per side,
+    # never a stored flag (M6 CP2).
+    if is_transfer is True:
+        query = query.where(lambda t: t.transfer_out.exists() | t.transfer_in.exists())
+    elif is_transfer is False:
+        query = query.where(lambda t: ~(t.transfer_out.exists() | t.transfer_in.exists()))
     if category_id:
         subtree = await taxonomy.collect_descendant_ids(list(category_id), ledger_id)
         ids = sorted(subtree)
