@@ -168,3 +168,28 @@ CP0: complete (findings comment posted 2026-07-16; scratch scripts run against P
     deviations for transfer promotion (not just categories/splits).
 - M6 COMPLETE pending review: all 5 CPs on PR #30, 465 green, pushed. Closes #25–#29 at merge.
 - MERGED 2026-07-18: PR #30 rebase-merged to main (bfc3a88..f4a81af); #25-#29 closed; branch deleted.
+
+# M7 — Plaid connections & sync (PRD #31, CP issues #32–#36)
+
+Branch: m7. Delivery: single PR, one slice at a time, human verification between slices.
+
+- CP0 (#32): complete (spike, findings on issue; ferro drafts 7b2ded7). 3/4 capabilities pass.
+  Two ferro misses filed per ADR-0003: ferro-orm#324 (one-shot columns+unique migration
+  orders index before columns → boot crash; gates CP2 schema) and ferro-orm#325 (on_delete
+  alteration on existing FK silently ignored — DB keeps CASCADE while model says SET NULL;
+  gates CP1 disconnect). Fixes happening in a separate ferro thread; Taylor signals when done.
+- CP1 (#33): complete minus disconnect (commits 162d6c7 + review fixes 8ecf4de; suite 486
+  green; ty clean). Settings (plaid_* + secret_encryption_key, loud half-config failure),
+  crypto.py Fernet, providers.py seam + owned httpx Plaid client (wire tests via
+  MockTransport), api/connections.py (link-token, exchange→Connection+Accounts atomic,
+  list/detail health surface), keyless 403 on Plaid-touching endpoints only. Review run
+  (standards+spec agents): fixed ProviderError recovery point (400 INVALID_PUBLIC_TOKEN /
+  502 else), ledger-OWNER currency fallback (not acting user), Literal plaid_environment,
+  account_out promoted public, wire coverage added. Rejected: SyncProvider rename (CP2 makes
+  it honest; ConnectionProvider collides with models enum), remove-item (dead code until
+  disconnect unblocks), per-call httpx client (revisit at CP2 volume).
+  Archived-audit artifact: no aggregate balance surface exists pre-M8; nothing double-counts;
+  M8's net-worth MUST exclude archived accounts (binding note, recorded on #33).
+  AWAITING SIGN-OFF: keyless list/detail answer 200-empty (deliberate deviation from
+  "every connection endpoint refuses"); plaid_country_codes setting (unspecced config).
+  Disconnect + initial-sync auto-enqueue arrive with ferro#325 / CP2 respectively.
