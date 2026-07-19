@@ -14,8 +14,21 @@ errors surface to the job runner to retry, and only exhaustion marks
 ``error`` — carrying the provider's error code, never more. Any successful
 sync heals.
 
-CP3 (#35) extends this pass with modified/removed handling — the batch
-already carries both; this module deliberately applies only ``added``.
+The replacement & removal contract (CP3, #35 — M6's ground-shifts):
+
+- The provider communicates pending→posted as removed(pending) +
+  added(posted, referencing the pending id) in one batch, so linked
+  additions apply as **in-place rewrites first** and their removals are
+  swallowed — or inheritance would never fire. ``modified`` rewrites the
+  same way. Same Pinch row, always: user data inheritance is free because
+  the row never moves.
+- An amount rewrite invalidates what was built on the amount: split lines
+  deleted, transfers dissolved with both sides reopened, review reopened,
+  the affected decisions voided (actor=auto — source truth shifted, no
+  human decided), re-classification follows. Anything else is cosmetic
+  drift: source data updates, review stands.
+- True removals retract through the same seam as import undo
+  (pinch_backend.retraction): same event, different origin.
 
 Stated boundary (I-1): transactions for provider accounts Pinch doesn't
 hold — an account added at the bank after connect — are skipped, counted,
@@ -37,10 +50,18 @@ from pinch_backend.models import (
     BalanceSource,
     Connection,
     ConnectionStatus,
+    CorrectionActor,
+    SplitLine,
     Transaction,
     utcnow,
 )
 from pinch_backend.observability import get_logger
+from pinch_backend.retraction import (
+    delete_proposals_for,
+    dissolve_transfers_touching,
+    retract_transactions,
+    void_decisions,
+)
 
 log = get_logger(__name__)
 
@@ -60,10 +81,15 @@ AUTH_ERROR_CODES = {
 class SyncOutcome:
     ledger_id: uuid.UUID | None = None
     created: int = 0
+    reopened: int = 0
+    """Rows whose review was reopened (amount rewrites, dissolved-transfer
+    counterparts) — back in the inbox, needing fresh proposals."""
+    invalidated: int = 0
+    """Unreviewed rows whose stale proposal died with an amount rewrite."""
 
     @property
     def needs_classification(self) -> bool:
-        return self.created > 0
+        return self.created > 0 or self.reopened > 0 or self.invalidated > 0
 
 
 async def _record_broken(connection: Connection, status: ConnectionStatus, code: str) -> None:
@@ -101,40 +127,129 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
         raise  # transient with retries remaining: the runner's backoff handles it
 
     cid = connection.id
+    ledger_id = connection.ledger_id  # ty: ignore[unresolved-attribute]
     accounts = await Account.where(lambda a: a.connection_id == cid).all()
     by_provider_id = {a.provider_account_id: a for a in accounts}
     account_ids = [a.id for a in accounts]
-    existing = {
-        t.provider_transaction_id
-        for t in await Transaction.where(
-            lambda t, ids=account_ids: t.account_id.in_(ids) & (t.provider_transaction_id != None)  # noqa: E711
-        ).all()
-    }
+    relevant_ids = sorted(
+        {pt.provider_transaction_id for pt in [*batch.added, *batch.modified]}
+        | {
+            pt.pending_provider_transaction_id
+            for pt in batch.added
+            if pt.pending_provider_transaction_id
+        }
+        | set(batch.removed)
+    )
+    rows_by_pid: dict[str, Transaction] = {}
+    if relevant_ids:
+        for row in await Transaction.where(
+            lambda t, ids=account_ids, pids=relevant_ids: (
+                t.account_id.in_(ids) & (t.provider_transaction_id.in_(pids))
+            )
+        ).all():
+            if row.provider_transaction_id is not None:
+                rows_by_pid[row.provider_transaction_id] = row
 
-    created = 0
-    skipped_unknown = 0
+    created = rewritten = reopened = invalidated = removed_count = skipped_unknown = 0
+    swallowed_removals: set[str] = set()
+
+    async def rewrite_in_place(target: Transaction, pt: providers.ProviderTransaction) -> None:
+        """Same Pinch row, new source truth. The amount contract: unchanged
+        -> everything survives; changed -> what was built on it dies."""
+        nonlocal rewritten, reopened, invalidated
+        amount_changed = target.amount_minor != pt.amount_minor
+        if amount_changed:
+            tid = target.id
+            await SplitLine.where(lambda ln, t=tid: ln.transaction_id == t).delete()
+            reopened += await dissolve_transfers_touching(
+                ledger_id,
+                [tid],
+                exclude_members=set(),
+                actor=CorrectionActor.AUTO,
+                counterpart_reason="transfer dissolved: amount changed by provider sync",
+            )
+            await void_decisions(
+                ledger_id,
+                tid,
+                actor=CorrectionActor.AUTO,
+                reason="amount changed by provider sync",
+            )
+            await delete_proposals_for([tid])
+            if target.reviewed_at is not None:
+                target.reviewed_at = None
+                reopened += 1
+            else:
+                invalidated += 1
+        target.date = pt.date
+        target.amount_minor = pt.amount_minor
+        target.currency = pt.currency or target.currency
+        target.description_raw = pt.description
+        target.description_normalized = normalize_description(pt.description)
+        target.fingerprint = compute_fingerprint(
+            target.account_id,  # ty: ignore[unresolved-attribute]
+            pt.date,
+            pt.amount_minor,
+            pt.description,
+        )
+        target.provider_transaction_id = pt.provider_transaction_id
+        target.pending = pt.pending
+        await target.save()
+        rewritten += 1
+
     async with transaction():
         for pa in provider_accounts:
             account = by_provider_id.get(pa.provider_account_id)
             if account is None or pa.balance_minor is None:
                 continue
             await BalanceEntry.create(
-                ledger_id=connection.ledger_id,  # ty: ignore[unresolved-attribute]
+                ledger_id=ledger_id,
                 account=account,
                 amount_minor=pa.balance_minor,
                 currency=account.currency,
                 as_of=utcnow(),
                 source=BalanceSource.PROVIDER,
             )
+        # Rewrites first (posted-replaces-pending swallows its removal;
+        # `modified` upserts), then true removals, then fresh inserts.
+        inserts: list[providers.ProviderTransaction] = []
         for pt in batch.added:
+            if pt.provider_transaction_id in rows_by_pid:
+                continue  # replayed page: this addition already applied
+            pending_id = pt.pending_provider_transaction_id
+            predecessor = rows_by_pid.get(pending_id) if pending_id else None
+            if predecessor is not None and pending_id is not None:
+                await rewrite_in_place(predecessor, pt)
+                rows_by_pid[pt.provider_transaction_id] = predecessor
+                swallowed_removals.add(pending_id)
+            else:
+                inserts.append(pt)
+        for pt in batch.modified:
+            target = rows_by_pid.get(pt.provider_transaction_id)
+            if target is not None:
+                await rewrite_in_place(target, pt)
+            else:
+                inserts.append(pt)  # modified-before-seen: upsert stance
+        doomed_ids = [
+            rows_by_pid[rid].id
+            for rid in batch.removed
+            if rid not in swallowed_removals and rid in rows_by_pid
+        ]
+        if doomed_ids:
+            reopened += await retract_transactions(
+                ledger_id,
+                doomed_ids,
+                actor=CorrectionActor.AUTO,
+                decision_reason="transaction removed by provider sync",
+                counterpart_reason="transfer counterpart removed by provider sync",
+            )
+            removed_count = len(doomed_ids)
+        for pt in inserts:
             account = by_provider_id.get(pt.provider_account_id)
             if account is None:
                 skipped_unknown += 1
                 continue
-            if pt.provider_transaction_id in existing:
-                continue  # replayed page (crash between apply and cursor persist)
             await Transaction.create(
-                ledger_id=connection.ledger_id,  # ty: ignore[unresolved-attribute]
+                ledger_id=ledger_id,
                 account=account,
                 date=pt.date,
                 amount_minor=pt.amount_minor,
@@ -148,8 +263,6 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
                 pending=pt.pending,
             )
             created += 1
-        # CP3 (#35): batch.modified → in-place rewrites under the amount
-        # contract; batch.removed → the import-undo dissolution seam.
         connection.sync_cursor = batch.next_cursor
         connection.status = ConnectionStatus.ACTIVE
         connection.error_detail = None
@@ -160,9 +273,11 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
         "sync.completed",
         connection_id=str(connection.id),
         created=created,
+        rewritten=rewritten,
+        removed=removed_count,
+        reopened=reopened,
         skipped_unknown=skipped_unknown,
     )
     return SyncOutcome(
-        ledger_id=connection.ledger_id,  # ty: ignore[unresolved-attribute]
-        created=created,
+        ledger_id=ledger_id, created=created, reopened=reopened, invalidated=invalidated
     )
