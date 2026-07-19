@@ -22,7 +22,7 @@ from litestar import Router, delete, get, post
 from litestar.di import NamedDependency
 from litestar.exceptions import ClientException, NotFoundException, PermissionDeniedException
 from litestar.params import FromPath
-from litestar.status_codes import HTTP_502_BAD_GATEWAY
+from litestar.status_codes import HTTP_202_ACCEPTED, HTTP_502_BAD_GATEWAY
 from pydantic import BaseModel
 
 from pinch_backend import providers
@@ -35,6 +35,7 @@ from pinch_backend.api.pagination import (
     paginate,
 )
 from pinch_backend.crypto import decrypt_secret, encrypt_secret
+from pinch_backend.jobs import sync_connection
 from pinch_backend.models import (
     Account,
     Connection,
@@ -50,6 +51,13 @@ from pinch_backend.observability import get_logger
 from pinch_backend.settings import settings
 
 log = get_logger(__name__)
+
+
+class LinkTokenIn(BaseModel):
+    connection_id: uuid.UUID | None = None
+    """Absent: a fresh connect. Present: an update-mode token repairing
+    this connection's login (PRD #31 reauth) — no exchange follows; the
+    next successful sync is the healer."""
 
 
 class LinkTokenOut(BaseModel):
@@ -109,6 +117,24 @@ async def _ledger_primary_currency(ledger: Ledger) -> str:
     return user.primary_currency
 
 
+async def _get_connection(ledger: Ledger, connection_id: uuid.UUID) -> Connection:
+    """Fetch within the acting ledger: another ledger's connection answers
+    the same 404 as a nonexistent one — never a confirming 403."""
+    connection = await Connection.where(
+        lambda c: (c.id == connection_id) & (c.ledger_id == ledger.id)
+    ).first()
+    if connection is None:
+        raise NotFoundException(detail="No such connection")
+    return connection
+
+
+async def _enqueue_sync(connection: Connection) -> None:
+    """Defer one lock-serialized sync (ADR-0006: lock per connection)."""
+    await sync_connection.configure(lock=f"sync:{connection.id}").defer_async(
+        connection_id=str(connection.id)
+    )
+
+
 async def _connection_out(connection: Connection) -> ConnectionOut:
     cid = connection.id
     accounts = await Account.where(lambda a: a.connection_id == cid).all()
@@ -124,13 +150,24 @@ async def _connection_out(connection: Connection) -> ConnectionOut:
 
 
 @post("/link-token")
-async def create_link_token(current_user: NamedDependency[User]) -> LinkTokenOut:
+async def create_link_token(
+    current_user: NamedDependency[User],
+    current_ledger: NamedDependency[Ledger],
+    data: LinkTokenIn | None = None,
+) -> LinkTokenOut:
     """Shaped for a future frontend to drop Plaid Link on top unchanged;
-    sandbox tests shortcut the widget between this and the exchange."""
+    sandbox tests shortcut the widget between this and the exchange.
+    With a ``connection_id`` this is the repair path: an update-mode token
+    for the same Item."""
     _require_plaid()
+    access_token: str | None = None
+    if data is not None and data.connection_id is not None:
+        connection = await _get_connection(current_ledger, data.connection_id)
+        if connection.encrypted_secret is not None:
+            access_token = decrypt_secret(connection.encrypted_secret)
     try:
         token = await providers.get_provider().create_link_token(
-            client_user_id=str(current_user.id)
+            client_user_id=str(current_user.id), access_token=access_token
         )
     except providers.ProviderError as error:
         raise _surface(error) from error
@@ -170,6 +207,10 @@ async def create_connection(
                 connection=connection,
                 provider_account_id=pa.provider_account_id,
             )
+    # Defer-after-commit: the initial sync is auto-enqueued — the story is
+    # "accounts appear with balances", not "now call sync yourself" (PRD
+    # #31); manual-only governs re-syncs.
+    await _enqueue_sync(connection)
     log.info(
         "connection.created",
         connection_id=str(connection.id),
@@ -198,12 +239,18 @@ async def list_connections(
 async def get_connection(
     connection_id: FromPath[uuid.UUID], current_ledger: NamedDependency[Ledger]
 ) -> ConnectionOut:
-    connection = await Connection.where(
-        lambda c: (c.id == connection_id) & (c.ledger_id == current_ledger.id)
-    ).first()
-    if connection is None:
-        raise NotFoundException(detail="No such connection")
-    return await _connection_out(connection)
+    return await _connection_out(await _get_connection(current_ledger, connection_id))
+
+
+@post("/{connection_id:uuid}/sync", status_code=HTTP_202_ACCEPTED)
+async def refresh_connection(
+    connection_id: FromPath[uuid.UUID], current_ledger: NamedDependency[Ledger]
+) -> None:
+    """Manual refresh (PRD #31): the one v0 re-sync trigger. 202 — the
+    work happens in the worker; the health surface reports the outcome."""
+    _require_plaid()
+    connection = await _get_connection(current_ledger, connection_id)
+    await _enqueue_sync(connection)
 
 
 @delete("/{connection_id:uuid}")
@@ -218,11 +265,7 @@ async def delete_connection(
     fails transiently the client retries (502, nothing severed); Plaid
     already not knowing the item is success from this seat."""
     _require_plaid()
-    connection = await Connection.where(
-        lambda c: (c.id == connection_id) & (c.ledger_id == current_ledger.id)
-    ).first()
-    if connection is None:
-        raise NotFoundException(detail="No such connection")
+    connection = await _get_connection(current_ledger, connection_id)
     if connection.encrypted_secret is not None:
         try:
             await providers.get_provider().remove_item(decrypt_secret(connection.encrypted_secret))
@@ -244,6 +287,7 @@ connections_router = Router(
         create_connection,
         list_connections,
         get_connection,
+        refresh_connection,
         delete_connection,
     ],
 )
