@@ -9,6 +9,7 @@ from litestar.openapi.spec import Components, SecurityScheme
 from pinch_backend import __version__
 from pinch_backend.api.accounts import accounts_router
 from pinch_backend.api.categories import categories_router
+from pinch_backend.api.connections import connections_router
 from pinch_backend.api.correction_log import correction_log_router
 from pinch_backend.api.imports import import_profiles_router, imports_router
 from pinch_backend.api.reviews import reviews_router
@@ -70,6 +71,7 @@ def create_app(*, manage_database: bool = True) -> Litestar:
             auth_router,
             accounts_router,
             categories_router,
+            connections_router,
             correction_log_router,
             imports_router,
             import_profiles_router,

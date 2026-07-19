@@ -1446,6 +1446,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "argon2-cffi" },
+    { name = "cryptography" },
     { name = "cyclopts" },
     { name = "ferro-orm" },
     { name = "httpx" },
@@ -1477,6 +1478,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "argon2-cffi", specifier = ">=25" },
+    { name = "cryptography", specifier = ">=43" },
     { name = "cyclopts", specifier = ">=4" },
     { name = "ferro-orm", specifier = ">=0.17.0" },
     { name = "httpx", specifier = ">=0.28" },
