@@ -10,6 +10,8 @@ Tests substitute a scriptable fake at ``get_provider`` — CI never touches
 the network; the opt-in live-sandbox smoke test proves the real client.
 """
 
+from datetime import date
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Protocol
 
 import httpx
@@ -37,6 +39,24 @@ _PLAID_KIND = {
 }
 
 
+# ISO 4217 minor-unit exponents that differ from the default 2. Plaid
+# reports floats in major units; Pinch speaks integer minor units, so the
+# conversion must know the exponent — naive *100 would corrupt JPY.
+_CURRENCY_EXPONENTS = {
+    **dict.fromkeys(
+        ("BIF", "CLP", "DJF", "GNF", "ISK", "JPY", "KMF", "KRW", "PYG",
+         "RWF", "UGX", "VND", "VUV", "XAF", "XOF", "XPF"), 0
+    ),
+    **dict.fromkeys(("BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND"), 3),
+}  # fmt: skip
+
+
+def _to_minor(amount: float, currency: str | None) -> int:
+    exponent = _CURRENCY_EXPONENTS.get(currency or "", 2)
+    quantum = Decimal(10) ** -exponent
+    return int((Decimal(str(amount)) / quantum).to_integral_value(rounding=ROUND_HALF_UP))
+
+
 class ExchangedToken(BaseModel):
     access_token: str
     item_id: str
@@ -52,7 +72,39 @@ class ProviderAccount(BaseModel):
     kind: AccountKind
     currency: str | None
     """None when the provider doesn't say; the caller falls back to the
-    acting user's primary currency."""
+    ledger's primary currency."""
+    balance_minor: int | None = None
+    """Current balance in integer minor units (exponent-aware conversion
+    from the provider's major-unit float); None when unreported."""
+
+
+class ProviderTransaction(BaseModel):
+    """A transaction as the provider describes it, already in Pinch
+    vocabulary: ``amount_minor`` is signed from the account's perspective —
+    negative is money out (Plaid's positive-is-debit is flipped here, at
+    the seam, so nothing downstream ever sees provider sign conventions)."""
+
+    model_config = ConfigDict(use_attribute_docstrings=True)
+
+    provider_transaction_id: str
+    provider_account_id: str
+    amount_minor: int
+    currency: str | None
+    date: date
+    description: str
+    pending: bool
+    pending_provider_transaction_id: str | None = None
+    """Set on a posted transaction that replaces a pending one — the
+    replacement linkage CP3's in-place rewrite keys on."""
+
+
+class SyncBatch(BaseModel):
+    """One drained cursor sync: every page up to has_more=False."""
+
+    added: list[ProviderTransaction]
+    modified: list[ProviderTransaction]
+    removed: list[str]
+    next_cursor: str
 
 
 class ProviderError(Exception):
@@ -66,11 +118,15 @@ class ProviderError(Exception):
 
 
 class SyncProvider(Protocol):
-    async def create_link_token(self, *, client_user_id: str) -> str: ...
+    async def create_link_token(
+        self, *, client_user_id: str, access_token: str | None = None
+    ) -> str: ...
 
     async def exchange_public_token(self, public_token: str) -> ExchangedToken: ...
 
     async def get_accounts(self, access_token: str) -> list[ProviderAccount]: ...
+
+    async def sync_transactions(self, access_token: str, cursor: str | None) -> SyncBatch: ...
 
     async def remove_item(self, access_token: str) -> None: ...
 
@@ -109,18 +165,24 @@ class PlaidProvider:
             )
         return data
 
-    async def create_link_token(self, *, client_user_id: str) -> str:
-        data = await self._post(
-            "/link/token/create",
-            {
-                "user": {"client_user_id": client_user_id},
-                "client_name": "Pinch",
-                "products": ["transactions"],
-                "transactions": {"days_requested": BACKFILL_DAYS},
-                "country_codes": settings.plaid_country_codes,
-                "language": "en",
-            },
-        )
+    async def create_link_token(
+        self, *, client_user_id: str, access_token: str | None = None
+    ) -> str:
+        """Creation mode requests products; update mode (reauth repair)
+        carries the Item's access token instead — Plaid Link then walks the
+        user through re-login and the same token stays valid after."""
+        payload: dict = {
+            "user": {"client_user_id": client_user_id},
+            "client_name": "Pinch",
+            "country_codes": settings.plaid_country_codes,
+            "language": "en",
+        }
+        if access_token is None:
+            payload["products"] = ["transactions"]
+            payload["transactions"] = {"days_requested": BACKFILL_DAYS}
+        else:
+            payload["access_token"] = access_token
+        data = await self._post("/link/token/create", payload)
         return data["link_token"]
 
     async def exchange_public_token(self, public_token: str) -> ExchangedToken:
@@ -134,15 +196,56 @@ class PlaidProvider:
 
     async def get_accounts(self, access_token: str) -> list[ProviderAccount]:
         data = await self._post("/accounts/get", {"access_token": access_token})
-        return [
-            ProviderAccount(
-                provider_account_id=a["account_id"],
-                name=a["name"],
-                kind=_PLAID_KIND.get(a["type"], AccountKind.ASSET),
-                currency=(a.get("balances") or {}).get("iso_currency_code"),
+        accounts = []
+        for a in data["accounts"]:
+            balances = a.get("balances") or {}
+            currency = balances.get("iso_currency_code")
+            current = balances.get("current")
+            accounts.append(
+                ProviderAccount(
+                    provider_account_id=a["account_id"],
+                    name=a["name"],
+                    kind=_PLAID_KIND.get(a["type"], AccountKind.ASSET),
+                    currency=currency,
+                    balance_minor=None if current is None else _to_minor(current, currency),
+                )
             )
-            for a in data["accounts"]
-        ]
+        return accounts
+
+    async def sync_transactions(self, access_token: str, cursor: str | None) -> SyncBatch:
+        """Drain the cursor: every has_more page in one call. The job is
+        idempotent — a retry replays from the last *persisted* cursor."""
+
+        def convert(t: dict) -> ProviderTransaction:
+            currency = t.get("iso_currency_code")
+            return ProviderTransaction(
+                provider_transaction_id=t["transaction_id"],
+                provider_account_id=t["account_id"],
+                # Plaid: positive is money out; Pinch: negative is money out.
+                amount_minor=-_to_minor(t["amount"], currency),
+                currency=currency,
+                date=date.fromisoformat(t["date"]),
+                description=t["name"],
+                pending=t["pending"],
+                pending_provider_transaction_id=t.get("pending_transaction_id"),
+            )
+
+        added: list[ProviderTransaction] = []
+        modified: list[ProviderTransaction] = []
+        removed: list[str] = []
+        while True:
+            payload: dict = {"access_token": access_token, "count": 500}
+            if cursor is not None:
+                payload["cursor"] = cursor
+            data = await self._post("/transactions/sync", payload)
+            added.extend(convert(t) for t in data["added"])
+            modified.extend(convert(t) for t in data["modified"])
+            removed.extend(r["transaction_id"] for r in data["removed"])
+            cursor = data["next_cursor"]
+            if not data["has_more"]:
+                return SyncBatch(
+                    added=added, modified=modified, removed=removed, next_cursor=cursor
+                )
 
 
 def get_provider() -> SyncProvider:

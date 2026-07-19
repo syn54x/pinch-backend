@@ -66,7 +66,10 @@ class ConnectionStatus(StrEnum):
 
 class BalanceSource(StrEnum):
     MANUAL = "manual"
-    """Hand-entered by the user; providers supply entries too, later (M7+)."""
+    """Hand-entered by the user."""
+    PROVIDER = "provider"
+    """Written by a connection sync (M7): balance history accumulates from
+    first connect, feeding M8's net-worth-over-time."""
 
 
 class ImportStatus(StrEnum):
@@ -211,6 +214,10 @@ class Connection(TimestampMixin, Model):
     status: ConnectionStatus = ConnectionStatus.ACTIVE
     last_synced_at: datetime | None = None
     error_detail: str | None = None
+    sync_cursor: str | None = None
+    """The provider's transactions-sync cursor (M7 CP2): persisted only
+    after a batch fully applies, so a replayed page is the crash-recovery
+    norm, not an anomaly — ingestion is replay-safe by construction."""
     encrypted_secret: bytes | None = None
     """Opaque to M1 — the encryption utility lands with its first consumer (M7)."""
     created_at: datetime = Field(default_factory=utcnow)
@@ -400,6 +407,9 @@ class Transaction(TimestampMixin, Model):
         ("account_id", "fingerprint"),
         ("ledger_id", "description_normalized"),
     )
+    __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
+        ("account_id", "provider_transaction_id"),
+    )
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="transactions", index=True)]
@@ -410,7 +420,17 @@ class Transaction(TimestampMixin, Model):
     description_raw: str
     source_import: Annotated[Import | None, ForeignKey(related_name="transactions")] = None
     """The import that produced this row (the PRD's ``import`` FK); null on
-    future provider-synced or hand-entered transactions."""
+    provider-synced or hand-entered transactions."""
+    provider_transaction_id: str | None = None
+    """Source data (M7 CP2): the provider's identity for a synced row —
+    the key replacement and removal target. NULL on imported/manual rows
+    (the composite unique treats NULLs as distinct, so pre-M7 rows and
+    non-synced rows coexist freely). Unique per account, not per ledger:
+    provider ids are only promised unique within an Item."""
+    pending: bool = False
+    """Source data (M7 CP2): the institution's settlement state
+    (CONTEXT.md Pending/Posted). Posting rewrites this row in place —
+    imported/manual rows are posted by definition."""
     fingerprint: str
     """Stored duplicate-detection hash (pinch_backend.imports.fingerprint):
     a pure function of retained source data, recomputable by design."""

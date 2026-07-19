@@ -107,6 +107,9 @@ class TransactionOut(BaseModel):
     currency: str
     description_raw: str
     description_normalized: str
+    pending: bool
+    """The institution's settlement state (M7): pending transactions are
+    visible from day one; posting rewrites the row in place."""
     display_name: str | None
     notes: str | None
     reviewed_at: datetime | None
@@ -296,6 +299,7 @@ async def hydrate_transactions(txns: list[Transaction]) -> list[TransactionOut]:
                 currency=t.currency,
                 description_raw=t.description_raw,
                 description_normalized=t.description_normalized,
+                pending=t.pending,
                 display_name=t.display_name,
                 notes=t.notes,
                 reviewed_at=t.reviewed_at,

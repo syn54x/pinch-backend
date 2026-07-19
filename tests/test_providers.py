@@ -115,6 +115,156 @@ async def test_remove_item_posts_token() -> None:
     assert seen["access_token"] == "access-x"
 
 
+async def test_update_mode_link_token_carries_access_token() -> None:
+    """Reauth repair (PRD #31): the same endpoint in update mode — the
+    Item's access token rides instead of a products request."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"link_token": "link-update-1"})
+
+    token = await _provider(handler).create_link_token(
+        client_user_id="user-1", access_token="access-broken"
+    )
+    assert token == "link-update-1"
+    assert seen["access_token"] == "access-broken"
+    assert "products" not in seen  # update mode repairs; it doesn't re-request
+
+
+async def test_accounts_carry_minor_unit_balances() -> None:
+    """Plaid reports floats in major units; Pinch speaks integer minor
+    units (CONTEXT.md: Amount) — exponent-aware, never naive *100."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "accounts": [
+                    {
+                        "account_id": "a1",
+                        "name": "Checking",
+                        "type": "depository",
+                        "balances": {"iso_currency_code": "USD", "current": 1234.56},
+                    },
+                    {
+                        "account_id": "a2",
+                        "name": "Yen",
+                        "type": "depository",
+                        "balances": {"iso_currency_code": "JPY", "current": 5000},
+                    },
+                    {
+                        "account_id": "a3",
+                        "name": "Silent",
+                        "type": "depository",
+                        "balances": {"iso_currency_code": "USD", "current": None},
+                    },
+                ]
+            },
+        )
+
+    accounts = await _provider(handler).get_accounts("access-x")
+    balances = {a.provider_account_id: a.balance_minor for a in accounts}
+    assert balances == {"a1": 123456, "a2": 5000, "a3": None}
+
+
+async def test_sync_paginates_and_converts() -> None:
+    """The cursor loop drains has_more pages in one call; Plaid's
+    positive-is-debit floats become Pinch's negative-is-out minor units."""
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert request.url.path == "/transactions/sync"
+        calls.append(body.get("cursor"))
+        if len(calls) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "added": [
+                        {
+                            "transaction_id": "t1",
+                            "account_id": "a1",
+                            "amount": 12.34,
+                            "iso_currency_code": "USD",
+                            "date": "2026-07-18",
+                            "name": "COFFEE SHOP",
+                            "pending": True,
+                            "pending_transaction_id": None,
+                        }
+                    ],
+                    "modified": [],
+                    "removed": [],
+                    "next_cursor": "cursor-page-2",
+                    "has_more": True,
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "added": [
+                    {
+                        "transaction_id": "t2",
+                        "account_id": "a1",
+                        "amount": -250.00,
+                        "iso_currency_code": "USD",
+                        "date": "2026-07-17",
+                        "name": "PAYCHECK",
+                        "pending": False,
+                        "pending_transaction_id": None,
+                    }
+                ],
+                "modified": [
+                    {
+                        "transaction_id": "t3",
+                        "account_id": "a1",
+                        "amount": 40.00,
+                        "iso_currency_code": "USD",
+                        "date": "2026-07-16",
+                        "name": "GAS STATION",
+                        "pending": False,
+                        "pending_transaction_id": "t-pending-3",
+                    }
+                ],
+                "removed": [{"transaction_id": "t-gone"}],
+                "next_cursor": "cursor-final",
+                "has_more": False,
+            },
+        )
+
+    batch = await _provider(handler).sync_transactions("access-x", cursor="cursor-start")
+    assert calls == ["cursor-start", "cursor-page-2"]
+    assert batch.next_cursor == "cursor-final"
+    assert [t.provider_transaction_id for t in batch.added] == ["t1", "t2"]
+    coffee, paycheck = batch.added
+    assert coffee.amount_minor == -1234  # 12.34 debit → -1234 minor
+    assert coffee.pending is True
+    assert coffee.provider_account_id == "a1"
+    assert paycheck.amount_minor == 25000  # -250.00 credit → +25000
+    (gas,) = batch.modified
+    assert gas.pending_provider_transaction_id == "t-pending-3"
+    assert batch.removed == ["t-gone"]
+
+
+async def test_sync_initial_cursor_omitted() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert "cursor" not in body
+        return httpx.Response(
+            200,
+            json={
+                "added": [],
+                "modified": [],
+                "removed": [],
+                "next_cursor": "c1",
+                "has_more": False,
+            },
+        )
+
+    batch = await _provider(handler).sync_transactions("access-x", cursor=None)
+    assert batch.next_cursor == "c1"
+
+
 async def test_plaid_error_surfaces_code_only() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

@@ -68,8 +68,12 @@ class FakeProvider:
     async def remove_item(self, access_token: str) -> None:
         self.removed.append(access_token)
 
-    async def create_link_token(self, *, client_user_id: str) -> str:
-        self.link_tokens_created.append({"client_user_id": client_user_id})
+    async def create_link_token(
+        self, *, client_user_id: str, access_token: str | None = None
+    ) -> str:
+        self.link_tokens_created.append(
+            {"client_user_id": client_user_id, "access_token": access_token}
+        )
         return "link-sandbox-fake-token"
 
     async def exchange_public_token(self, public_token: str) -> providers.ExchangedToken:

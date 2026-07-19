@@ -72,6 +72,35 @@ async def classify_ledger(ledger_id: str, auto_file_import_id: str | None = None
         )
 
 
+SYNC_MAX_ATTEMPTS = 5
+
+
+@job_app.task(
+    name="sync.sync_connection",
+    queue="sync",
+    retry=procrastinate.RetryStrategy(max_attempts=SYNC_MAX_ATTEMPTS, exponential_wait=2),
+    pass_context=True,
+)
+async def sync_connection(context: procrastinate.JobContext, connection_id: str) -> None:
+    """One connection sync (M7 CP2, #34). Deferred with lock=sync:{id} —
+    ADR-0006's per-connection serialization: a manual refresh racing
+    another sync queues, never conflicts. Transient provider errors raise
+    into this retry strategy; the engine records the terminal states."""
+    from pinch_backend.sync import run_sync
+
+    attempts = context.job.attempts if context.job else 0
+    async with engines.session():
+        outcome = await run_sync(
+            uuid.UUID(connection_id), final_attempt=attempts >= SYNC_MAX_ATTEMPTS - 1
+        )
+    if outcome.needs_classification and outcome.ledger_id is not None:
+        # Defer-after-commit (module docstring): the session closed above,
+        # so the sweep only ever races data it can see.
+        await classify_ledger.configure(lock=f"ledger:{outcome.ledger_id}").defer_async(
+            ledger_id=str(outcome.ledger_id)
+        )
+
+
 async def run_worker() -> None:
     """The worker process: ferro + the queue, then work until signalled."""
     from pinch_backend.db import connect_database
