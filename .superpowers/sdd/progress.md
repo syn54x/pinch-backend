@@ -198,3 +198,23 @@ Branch: m7. Delivery: single PR, one slice at a time, human verification between
   revoke-then-sever ordering, ITEM_NOT_FOUND treated as success (idempotent from the
   client's seat), transient revocation failure → 502 and nothing severed. Suite 492 green.
   CP1 fully done; initial-sync auto-enqueue remains CP2's retrofit.
+- CP2 (#34): complete (commits edf5328 + review fixes c96fcca; suite 508 green; ty clean).
+  Schema: Transaction.provider_transaction_id + pending (composite unique per account,
+  NULLs distinct so imported/manual rows coexist), Connection.sync_cursor,
+  BalanceSource.PROVIDER. sync.py engine (trigger-agnostic; provider calls first, all
+  writes one transaction, classify deferred post-commit by the jobs wrapper);
+  sync_connection task (queue=sync, lock=sync:{id}, retry 5 exp; final_attempt via
+  context.job.attempts). Provider: sync_transactions drains has_more pages, persists
+  cursor only after batch applies (replay-safe via existing-provider-id skip);
+  Plaid sign flip + exponent-aware minor units (Decimal); update-mode link tokens.
+  Endpoints: POST /{id}/sync (202), auto-enqueue on create, link-token repair mode
+  (409-ish guard when no credentials). TransactionOut.pending exposed.
+  Review fixes: httpx transport faults + non-JSON bodies now funnel into ProviderError
+  (NETWORK_ERROR / HTTP_<status>) so exhaustion can't leave a stale-active connection;
+  _record_broken helper; pydantic dataclass (runtime uuid import — pydantic resolves
+  annotations at runtime, TC003 push broke it); lock-serialization, keyless-refresh,
+  refresh-lands-new-txn tests added.
+  Known boundary (in module docstring): unknown provider accounts skipped+logged,
+  cursor advances — adopting a later-added bank account needs a cursor reset (M8+).
+  Exhaustion path tested at run_sync seam (InMemoryConnector can't fast-forward
+  scheduled retries). Live sandbox smoke opt-in (PINCH_PLAID_CLIENT_ID/SECRET).
