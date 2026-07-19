@@ -13,7 +13,7 @@ the network; the opt-in live-sandbox smoke test proves the real client.
 from typing import Protocol
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from pinch_backend.models import AccountKind
 from pinch_backend.settings import settings
@@ -44,6 +44,8 @@ class ExchangedToken(BaseModel):
 
 class ProviderAccount(BaseModel):
     """An account as the provider describes it, already in Pinch vocabulary."""
+
+    model_config = ConfigDict(use_attribute_docstrings=True)
 
     provider_account_id: str
     name: str
@@ -76,14 +78,26 @@ class PlaidProvider:
     credentials injected; errors surface as ``ProviderError`` with Plaid's
     ``error_code`` and nothing else."""
 
-    def __init__(self, *, client_id: str, secret: str, environment: str) -> None:
+    def __init__(
+        self,
+        *,
+        client_id: str,
+        secret: str,
+        environment: str,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self._client_id = client_id
         self._secret = secret
         self._base_url = PLAID_BASE_URLS[environment]
+        self._transport = transport
+        """httpx's documented test seam: wire-shape tests hand in a
+        MockTransport; production leaves it None."""
 
     async def _post(self, path: str, payload: dict) -> dict:
         body = {"client_id": self._client_id, "secret": self._secret, **payload}
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=30) as client:
+        async with httpx.AsyncClient(
+            base_url=self._base_url, timeout=30, transport=self._transport
+        ) as client:
             response = await client.post(path, json=body)
         data = response.json()
         if response.status_code != 200:

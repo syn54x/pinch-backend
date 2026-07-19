@@ -1,5 +1,6 @@
 import secrets
 from datetime import timedelta
+from typing import Literal
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -80,8 +81,9 @@ class Settings(BaseSettings):
     developer account, a self-host uses the operator's. Absent ⇒ connection
     endpoints refuse cleanly and manual tracking is untouched."""
     plaid_secret: str = ""
-    plaid_environment: str = "sandbox"
-    """`sandbox` or `production` — same code path, different base URL."""
+    plaid_environment: Literal["sandbox", "production"] = "sandbox"
+    """Same code path, different base URL; a typo fails at startup like
+    every other misconfiguration, not at first request."""
     plaid_country_codes: list[str] = ["US"]
     """Passed to link-token creation; self-hosters elsewhere reconfigure."""
     secret_encryption_key: str = ""
