@@ -152,12 +152,24 @@ class PlaidProvider:
         MockTransport; production leaves it None."""
 
     async def _post(self, path: str, payload: dict) -> dict:
+        """Every failure mode funnels into ``ProviderError`` — transport
+        faults and unparseable bodies included — so the sync engine's
+        error contract (retry transients, record exhaustion) can't be
+        bypassed by the network layer."""
         body = {"client_id": self._client_id, "secret": self._secret, **payload}
-        async with httpx.AsyncClient(
-            base_url=self._base_url, timeout=30, transport=self._transport
-        ) as client:
-            response = await client.post(path, json=body)
-        data = response.json()
+        try:
+            async with httpx.AsyncClient(
+                base_url=self._base_url, timeout=30, transport=self._transport
+            ) as client:
+                response = await client.post(path, json=body)
+        except httpx.HTTPError as error:
+            raise ProviderError(code="NETWORK_ERROR", message=type(error).__name__) from error
+        try:
+            data = response.json()
+        except ValueError as error:
+            raise ProviderError(
+                code=f"HTTP_{response.status_code}", message="non-JSON response"
+            ) from error
         if response.status_code != 200:
             raise ProviderError(
                 code=data.get("error_code", f"HTTP_{response.status_code}"),

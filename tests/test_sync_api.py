@@ -171,14 +171,44 @@ async def test_connect_auto_enqueues_initial_sync(client, db, fake_provider, run
 async def test_manual_refresh_resumes_from_persisted_cursor(
     client, db, fake_provider, run_jobs
 ) -> None:
+    """The refresh both resumes the cursor and lands genuinely new
+    transactions in the inbox."""
     await _signup(client)
     body = await _connect(client, fake_provider)
     await run_jobs()  # initial sync: cursor None → cursor-1
+    fake_provider.batches = [
+        providers.SyncBatch(
+            added=[_txn("t-new", -4200, name="NEW SINCE CONNECT")],
+            modified=[],
+            removed=[],
+            next_cursor="cursor-2",
+        )
+    ]
 
     response = await client.post(f"{CONNECTIONS}/{body['id']}/sync", headers=await _csrf(client))
     assert response.status_code == 202, response.text
     await run_jobs()
     assert fake_provider.sync_cursors == [None, "cursor-1"]
+    listing = (await client.get(TRANSACTIONS)).json()["items"]
+    assert "NEW SINCE CONNECT" in {t["description_raw"] for t in listing}
+
+
+async def test_overlapping_refreshes_serialize_without_duplicates(
+    client, db, fake_provider, run_jobs
+) -> None:
+    """AC4: two refreshes enqueued back-to-back (the lock's queue-never-
+    conflict promise) process serially — same rows land exactly once."""
+    fake_provider.batches = [
+        providers.SyncBatch(added=[_txn("t1", -1234)], modified=[], removed=[], next_cursor="c1"),
+        providers.SyncBatch(added=[_txn("t1", -1234)], modified=[], removed=[], next_cursor="c2"),
+    ]
+    await _signup(client)
+    body = await _connect(client, fake_provider)
+    await client.post(f"{CONNECTIONS}/{body['id']}/sync", headers=await _csrf(client))
+    await run_jobs()  # initial + refresh, serialized by the connection lock
+    assert len(fake_provider.sync_cursors) == 2
+    rows = await Transaction.where(lambda t: t.provider_transaction_id == "t1").all()
+    assert len(rows) == 1
 
 
 async def test_replayed_page_never_duplicates(client, db, fake_provider, run_jobs) -> None:
@@ -231,7 +261,7 @@ async def test_auth_error_marks_reauth_and_repair_flow_heals(
     assert health["error_detail"] is None
 
 
-async def test_refresh_tenancy_404_and_keyless_403(client, db, fake_provider) -> None:
+async def test_refresh_tenancy_404(client, db, fake_provider) -> None:
     await _signup(client)
     body = await _connect(client, fake_provider)
 
