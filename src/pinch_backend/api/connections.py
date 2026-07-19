@@ -18,7 +18,7 @@ sync auto-enqueue arrives with the sync job (CP2, #34).
 import uuid
 from datetime import datetime
 
-from litestar import Router, get, post
+from litestar import Router, delete, get, post
 from litestar.di import NamedDependency
 from litestar.exceptions import ClientException, NotFoundException, PermissionDeniedException
 from litestar.params import FromPath
@@ -34,7 +34,7 @@ from pinch_backend.api.pagination import (
     Page,
     paginate,
 )
-from pinch_backend.crypto import encrypt_secret
+from pinch_backend.crypto import decrypt_secret, encrypt_secret
 from pinch_backend.models import (
     Account,
     Connection,
@@ -206,7 +206,44 @@ async def get_connection(
     return await _connection_out(connection)
 
 
+@delete("/{connection_id:uuid}")
+async def delete_connection(
+    connection_id: FromPath[uuid.UUID], current_ledger: NamedDependency[Ledger]
+) -> None:
+    """Disconnect severs, never destroys (CONTEXT.md): Plaid's side is
+    revoked, the connection row deleted, and the accounts live on with
+    ``connection`` nulled (SET NULL) — structurally manual from here on.
+
+    Ordering is deliberate: revoke first, sever second. If revocation
+    fails transiently the client retries (502, nothing severed); Plaid
+    already not knowing the item is success from this seat."""
+    _require_plaid()
+    connection = await Connection.where(
+        lambda c: (c.id == connection_id) & (c.ledger_id == current_ledger.id)
+    ).first()
+    if connection is None:
+        raise NotFoundException(detail="No such connection")
+    if connection.encrypted_secret is not None:
+        try:
+            await providers.get_provider().remove_item(decrypt_secret(connection.encrypted_secret))
+        except providers.ProviderError as error:
+            if error.code != "ITEM_NOT_FOUND":
+                raise _surface(error) from error
+    await Connection.where(lambda c, cid=connection.id: c.id == cid).delete()
+    log.info(
+        "connection.deleted",
+        connection_id=str(connection.id),
+        ledger_id=str(current_ledger.id),
+    )
+
+
 connections_router = Router(
     path="/api/v1/connections",
-    route_handlers=[create_link_token, create_connection, list_connections, get_connection],
+    route_handlers=[
+        create_link_token,
+        create_connection,
+        list_connections,
+        get_connection,
+        delete_connection,
+    ],
 )

@@ -72,6 +72,8 @@ class SyncProvider(Protocol):
 
     async def get_accounts(self, access_token: str) -> list[ProviderAccount]: ...
 
+    async def remove_item(self, access_token: str) -> None: ...
+
 
 class PlaidProvider:
     """The owned Plaid client. Every call is one JSON POST with instance
@@ -124,6 +126,11 @@ class PlaidProvider:
     async def exchange_public_token(self, public_token: str) -> ExchangedToken:
         data = await self._post("/item/public_token/exchange", {"public_token": public_token})
         return ExchangedToken(access_token=data["access_token"], item_id=data["item_id"])
+
+    async def remove_item(self, access_token: str) -> None:
+        """Revoke Plaid's side: stops Item billing and invalidates the
+        token. Pinch-side severing is the caller's business."""
+        await self._post("/item/remove", {"access_token": access_token})
 
     async def get_accounts(self, access_token: str) -> list[ProviderAccount]:
         data = await self._post("/accounts/get", {"access_token": access_token})

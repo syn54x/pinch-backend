@@ -63,6 +63,10 @@ class FakeProvider:
         self.accounts: list[providers.ProviderAccount] = []
         self.link_tokens_created: list[dict] = []
         self.exchanged: list[str] = []
+        self.removed: list[str] = []
+
+    async def remove_item(self, access_token: str) -> None:
+        self.removed.append(access_token)
 
     async def create_link_token(self, *, client_user_id: str) -> str:
         self.link_tokens_created.append({"client_user_id": client_user_id})
@@ -237,6 +241,82 @@ async def test_provider_outage_answers_502(client, db, fake_provider) -> None:
     )
     assert response.status_code == 502
     assert response.json()["detail"] == "Plaid request failed: INTERNAL_SERVER_ERROR"
+
+
+# --- disconnect: severs, never destroys (unblocked by ferro-orm#325) ------
+
+
+async def test_disconnect_severs_but_keeps_accounts(client, db, fake_provider) -> None:
+    """CONTEXT.md: disconnecting severs the link, never the data — the
+    accounts live on as manual accounts, history intact."""
+    await _signup(client)
+    body = await _connect(client, fake_provider)
+    response = await client.delete(f"{CONNECTIONS}/{body['id']}", headers=await _csrf(client))
+    assert response.status_code == 204, response.text
+    # Plaid's side revoked with the decrypted token, never a guess
+    assert fake_provider.removed == ["access-fake-public-abc"]
+    # The connection is gone; the accounts stand, structurally manual now
+    assert (await client.get(f"{CONNECTIONS}/{body['id']}")).status_code == 404
+    accounts = (await client.get("/api/v1/accounts")).json()["items"]
+    assert {a["label"] for a in accounts} == {
+        "Everyday Checking",
+        "Rewards Card",
+        "Mystery Holding",
+    }
+    assert all(a["manual"] is True for a in accounts)
+
+
+async def test_disconnected_account_accepts_manual_entries(client, db, fake_provider) -> None:
+    """The M4 machinery lights up for a severed account automatically."""
+    await _signup(client)
+    body = await _connect(client, fake_provider)
+    account_id = body["accounts"][0]["id"]
+    await client.delete(f"{CONNECTIONS}/{body['id']}", headers=await _csrf(client))
+    response = await client.post(
+        f"/api/v1/accounts/{account_id}/balance-entries",
+        json={"amount_minor": 123_45},
+        headers=await _csrf(client),
+    )
+    assert response.status_code == 201, response.text
+
+
+async def test_disconnect_provider_outage_severs_nothing(client, db, fake_provider) -> None:
+    """Half-severed is worse than not severed: if Plaid's revocation fails,
+    the connection remains and the client retries."""
+
+    async def refuse(access_token: str) -> None:
+        raise providers.ProviderError("INTERNAL_SERVER_ERROR", "plaid is down")
+
+    fake_provider.remove_item = refuse
+    await _signup(client)
+    body = await _connect(client, fake_provider)
+    response = await client.delete(f"{CONNECTIONS}/{body['id']}", headers=await _csrf(client))
+    assert response.status_code == 502
+    assert (await client.get(f"{CONNECTIONS}/{body['id']}")).status_code == 200
+
+
+async def test_disconnect_item_already_gone_still_severs(client, db, fake_provider) -> None:
+    """Plaid not knowing the item anymore is success, not failure — the
+    endpoint is idempotent from the client's seat."""
+
+    async def already_gone(access_token: str) -> None:
+        raise providers.ProviderError("ITEM_NOT_FOUND", "no such item")
+
+    fake_provider.remove_item = already_gone
+    await _signup(client)
+    body = await _connect(client, fake_provider)
+    response = await client.delete(f"{CONNECTIONS}/{body['id']}", headers=await _csrf(client))
+    assert response.status_code == 204
+    assert (await client.get(f"{CONNECTIONS}/{body['id']}")).status_code == 404
+
+
+async def test_disconnect_tenancy_404(client, db, fake_provider) -> None:
+    await _signup(client)
+    body = await _connect(client, fake_provider)
+    await client.post("/api/v1/auth/logout", headers=await _csrf(client))
+    await _signup(client, email="other@example.com")
+    response = await client.delete(f"{CONNECTIONS}/{body['id']}", headers=await _csrf(client))
+    assert response.status_code == 404
 
 
 async def test_connection_detail_and_tenancy_404(client, db, fake_provider) -> None:

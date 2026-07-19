@@ -102,6 +102,19 @@ async def test_accounts_map_kinds_and_currency() -> None:
     assert currencies["a3"] is None and currencies["a5"] is None
 
 
+async def test_remove_item_posts_token() -> None:
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={"removed": True})
+
+    await _provider(handler).remove_item("access-x")
+    assert seen["path"] == "/item/remove"
+    assert seen["access_token"] == "access-x"
+
+
 async def test_plaid_error_surfaces_code_only() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

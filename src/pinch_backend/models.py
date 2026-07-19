@@ -231,8 +231,13 @@ class Account(TimestampMixin, Model):
     kind: AccountKind
     label: str
     currency: str = Field(default="USD", pattern=r"^[A-Z]{3}$")
-    connection: Annotated[Connection | None, ForeignKey(related_name="accounts")] = None
-    """Absent on a manual account."""
+    connection: Annotated[
+        Connection | None, ForeignKey(related_name="accounts", on_delete="SET NULL")
+    ] = None
+    """Absent on a manual account. SET NULL is disconnect's contract (M7):
+    severing a connection makes its accounts manual, never deletes them —
+    the alteration from the pre-M7 CASCADE migrates via ferro>=0.17.1
+    (ferro-orm#325)."""
     provider_account_id: str | None = None
     archived: bool = False
     """Archive, don't delete: closed accounts keep their history."""

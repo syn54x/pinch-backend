@@ -17,5 +17,5 @@ upstream issue body is the canonical PRD; the drafts here are historical.
 | 0007 | DELETE-path FK-violation exception mapping | filed: [ferro-orm#306](https://github.com/syn54x/ferro-orm/issues/306) |
 | 0008 | Reverse-relation membership predicates (EXISTS) | delivered in 0.17.0 (existence tests): [ferro-orm#307](https://github.com/syn54x/ferro-orm/issues/307) |
 | 0009 | OR-composition across a left-joined reverse child | delivered in 0.17.0 (scoped existence tests): [ferro-orm#308](https://github.com/syn54x/ferro-orm/issues/308) |
-| 0010 | auto-migrate ordering: columns before indexes that reference them | filed: [ferro-orm#324](https://github.com/syn54x/ferro-orm/issues/324) |
-| 0011 | auto-migrate: `on_delete` alteration on existing FKs | filed: [ferro-orm#325](https://github.com/syn54x/ferro-orm/issues/325) |
+| 0010 | auto-migrate ordering: columns before indexes that reference them | delivered in 0.17.1: [ferro-orm#324](https://github.com/syn54x/ferro-orm/issues/324) |
+| 0011 | auto-migrate: `on_delete` alteration on existing FKs | delivered in 0.17.1: [ferro-orm#325](https://github.com/syn54x/ferro-orm/issues/325) |

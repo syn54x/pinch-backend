@@ -192,4 +192,9 @@ Branch: m7. Delivery: single PR, one slice at a time, human verification between
   M8's net-worth MUST exclude archived accounts (binding note, recorded on #33).
   AWAITING SIGN-OFF: keyless list/detail answer 200-empty (deliberate deviation from
   "every connection endpoint refuses"); plaid_country_codes setting (unspecced config).
-  Disconnect + initial-sync auto-enqueue arrive with ferro#325 / CP2 respectively.
+- CP1 disconnect retrofit: complete after ferro 0.17.1 delivered #324+#325 (verified via
+  re-run scratch harnesses; floor bumped). Account.connection now on_delete="SET NULL"
+  (models.py), provider remove_item on seam+client+wire test, DELETE /connections/{id}:
+  revoke-then-sever ordering, ITEM_NOT_FOUND treated as success (idempotent from the
+  client's seat), transient revocation failure → 502 and nothing severed. Suite 492 green.
+  CP1 fully done; initial-sync auto-enqueue remains CP2's retrofit.
