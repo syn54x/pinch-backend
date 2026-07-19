@@ -218,3 +218,20 @@ Branch: m7. Delivery: single PR, one slice at a time, human verification between
   cursor advances — adopting a later-added bank account needs a cursor reset (M8+).
   Exhaustion path tested at run_sync seam (InMemoryConnector can't fast-forward
   scheduled retries). Live sandbox smoke opt-in (PINCH_PLAID_CLIENT_ID/SECRET).
+- CP3 (#35): complete (commit 56cde07 + review fixes; suite 515 green).
+  pinch_backend/retraction.py: import-undo's dissolution machinery extracted verbatim
+  (dissolve → proposals → void → delete-last; import tests pin behavior) and shared with
+  sync-removed (actor=AUTO — enum has only USER/AUTO, no SYSTEM). run_sync applies:
+  rewrites first (posted-replaces-pending via pending_provider_transaction_id match,
+  swallowing the paired removal; modified rewrites, unseen-modified upserts as insert —
+  replay hardening, unspecced, flag for sign-off), then true removals via the seam, then
+  inserts. rewrite_in_place: amount unchanged → source fields only (user data/links/review
+  stand; date drift cosmetic); amount changed → lines deleted, transfer dissolved with the
+  TARGET EXCLUDED from dissolve accounting (its reopen + full void handled locally — the
+  double-count fix from review), decisions voided reason "amount changed by provider
+  sync", proposal deleted, reviewed nulled, re-classified.
+  Review findings triaged: fixed double-counted reopened + SyncOutcome ConfigDict + four
+  test gaps (tags/notes/display-name survival, equal-amount transfer-link + date-drift
+  survival, append-only decision-still-stands assertion). Accepted as convention: fake/
+  helper duplication across test files (self-contained test files are the repo's pattern).
+  Deferred to CP4: run_sync length restructure (CP4 reshapes it anyway).

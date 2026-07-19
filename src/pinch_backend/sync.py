@@ -39,6 +39,7 @@ and logged; the cursor still advances. Adopting such an account later
 import uuid  # runtime import: pydantic resolves the dataclass annotation at runtime
 
 from ferro import transaction
+from pydantic import ConfigDict
 from pydantic.dataclasses import dataclass
 
 from pinch_backend import providers
@@ -77,7 +78,7 @@ AUTH_ERROR_CODES = {
 (update-mode link token), not retry territory."""
 
 
-@dataclass
+@dataclass(config=ConfigDict(use_attribute_docstrings=True))
 class SyncOutcome:
     ledger_id: uuid.UUID | None = None
     created: int = 0
@@ -161,10 +162,13 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
         if amount_changed:
             tid = target.id
             await SplitLine.where(lambda ln, t=tid: ln.transaction_id == t).delete()
+            # The target is excluded from the dissolve's reopen accounting —
+            # its reopen (and full decision void) is handled right here, so
+            # only the counterpart is the dissolve's to reopen.
             reopened += await dissolve_transfers_touching(
                 ledger_id,
                 [tid],
-                exclude_members=set(),
+                exclude_members={tid},
                 actor=CorrectionActor.AUTO,
                 counterpart_reason="transfer dissolved: amount changed by provider sync",
             )

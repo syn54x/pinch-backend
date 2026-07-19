@@ -183,6 +183,12 @@ async def test_posting_with_equal_amount_inherits_everything(
     assert pending_txn["pending"] is True
     groceries = await _make_category(client, "Groceries")
     await _review(client, pending_txn["id"], {"category_id": groceries})
+    patch = await client.patch(
+        f"/api/v1/transactions/{pending_txn['id']}",
+        json={"tags": ["morning-ritual"], "display_name": "Morning Coffee", "notes": "the usual"},
+        headers=await _csrf(client),
+    )
+    assert patch.status_code == 200, patch.text
 
     fake_provider.batches = [
         _batch(
@@ -201,6 +207,10 @@ async def test_posting_with_equal_amount_inherits_everything(
     assert posted["description_raw"] == "COFFEE SHOP POSTED"
     assert posted["reviewed_at"] is not None  # review work never destroyed
     assert posted["category"]["name"] == "Groceries"
+    # user data survives wholesale: tags, display name, notes (AC1)
+    assert [t["name"] for t in posted["tags"]] == ["morning-ritual"]
+    assert posted["display_name"] == "Morning Coffee"
+    assert posted["notes"] == "the usual"
     row = await Transaction.where(lambda t: t.provider_transaction_id == "t-post1").first()
     assert row is not None and row.id == uuid.UUID(pending_txn["id"])
 
@@ -244,6 +254,12 @@ async def test_posting_with_changed_amount_reopens_and_dissolves_splits(
     assert posted["proposal"] is not None  # freshly classified
     voids = (await client.get(f"{CORRECTION_LOG}?kind=void")).json()["items"]
     assert any(v["void_reason"] and "amount" in v["void_reason"] for v in voids)
+    # append-only in full (AC6): the original decision entries still stand,
+    # un-edited — a void is a later entry pointing back, never a mutation
+    decisions = (await client.get(f"{CORRECTION_LOG}?kind=decision")).json()["items"]
+    assert len(decisions) >= 1
+    voided_targets = {v["voids"] for v in voids}
+    assert any(d["id"] in voided_targets for d in decisions)
 
 
 async def test_modified_cosmetic_change_never_reopens(client, db, fake_provider, run_jobs) -> None:
@@ -301,6 +317,49 @@ async def test_modified_amount_change_dissolves_transfer_both_sides(
     assert out_after["amount_minor"] == -49_000
     assert out_after["transfer"] is None and in_after["transfer"] is None
     assert out_after["reviewed_at"] is None and in_after["reviewed_at"] is None
+
+
+async def test_equal_amount_rewrite_preserves_transfer_link_and_date_drift(
+    client, db, fake_provider, run_jobs
+) -> None:
+    """AC2 in full: an amount-preserving rewrite — even one shifting the
+    date — leaves transfer links and reviewed state standing. Settlement
+    lag moving a date is cosmetic; only the amount is material."""
+    await _signup(client)
+    body = await _connect_and_sync(
+        client,
+        fake_provider,
+        _batch(
+            added=[
+                _txn("t-out", -50_000, name="TRANSFER TO SAVINGS"),
+                _txn("t-in", 50_000, account="plaid-savings", name="TRANSFER FROM CHECKING"),
+            ]
+        ),
+    )
+    await run_jobs()
+    out_txn = await _one_txn(client, "TRANSFER TO SAVINGS")
+    in_txn = await _one_txn(client, "TRANSFER FROM CHECKING")
+    assert (
+        await client.post(
+            TRANSFERS,
+            json={"transaction_ids": [out_txn["id"], in_txn["id"]]},
+            headers=await _csrf(client),
+        )
+    ).status_code == 201
+    await _review(client, out_txn["id"])
+    await _review(client, in_txn["id"])
+
+    fake_provider.batches = [
+        _batch(modified=[_txn("t-out", -50_000, name="TRANSFER TO SAVINGS", day="2026-07-20")])
+    ]
+    await _refresh(client, body["id"])
+    await run_jobs()
+
+    out_after = await _one_txn(client, "TRANSFER TO SAVINGS")
+    assert out_after["date"] == "2026-07-20"  # source data updated
+    assert out_after["transfer"] is not None  # the link survives the drift
+    assert out_after["reviewed_at"] is not None  # review stands
+    assert (await client.get(TRANSFERS)).json()["items"] != []
 
 
 # --- removed --------------------------------------------------------------
