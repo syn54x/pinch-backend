@@ -250,6 +250,18 @@ class PlaidProvider:
             if cursor is not None:
                 payload["cursor"] = cursor
             data = await self._post("/transactions/sync", payload)
+            if not data["next_cursor"] and not data["has_more"]:
+                # A fresh Item whose initial transaction pull hasn't finished
+                # on Plaid's side answers an empty batch with an empty cursor
+                # — which must never be persisted (live-sandbox finding).
+                # Surfacing it as a transient error drops it into the job's
+                # retry ladder; a slow institution that outlasts the ladder
+                # parks the connection in `error`, healed by the next
+                # manual refresh.
+                raise ProviderError(
+                    code="PRODUCT_NOT_READY",
+                    message="initial transaction pull not finished",
+                )
             added.extend(convert(t) for t in data["added"])
             modified.extend(convert(t) for t in data["modified"])
             removed.extend(r["transaction_id"] for r in data["removed"])

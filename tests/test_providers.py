@@ -246,6 +246,28 @@ async def test_sync_paginates_and_converts() -> None:
     assert batch.removed == ["t-gone"]
 
 
+async def test_sync_not_ready_surfaces_transient_error() -> None:
+    """A fresh Item mid-initial-pull answers empty-with-empty-cursor
+    (live-sandbox finding): that cursor must never persist — it surfaces
+    as a transient PRODUCT_NOT_READY into the retry ladder instead."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "added": [],
+                "modified": [],
+                "removed": [],
+                "next_cursor": "",
+                "has_more": False,
+            },
+        )
+
+    with pytest.raises(ProviderError) as excinfo:
+        await _provider(handler).sync_transactions("access-x", cursor=None)
+    assert excinfo.value.code == "PRODUCT_NOT_READY"
+
+
 async def test_sync_initial_cursor_omitted() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)

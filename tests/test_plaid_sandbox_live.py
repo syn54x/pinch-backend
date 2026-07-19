@@ -7,12 +7,13 @@ CI-gating — the whole module skips without credentials in the environment:
     PINCH_PLAID_CLIENT_ID=... PINCH_PLAID_SECRET=... uv run pytest tests/test_plaid_sandbox_live.py
 """
 
+import asyncio
 import os
 
 import httpx
 import pytest
 
-from pinch_backend.providers import PLAID_BASE_URLS, PlaidProvider
+from pinch_backend.providers import PLAID_BASE_URLS, PlaidProvider, ProviderError
 
 CLIENT_ID = os.environ.get("PINCH_PLAID_CLIENT_ID", "")
 SECRET = os.environ.get("PINCH_PLAID_SECRET", "")
@@ -53,7 +54,19 @@ async def test_link_exchange_accounts_and_sync_against_sandbox() -> None:
     assert accounts, "sandbox item should carry accounts"
     assert all(a.provider_account_id for a in accounts)
 
-    batch = await provider.sync_transactions(exchanged.access_token, cursor=None)
+    # A fresh Item's initial pull is asynchronous on Plaid's side; the
+    # client surfaces the not-ready state as PRODUCT_NOT_READY and the
+    # worker's retry ladder waits it out — this loop plays that role here.
+    for _attempt in range(24):
+        try:
+            batch = await provider.sync_transactions(exchanged.access_token, cursor=None)
+            break
+        except ProviderError as error:
+            if error.code != "PRODUCT_NOT_READY":
+                raise
+            await asyncio.sleep(5)
+    else:
+        pytest.fail("sandbox initial transaction pull never became ready (~2 min)")
     assert batch.next_cursor  # a drained cursor, ready to persist
 
     await provider.remove_item(exchanged.access_token)
