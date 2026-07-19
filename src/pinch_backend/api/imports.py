@@ -45,20 +45,16 @@ from pinch_backend.jobs import classify_ledger
 from pinch_backend.models import (
     Account,
     CorrectionActor,
-    CorrectionKind,
-    CorrectionLogEntry,
     Import,
     ImportProfile,
     ImportRow,
     ImportStatus,
     Ledger,
-    Proposal,
-    ProposalTag,
     Transaction,
-    Transfer,
     utcnow,
 )
 from pinch_backend.observability import get_logger
+from pinch_backend.retraction import retract_transactions
 from pinch_backend.settings import settings
 
 log = get_logger(__name__)
@@ -579,107 +575,22 @@ async def delete_import(
     batch = await _get_import(current_ledger, import_id)
     undone = batch.status is ImportStatus.COMMITTED
     batch_id = batch.id
-    survivors_reopened = 0
     async with transaction():
         txn_ids = [
             t.id for t in await Transaction.where(lambda t: t.source_import_id == batch_id).all()
         ]
-        if txn_ids:
-            # Transfers referencing a retracted transaction dissolve (M6 CP3);
-            # a surviving linked counterpart is REOPENED — a silently-restored-
-            # to-spending row is report pollution — and its transfer decision
-            # entry is voided: the decision was made against a transaction
-            # that no longer exists. Runs before the transaction delete so the
-            # link rows still name their members (the FK CASCADE stays the
-            # backstop, not the mechanism).
-            doomed = set(txn_ids)
-            affected = await Transfer.where(
-                lambda tr, ids=txn_ids: (
-                    (tr.outflow_transaction_id.in_(ids)) | (tr.inflow_transaction_id.in_(ids))
-                )
-            ).all()
-            for link in affected:
-                members = (link.outflow_transaction_id, link.inflow_transaction_id)  # ty: ignore[unresolved-attribute]
-                survivor_ids = [m for m in members if m is not None and m not in doomed]
-                await link.delete()
-                for survivor_id in survivor_ids:
-                    reopened = await Transaction.where(
-                        lambda t, sid=survivor_id: (t.id == sid) & (t.reviewed_at != None)  # noqa: E711
-                    ).update(reviewed_at=None, updated_at=utcnow())
-                    survivors_reopened += reopened
-                    decisions = (
-                        await CorrectionLogEntry.where(
-                            lambda e, sid=survivor_id: (
-                                (e.transaction_id == sid) & (e.kind == CorrectionKind.DECISION)
-                            )
-                        )
-                        .order_by(lambda e: e.id)
-                        .all()
-                    )
-                    decision_ids = [d.id for d in decisions]
-                    voided = (
-                        {
-                            v.voids
-                            for v in await CorrectionLogEntry.where(
-                                lambda v, ids=decision_ids: v.voids.in_(ids)
-                            ).all()
-                        }
-                        if decision_ids
-                        else set()
-                    )
-                    for decision in decisions:
-                        if decision.id in voided or decision.decision_transfer is None:
-                            continue
-                        await CorrectionLogEntry.create(
-                            ledger=current_ledger,
-                            transaction_id=decision.transaction_id,
-                            kind=CorrectionKind.VOID,
-                            actor=CorrectionActor.USER,
-                            voids=decision.id,
-                            void_reason="transfer counterpart removed by import undo",
-                        )
-            # Retraction over CP3's tables (the M4 forward contract, bound
-            # here): proposals die with their transactions; log entries are
-            # voided with a later entry, never deleted.
-            proposal_ids = [
-                p.id
-                for p in await Proposal.where(
-                    lambda p, ids=txn_ids: p.transaction_id.in_(ids)
-                ).all()
-            ]
-            if proposal_ids:
-                await ProposalTag.where(
-                    lambda pt, ids=proposal_ids: pt.proposal_id.in_(ids)
-                ).delete()
-                await Proposal.where(lambda p, ids=proposal_ids: p.id.in_(ids)).delete()
-            decisions = await CorrectionLogEntry.where(
-                lambda e, ids=txn_ids: (
-                    (e.transaction_id.in_(ids)) & (e.kind == CorrectionKind.DECISION)
-                )
-            ).all()
-            decision_ids = [d.id for d in decisions]
-            already_voided = (
-                {
-                    v.voids
-                    for v in await CorrectionLogEntry.where(
-                        lambda v, ids=decision_ids: v.voids.in_(ids)
-                    ).all()
-                }
-                if decision_ids
-                else set()
-            )
-            for decision in decisions:
-                if decision.id in already_voided:
-                    continue
-                await CorrectionLogEntry.create(
-                    ledger=current_ledger,
-                    transaction_id=decision.transaction_id,
-                    kind=CorrectionKind.VOID,
-                    actor=CorrectionActor.USER,
-                    voids=decision.id,
-                    void_reason="import undone",
-                )
-        await Transaction.where(lambda t: t.source_import_id == batch_id).delete()
+        # The shared retraction seam (M6 contract, extracted at M7 CP3):
+        # transfers dissolve with surviving counterparts reopened and their
+        # transfer decisions voided; proposals die with their transactions;
+        # every decision on the doomed rows is voided; the rows go last so
+        # link rows still name their members while dissolving.
+        survivors_reopened = await retract_transactions(
+            current_ledger.id,
+            txn_ids,
+            actor=CorrectionActor.USER,
+            decision_reason="import undone",
+            counterpart_reason="transfer counterpart removed by import undo",
+        )
         await ImportRow.where(lambda r: r.import_batch_id == batch_id).delete()
         await batch.delete()
     if survivors_reopened:
