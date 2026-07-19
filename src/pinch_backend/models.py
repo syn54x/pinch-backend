@@ -98,14 +98,16 @@ class RuleStatus(StrEnum):
 
 
 class ProposalProvenance(StrEnum):
-    """Who decided the proposal's CATEGORY (PRD M5 D11/D13): a rule, exact
+    """Who decided the proposal (PRD M5 D11/D13; M7 #31): a rule, exact
     payee history, the AI classifier (unreachable until M9's Penny — v0
-    deterministically abstains), or nobody (the empty proposal). Contributing
+    deterministically abstains), the transfer detector (M7 CP4 — it matched
+    a counterpart transaction), or nobody (the empty proposal). Contributing
     rules for tags/rename ride in provenance_detail regardless."""
 
     RULE = "rule"
     HISTORY = "history"
     AI = "ai"
+    DETECTION = "detection"
     NONE = "none"
 
 
@@ -460,6 +462,9 @@ class Transaction(TimestampMixin, Model):
 
     transaction_tags: Relation[list["TransactionTag"]] = BackRef()
     proposals: Relation[list["Proposal"]] = BackRef()
+    mirror_proposals: Relation[list["Proposal"]] = BackRef()
+    """Detection proposals on OTHER transactions naming this one as their
+    counterpart (M7 CP4)."""
     split_lines: Relation[list["SplitLine"]] = BackRef()
     # One-to-one reverse sides of Transfer's unique FKs: a transaction is the
     # outflow of at most one transfer and the inflow of at most one — and the
@@ -683,7 +688,17 @@ class Proposal(TimestampMixin, Model):
     """The pipeline proposes marking this an UNTRACKED transfer (M6 CP4);
     category is NULL when set — the shapes are exclusive on the proposal
     exactly as they are on the decision. Consuming it creates the one-sided
-    Transfer (unless the transaction was split or linked in the meantime)."""
+    Transfer (unless the transaction was split or linked in the meantime).
+    With ``counterpart_transaction`` set (M7 CP4), the proposal is instead
+    a LINKED transfer with that exact row."""
+    counterpart_transaction: Annotated[
+        Optional["Transaction"],
+        ForeignKey(related_name="mirror_proposals", on_delete="CASCADE"),
+    ] = None
+    """The detector's matched counterpart (M7 CP4). CASCADE is the backstop
+    — a proposal naming a deleted row is meaningless — while the retraction
+    and rewrite paths invalidate mirrors explicitly so their owners get
+    re-classified."""
     provenance: ProposalProvenance = ProposalProvenance.NONE
     provenance_detail: dict | None = None
     """Snapshots, never FKs (PRD M5 D11): contributing rule ids as strings,

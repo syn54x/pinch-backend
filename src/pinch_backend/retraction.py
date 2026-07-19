@@ -120,6 +120,23 @@ async def delete_proposals_for(txn_ids: "list[uuid.UUID]") -> None:
         await Proposal.where(lambda p, ids=proposal_ids: p.id.in_(ids)).delete()
 
 
+async def invalidate_mirrors_referencing(txn_ids: "list[uuid.UUID]") -> int:
+    """Delete detection proposals on OTHER transactions that name these ids
+    as their counterpart (M7 CP4): a mirror aimed at a rewritten or removed
+    row is a trap. The FK CASCADE is the deletion backstop; this explicit
+    pass exists so callers can count the orphans and re-classify their
+    owners. Returns mirrors deleted."""
+    mirrors = await Proposal.where(
+        lambda p, ids=txn_ids: p.counterpart_transaction_id.in_(ids)
+    ).all()
+    if not mirrors:
+        return 0
+    mirror_ids = [m.id for m in mirrors]
+    await ProposalTag.where(lambda pt, ids=mirror_ids: pt.proposal_id.in_(ids)).delete()
+    await Proposal.where(lambda p, ids=mirror_ids: p.id.in_(ids)).delete()
+    return len(mirror_ids)
+
+
 async def retract_transactions(
     ledger_id: "uuid.UUID",
     txn_ids: "list[uuid.UUID]",
@@ -127,13 +144,14 @@ async def retract_transactions(
     actor: CorrectionActor,
     decision_reason: str,
     counterpart_reason: str,
-) -> int:
+) -> tuple[int, int]:
     """The full retraction: dissolve transfers (reopening + voiding linked
-    survivors), delete proposals, void every decision on the doomed rows,
-    delete the rows (split lines cascade at the database). Returns how many
-    surviving counterparts were reopened."""
+    survivors), delete proposals and mirrors naming the doomed rows, void
+    every decision on them, delete the rows (split lines cascade at the
+    database). Returns (surviving counterparts reopened, mirror proposals
+    invalidated) — both mean someone needs re-classification."""
     if not txn_ids:
-        return 0
+        return 0, 0
     reopened = await dissolve_transfers_touching(
         ledger_id,
         txn_ids,
@@ -142,7 +160,8 @@ async def retract_transactions(
         counterpart_reason=counterpart_reason,
     )
     await delete_proposals_for(txn_ids)
+    mirrors = await invalidate_mirrors_referencing(txn_ids)
     for txn_id in txn_ids:
         await void_decisions(ledger_id, txn_id, actor=actor, reason=decision_reason)
     await Transaction.where(lambda t, ids=txn_ids: t.id.in_(ids)).delete()
-    return reopened
+    return reopened, mirrors

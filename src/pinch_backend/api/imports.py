@@ -584,7 +584,7 @@ async def delete_import(
         # transfer decisions voided; proposals die with their transactions;
         # every decision on the doomed rows is voided; the rows go last so
         # link rows still name their members while dissolving.
-        survivors_reopened = await retract_transactions(
+        survivors_reopened, mirrors_invalidated = await retract_transactions(
             current_ledger.id,
             txn_ids,
             actor=CorrectionActor.USER,
@@ -593,9 +593,11 @@ async def delete_import(
         )
         await ImportRow.where(lambda r: r.import_batch_id == batch_id).delete()
         await batch.delete()
-    if survivors_reopened:
-        # A reopened survivor is back in the inbox and needs a fresh proposal
-        # — deferred AFTER the transaction commits (the un-review precedent).
+    if survivors_reopened or mirrors_invalidated:
+        # A reopened survivor — or the orphaned owner of an invalidated
+        # mirror proposal (M7 CP4) — is in the inbox needing a fresh
+        # proposal, deferred AFTER the transaction commits (the un-review
+        # precedent).
         await classify_ledger.configure(lock=f"ledger:{current_ledger.id}").defer_async(
             ledger_id=str(current_ledger.id), auto_file_import_id=None
         )

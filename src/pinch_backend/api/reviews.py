@@ -29,8 +29,13 @@ from pinch_backend.api.transactions import (
     validate_split_document,
 )
 from pinch_backend.api.transfers import assert_not_in_transfer, establish_transfer
-from pinch_backend.classification.consume import AlreadyReviewedError, consume_proposal
+from pinch_backend.classification.consume import (
+    AlreadyReviewedError,
+    consume_proposal,
+    log_transfer_decision_on_reviewed,
+)
 from pinch_backend.classification.promotion import maybe_propose_rule
+from pinch_backend.jobs import classify_ledger
 from pinch_backend.models import (
     Category,
     CorrectionActor,
@@ -210,17 +215,14 @@ async def review_transaction(
             ).first()
             if counterpart is None:
                 raise NotFoundException(detail="No such transaction")
-            if counterpart.reviewed_at is not None:
-                # The one-motion contract consumes BOTH sides; an already-
-                # decided counterpart can still be linked, via POST /transfers.
-                raise HTTPException(
-                    status_code=HTTP_409_CONFLICT,
-                    detail="Counterpart is already reviewed; link it via POST /transfers instead",
-                )
             counterpart_proposal, counterpart_tags = await _pending_proposal(counterpart.id)
             async with transaction():
-                # Both proposals consumed, both reviewed, two log entries, one
-                # database transaction — accept-by-explicit-id, never filter.
+                # Both sides consumed, two log entries, one database
+                # transaction — accept-by-explicit-id, never filter. An
+                # already-reviewed counterpart is fair game (M7 CP4 relaxed
+                # the M6 409): the link is created, its category vacated by
+                # establish, its reviewed state stands, and the transfer
+                # decision lands as a later entry.
                 await establish_transfer(current_ledger, [txn, counterpart])
                 entry = await consume_proposal(
                     current_ledger,
@@ -230,16 +232,21 @@ async def review_transaction(
                     display_name=final_display,
                     actor=CorrectionActor.USER,
                 )
-                await consume_proposal(
-                    current_ledger,
-                    counterpart,
-                    category_id=None,
-                    tags=dedupe_tag_names(counterpart_tags),
-                    display_name=(
-                        counterpart_proposal.proposed_display_name if counterpart_proposal else None
-                    ),
-                    actor=CorrectionActor.USER,
-                )
+                if counterpart.reviewed_at is None:
+                    await consume_proposal(
+                        current_ledger,
+                        counterpart,
+                        category_id=None,
+                        tags=dedupe_tag_names(counterpart_tags),
+                        display_name=(
+                            counterpart_proposal.proposed_display_name
+                            if counterpart_proposal
+                            else None
+                        ),
+                        actor=CorrectionActor.USER,
+                    )
+                else:
+                    await log_transfer_decision_on_reviewed(current_ledger, counterpart)
         else:
             # Accept-as-is of a transfer-shaped proposal creates the untracked
             # Transfer (M6 CP4) — unless the user's final word was a category.
@@ -261,12 +268,20 @@ async def review_transaction(
 
     # The entry is what actually happened: a decision that landed as a split
     # or transfer deviates from the proposal — unless the proposal itself was
-    # transfer-shaped and the decision is the matching untracked link (CP4).
+    # transfer-shaped and the decision is the matching link: untracked for a
+    # rule/history proposal (CP4), or the detector's exact counterpart (M7).
     prop_transfer = bool(proposal and proposal.proposed_transfer)
+    prop_counterpart = proposal.counterpart_transaction_id if proposal else None  # ty: ignore[unresolved-attribute]
     decided_untracked = (
         entry.decision_transfer is not None and entry.decision_transfer["kind"] == "untracked"
     )
-    shape_accepted = prop_transfer and decided_untracked
+    decided_linked_as_proposed = (
+        entry.decision_transfer is not None
+        and entry.decision_transfer["kind"] == "linked"
+        and prop_counterpart is not None
+        and entry.decision_transfer.get("counterpart_transaction_id") == str(prop_counterpart)
+    )
+    shape_accepted = prop_transfer and (decided_untracked or decided_linked_as_proposed)
     if (
         entry.decision_splits is not None or entry.decision_transfer is not None
     ) and not shape_accepted:
@@ -279,6 +294,14 @@ async def review_transaction(
         entry.decision_category_id,
         untracked_transfer=decided_untracked,
     )
+    if prop_counterpart is not None and not decided_linked_as_proposed:
+        # The mirror on the counterpart died with this decision (consume
+        # invalidated it); its owner re-enters classification for a fresh,
+        # non-transfer proposal. The rejected pairing is now correction-log
+        # memory, so the detector won't re-propose it.
+        await classify_ledger.configure(lock=f"ledger:{ledger_id}").defer_async(
+            ledger_id=str(ledger_id)
+        )
 
     result: Literal["accepted", "corrected"] = "corrected" if corrected else "accepted"
     log.info(
