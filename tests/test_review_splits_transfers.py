@@ -218,6 +218,24 @@ async def test_counterpart_review_consumes_both_sides_atomically(client, run_job
     }
 
 
+async def test_import_committed_pair_gets_detection_proposals(client, run_jobs) -> None:
+    """M7 CP4: import commit funnels through the same classify job as sync
+    and manual entry — an in-window pair from two CSVs mirrors up."""
+    await _signup(client)
+    checking = await _account(client, "Checking")
+    savings = await _account(client, "Savings")
+    await _commit_csv(client, checking, [("2026-07-01", "-250.00", "TRANSFER TO SAVINGS")])
+    await _commit_csv(client, savings, [("2026-07-03", "250.00", "TRANSFER FROM CHECKING")])
+    await run_jobs()
+    inbox = await _inbox(client)
+    outflow = next(t for t in inbox if t["amount_minor"] < 0)
+    inflow = next(t for t in inbox if t["amount_minor"] > 0)
+    for side, other in ((outflow, inflow), (inflow, outflow)):
+        assert side["proposal"] is not None
+        assert side["proposal"]["provenance"] == "detection"
+        assert side["proposal"]["counterpart_transaction_id"] == other["id"]
+
+
 async def test_reviewed_counterpart_links_and_stays_reviewed(client, run_jobs) -> None:
     """M7 CP4 relaxed the M6 409: a reviewed counterpart is fair game — the
     link is created, its category vacated, its reviewed state stands, and

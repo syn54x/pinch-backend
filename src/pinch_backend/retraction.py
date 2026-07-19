@@ -35,6 +35,18 @@ if TYPE_CHECKING:
     import uuid
 
 
+async def voided_decision_ids(decision_ids: "list[uuid.UUID]") -> set:
+    """Which of these decision entries already have a VOID pointing at them
+    — the shared not-yet-voided guard (used here and by the detector's
+    rejection memory)."""
+    if not decision_ids:
+        return set()
+    return {
+        v.voids
+        for v in await CorrectionLogEntry.where(lambda v, ids=decision_ids: v.voids.in_(ids)).all()
+    }
+
+
 async def void_decisions(
     ledger_id: "uuid.UUID",
     txn_id: "uuid.UUID",
@@ -52,17 +64,7 @@ async def void_decisions(
         .order_by(lambda e: e.id)
         .all()
     )
-    decision_ids = [d.id for d in decisions]
-    already_voided = (
-        {
-            v.voids
-            for v in await CorrectionLogEntry.where(
-                lambda v, ids=decision_ids: v.voids.in_(ids)
-            ).all()
-        }
-        if decision_ids
-        else set()
-    )
+    already_voided = await voided_decision_ids([d.id for d in decisions])
     for decision in decisions:
         if decision.id in already_voided:
             continue

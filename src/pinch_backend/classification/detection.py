@@ -40,6 +40,7 @@ from pinch_backend.models import (
     Transfer,
 )
 from pinch_backend.observability import get_logger
+from pinch_backend.retraction import voided_decision_ids
 
 log = get_logger(__name__)
 
@@ -128,23 +129,25 @@ async def _rejected_pairs(ledger_id: uuid.UUID) -> set[frozenset]:
             & (e.proposal_provenance == ProposalProvenance.DETECTION)
         )
     ).all()
-    decision_ids = [d.id for d in decisions]
-    voided = (
-        {
-            v.voids
-            for v in await CorrectionLogEntry.where(
-                lambda v, ids=decision_ids: v.voids.in_(ids)
-            ).all()
-        }
-        if decision_ids
-        else set()
-    )
+    voided = await voided_decision_ids([d.id for d in decisions])
     rejected: set[frozenset] = set()
     for d in decisions:
         if d.id in voided:
             continue
         if d.decision_transfer is not None and d.decision_transfer.get("kind") == "linked":
             continue  # accepted, not rejected
+        declined = (
+            d.decision_category_id is not None
+            or d.decision_splits is not None
+            or (d.decision_transfer is not None and d.decision_transfer.get("kind") == "untracked")
+        )
+        if not declined:
+            # An all-empty outcome is a DEGRADED accept (the counterpart
+            # turned ineligible between detection and consent), not a
+            # decline — the user said yes; the pair stays re-proposable
+            # should eligibility return. Every genuine rejection carries a
+            # positive alternative (category, splits, or untracked).
+            continue
         counterpart = (d.proposal_detail or {}).get("counterpart_transaction_id")
         if counterpart:
             rejected.add(frozenset((d.transaction_id, uuid.UUID(counterpart))))

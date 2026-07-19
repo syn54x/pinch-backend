@@ -409,6 +409,42 @@ async def test_amount_rewrite_invalidates_the_mirror(client, db, fake_provider, 
         ]
 
 
+async def test_linked_and_split_rows_are_never_candidates(
+    client, db, fake_provider, run_jobs
+) -> None:
+    """A row already in a transfer — or split — is out of the candidate
+    pool on either side, even when amounts would match."""
+    await _signup(client)
+    await _connect_and_sync(
+        client,
+        fake_provider,
+        _batch(
+            added=[
+                _txn("t-out", -50_000, name="TO SAVINGS"),
+                _txn("t-in", 50_000, account="plaid-savings", name="FROM CHECKING"),
+            ]
+        ),
+    )
+    await run_jobs()
+    out_txn = await _one_txn(client, "TO SAVINGS")
+    # Hand-link the outflow as an untracked transfer: it leaves the pool.
+    assert (
+        await client.post(
+            TRANSFERS, json={"transaction_ids": [out_txn["id"]]}, headers=await _csrf(client)
+        )
+    ).status_code == 201
+    # Force a re-sweep; the linked row's twin must not re-propose against it.
+    await client.post(
+        "/api/v1/transactions/review",
+        json={"ids": [out_txn["id"]]},
+        headers=await _csrf(client),
+    )
+    await run_jobs()
+    in_after = await _one_txn(client, "FROM CHECKING")
+    proposal = in_after["proposal"]
+    assert proposal is None or proposal["counterpart_transaction_id"] is None
+
+
 async def test_manual_entry_pair_detected_via_same_job(client, db, run_jobs) -> None:
     """Manual creation funnels through the same classify job — detection
     is ingestion-path-agnostic (sync, import, manual alike)."""
