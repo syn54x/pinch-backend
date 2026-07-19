@@ -112,6 +112,13 @@ async def test_keyless_connection_create_refuses_cleanly(client, db) -> None:
     assert "not configured" in response.json()["detail"]
 
 
+async def test_keyless_refresh_refuses_cleanly(client, db) -> None:
+    await _signup(client)
+    response = await client.post(f"{CONNECTIONS}/{uuid.uuid4()}/sync", headers=await _csrf(client))
+    assert response.status_code == 403
+    assert "not configured" in response.json()["detail"]
+
+
 async def test_keyless_list_answers_empty(client, db) -> None:
     """The health surface works keyless — it just has nothing to show."""
     await _signup(client)

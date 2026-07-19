@@ -265,6 +265,27 @@ async def test_sync_initial_cursor_omitted() -> None:
     assert batch.next_cursor == "c1"
 
 
+async def test_transport_fault_becomes_provider_error() -> None:
+    """The archetypal institution-down shapes — timeouts, resets, DNS —
+    must land inside the error contract, never escape it raw."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    with pytest.raises(ProviderError) as excinfo:
+        await _provider(handler).get_accounts("access-x")
+    assert excinfo.value.code == "NETWORK_ERROR"
+
+
+async def test_non_json_response_becomes_provider_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, text="<html>Bad Gateway</html>")
+
+    with pytest.raises(ProviderError) as excinfo:
+        await _provider(handler).get_accounts("access-x")
+    assert excinfo.value.code == "HTTP_502"
+
+
 async def test_plaid_error_surfaces_code_only() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

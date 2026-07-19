@@ -16,15 +16,17 @@ sync heals.
 
 CP3 (#35) extends this pass with modified/removed handling — the batch
 already carries both; this module deliberately applies only ``added``.
+
+Stated boundary (I-1): transactions for provider accounts Pinch doesn't
+hold — an account added at the bank after connect — are skipped, counted,
+and logged; the cursor still advances. Adopting such an account later
+(M8+ territory) therefore requires a cursor reset for a fresh backfill.
 """
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+import uuid  # runtime import: pydantic resolves the dataclass annotation at runtime
 
 from ferro import transaction
-
-if TYPE_CHECKING:
-    import uuid
+from pydantic.dataclasses import dataclass
 
 from pinch_backend import providers
 from pinch_backend.crypto import decrypt_secret
@@ -56,7 +58,7 @@ AUTH_ERROR_CODES = {
 
 @dataclass
 class SyncOutcome:
-    ledger_id: "uuid.UUID | None" = None
+    ledger_id: uuid.UUID | None = None
     created: int = 0
 
     @property
@@ -64,7 +66,17 @@ class SyncOutcome:
         return self.created > 0
 
 
-async def run_sync(connection_id: "uuid.UUID", *, final_attempt: bool) -> SyncOutcome:
+async def _record_broken(connection: Connection, status: ConnectionStatus, code: str) -> None:
+    """The two terminal health states share one shape: status + the
+    provider's code — the only provider detail that ever lands in
+    ``error_detail`` (PRD #31)."""
+    connection.status = status
+    connection.error_detail = code
+    await connection.save()
+    log.warning("sync.broken", connection_id=str(connection.id), status=status.value, code=code)
+
+
+async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutcome:
     """One sync pass. Raises ``providers.ProviderError`` on a transient
     failure when retries remain — the job runner's retry strategy is the
     backoff; on the final attempt the failure is recorded instead."""
@@ -81,16 +93,10 @@ async def run_sync(connection_id: "uuid.UUID", *, final_attempt: bool) -> SyncOu
         batch = await provider.sync_transactions(access_token, connection.sync_cursor)
     except providers.ProviderError as error:
         if error.code in AUTH_ERROR_CODES:
-            connection.status = ConnectionStatus.REAUTH_REQUIRED
-            connection.error_detail = error.code
-            await connection.save()
-            log.info("sync.reauth_required", connection_id=str(connection.id), code=error.code)
+            await _record_broken(connection, ConnectionStatus.REAUTH_REQUIRED, error.code)
             return SyncOutcome()
         if final_attempt:
-            connection.status = ConnectionStatus.ERROR
-            connection.error_detail = error.code
-            await connection.save()
-            log.warning("sync.exhausted", connection_id=str(connection.id), code=error.code)
+            await _record_broken(connection, ConnectionStatus.ERROR, error.code)
             return SyncOutcome()
         raise  # transient with retries remaining: the runner's backoff handles it
 

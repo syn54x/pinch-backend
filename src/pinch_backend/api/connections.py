@@ -23,7 +23,7 @@ from litestar.di import NamedDependency
 from litestar.exceptions import ClientException, NotFoundException, PermissionDeniedException
 from litestar.params import FromPath
 from litestar.status_codes import HTTP_202_ACCEPTED, HTTP_502_BAD_GATEWAY
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from pinch_backend import providers
 from pinch_backend.api.accounts import AccountOut, account_out
@@ -54,6 +54,8 @@ log = get_logger(__name__)
 
 
 class LinkTokenIn(BaseModel):
+    model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
+
     connection_id: uuid.UUID | None = None
     """Absent: a fresh connect. Present: an update-mode token repairing
     this connection's login (PRD #31 reauth) — no exchange follows; the
@@ -65,6 +67,8 @@ class LinkTokenOut(BaseModel):
 
 
 class ConnectionCreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     public_token: str
 
 
@@ -163,8 +167,11 @@ async def create_link_token(
     access_token: str | None = None
     if data is not None and data.connection_id is not None:
         connection = await _get_connection(current_ledger, data.connection_id)
-        if connection.encrypted_secret is not None:
-            access_token = decrypt_secret(connection.encrypted_secret)
+        if connection.encrypted_secret is None:
+            # Repair mode must never silently fall back to creation mode —
+            # a fresh connect on top of a broken one duplicates accounts.
+            raise ClientException(detail="Connection has no provider credentials to repair")
+        access_token = decrypt_secret(connection.encrypted_secret)
     try:
         token = await providers.get_provider().create_link_token(
             client_user_id=str(current_user.id), access_token=access_token
