@@ -235,3 +235,28 @@ Branch: m7. Delivery: single PR, one slice at a time, human verification between
   survival, append-only decision-still-stands assertion). Accepted as convention: fake/
   helper duplication across test files (self-contained test files are the repo's pattern).
   Deferred to CP4: run_sync length restructure (CP4 reshapes it anyway).
+- CP4 (#36): complete (commits 845227e + review fixes; NOT cut — same as M6's promotion).
+  classification/detection.py: post-classification pass in classify_ledger (sync/import/
+  manual all funnel through the job). Mutual-uniqueness-or-silence matching (both
+  directions checked — asymmetric ambiguity stays silent), ±5-day window, reviewed rows
+  are candidates but only unreviewed sides receive proposals. Proposal gains
+  counterpart_transaction FK (CASCADE backstop) + ProposalProvenance.DETECTION;
+  ProposalOut exposes counterpart_transaction_id. Overwrite preserves contributed
+  tags/rename. consume: linked create for counterpart proposals (degrade-not-error when
+  counterpart turned ineligible — reports "corrected", NOT recorded as a decline);
+  accept-either-side consumes both (recursive consume, depth-2 bounded) or logs a later
+  entry on a reviewed counterpart (log_transfer_decision_on_reviewed, shared with the
+  relaxed one-motion path — M6's reviewed-counterpart 409 removed, old test rewritten to
+  pin the new contract). Rejection memory: correction-log detection decisions carrying a
+  POSITIVE alternative (category/splits/untracked) suppress re-proposal; undo-void
+  re-arms. Mirror invalidation deferred-classify wired on ALL paths (single review,
+  batch, PATCH-review — the review found batch/PATCH missing). CP3 integration:
+  rewrite/retract invalidate mirrors + count them into needs_classification.
+  Review triage: fixed batch/PATCH defers, rejection-memory poisoning (degraded accept
+  != decline), voided_decision_ids shared helper, establish_transfer docstring (the
+  "one implementation" claim now names consume's deliberate degrade-posture sibling —
+  routing through it would invert api←classification layering), recursion-bound comment,
+  linked/split-exclusion + import-commit detection tests. Accepted residuals: full-ledger
+  scan per sweep (v0 posture; indexed candidate query when ledgers grow), invariant list
+  encoded in establish/_eligible_counterpart/detector (documented, kept in sync by hand).
+  CONTEXT.md: mirror + declined-pairing sentences added to Proposal.

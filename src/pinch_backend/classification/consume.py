@@ -119,7 +119,10 @@ async def _eligible_counterpart(
 ) -> Transaction | None:
     """The detection proposal's counterpart, re-validated at accept time
     against the M6 model invariants — None means the link degraded away
-    (the counterpart was linked, split, rewritten, or removed since)."""
+    (the counterpart was linked, split, rewritten, or removed since).
+    Mirrors ``establish_transfer``'s checks with a degrade-not-error
+    posture; classification cannot import api, so the invariants live in
+    both places — keep them in sync."""
     counterpart = await Transaction.where(
         lambda t, cid=counterpart_id, lid=ledger.id: (t.id == cid) & (t.ledger_id == lid)
     ).first()
@@ -340,6 +343,9 @@ async def consume_proposal(
             # reviewed and gets the transfer decision as a later entry —
             # "a changed mind is a later entry, never an edit".
             if linked_counterpart.reviewed_at is None:
+                # Bounded recursion, depth exactly 2: the inner call passes
+                # apply_proposed_transfer=False, the only gate into this
+                # branch, so it can never link (and recurse) again.
                 await consume_proposal(
                     ledger,
                     linked_counterpart,

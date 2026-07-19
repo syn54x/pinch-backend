@@ -356,6 +356,7 @@ async def review_batch(
         )
 
     accepted = skipped = 0
+    mirrors_invalidated = False
     decided: dict[str, tuple[uuid.UUID | None, bool]] = {}
     for wanted in ids:
         txn = by_id[wanted]
@@ -364,6 +365,7 @@ async def review_batch(
             continue
         proposal, proposal_tags = await _pending_proposal(txn.id)
         final_category = proposal.category_id if proposal else None  # ty: ignore[unresolved-attribute]
+        batch_counterpart = proposal.counterpart_transaction_id if proposal else None  # ty: ignore[unresolved-attribute]
         try:
             entry = await consume_proposal(
                 current_ledger,
@@ -381,6 +383,12 @@ async def review_batch(
             skipped += 1
             continue
         accepted += 1
+        if batch_counterpart is not None and not (
+            entry.decision_transfer is not None
+            and entry.decision_transfer["kind"] == "linked"
+            and entry.decision_transfer.get("counterpart_transaction_id") == str(batch_counterpart)
+        ):
+            mirrors_invalidated = True
         # What was DECIDED, not what was proposed: on a split or transferred
         # transaction consume never applies the category (M6 CP3), and the
         # promotion evidence below must see that truth.
@@ -389,6 +397,12 @@ async def review_batch(
             entry.decision_transfer is not None and entry.decision_transfer["kind"] == "untracked",
         )
 
+    if mirrors_invalidated:
+        # Same contract as the single-review path: an invalidated mirror's
+        # owner re-enters classification.
+        await classify_ledger.configure(lock=f"ledger:{ledger_id}").defer_async(
+            ledger_id=str(ledger_id)
+        )
     proposed: list[RuleOut] = []
     for payee, (category_id, untracked) in decided.items():
         rule = await maybe_propose_rule(

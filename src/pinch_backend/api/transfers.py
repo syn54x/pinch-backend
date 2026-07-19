@@ -103,10 +103,15 @@ async def assert_not_in_transfer(txn_id: "uuid.UUID") -> None:
 
 async def establish_transfer(ledger: Ledger, txns: list[Transaction]) -> Transfer:
     """Validate and create a transfer link, vacating the members' categories
-    — the one implementation behind POST /transfers and the review-with-
+    — the implementation behind POST /transfers and the review-with-
     transfer motion (CP3). Raises 422 on pair-shape violations, 409 on a
     split member or an occupied one. Opens a transaction that nests under a
-    caller's, so a review motion stays one atomic write."""
+    caller's, so a review motion stays one atomic write.
+
+    One deliberate sibling exists (M7 CP4): consume's detection-accept
+    re-validates the same invariants in ``_eligible_counterpart`` with a
+    degrade-not-error posture — a stale proposal accepts without a link
+    instead of failing the review. Keep the invariant lists in sync."""
     for txn in txns:
         if txn.amount_minor == 0:
             raise _unprocessable("Zero-amount transactions cannot be linked as transfers")

@@ -63,7 +63,11 @@ docs, and conversation. Implementation details do not belong in this file.
   even one matched by a user rule — carries a proposal, never an accepted
   category. A proposal may be **empty**: every stage of the pipeline
   abstained, and the suggestion is "no category". Each proposal records its
-  **provenance**: rule, history, AI, detection, or none.
+  **provenance**: rule, history, AI, detection, or none. A detection
+  proposal names its matched counterpart transaction; the counterpart's own
+  proposal — its **mirror** — names it back, and one consent consumes both
+  sides. Declining the interpretation on either side withdraws the mirror,
+  and a declined pairing is never proposed again.
 - **Payee** — the normalized form of a transaction's raw description: the
   deterministic key that rule conditions and history matching operate on,
   ledger-wide. Exact by design — recognizing "the same merchant, written

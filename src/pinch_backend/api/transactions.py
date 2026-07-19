@@ -446,6 +446,10 @@ async def patch_transaction(
             if "tags" in fields
             else await _current_tag_names(txn)
         )
+        tid = txn.id
+        patched_counterpart = await Proposal.where(
+            lambda p, t=tid: (p.transaction_id == t) & (p.counterpart_transaction_id != None)  # noqa: E711
+        ).first()
         try:
             await consume_proposal(
                 current_ledger,
@@ -462,6 +466,13 @@ async def patch_transaction(
                 status_code=HTTP_409_CONFLICT,
                 detail="Already reviewed; un-review first (PATCH reviewed: false)",
             ) from None
+        if patched_counterpart is not None:
+            # PATCH-review never applies a transfer, so a detection proposal
+            # consumed here always invalidated its mirror (M7 CP4) — the
+            # counterpart re-enters classification, same as the review paths.
+            await classify_ledger.configure(lock=f"ledger:{current_ledger.id}").defer_async(
+                ledger_id=str(current_ledger.id)
+            )
         await maybe_propose_rule(
             current_ledger,
             txn.description_normalized,
