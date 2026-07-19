@@ -63,6 +63,7 @@ async def classify_ledger(ledger_id: str, auto_file_import_id: str | None = None
     Procrastinate job payloads are JSON. Deferred with lock=ledger:{id} so
     two sweeps of one ledger serialize (the unique Proposal FK stays the
     correctness guard; the lock just cuts violation noise)."""
+    from pinch_backend.classification.detection import detect_transfers
     from pinch_backend.classification.pipeline import sweep_ledger
 
     async with engines.session():
@@ -70,6 +71,10 @@ async def classify_ledger(ledger_id: str, auto_file_import_id: str | None = None
             uuid.UUID(ledger_id),
             auto_file_import_id=uuid.UUID(auto_file_import_id) if auto_file_import_id else None,
         )
+        # The transfer detector runs after classification (M7 CP4): it sees
+        # pairs, which no per-transaction stage can, and outranks whatever
+        # shape the stages proposed for a matched pair.
+        await detect_transfers(uuid.UUID(ledger_id))
 
 
 SYNC_MAX_ATTEMPTS = 5

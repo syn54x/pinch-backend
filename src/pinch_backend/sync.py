@@ -60,6 +60,7 @@ from pinch_backend.observability import get_logger
 from pinch_backend.retraction import (
     delete_proposals_for,
     dissolve_transfers_touching,
+    invalidate_mirrors_referencing,
     retract_transactions,
     void_decisions,
 )
@@ -179,6 +180,7 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
                 reason="amount changed by provider sync",
             )
             await delete_proposals_for([tid])
+            invalidated += await invalidate_mirrors_referencing([tid])
             if target.reviewed_at is not None:
                 target.reviewed_at = None
                 reopened += 1
@@ -239,13 +241,15 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
             if rid not in swallowed_removals and rid in rows_by_pid
         ]
         if doomed_ids:
-            reopened += await retract_transactions(
+            retract_reopened, retract_mirrors = await retract_transactions(
                 ledger_id,
                 doomed_ids,
                 actor=CorrectionActor.AUTO,
                 decision_reason="transaction removed by provider sync",
                 counterpart_reason="transfer counterpart removed by provider sync",
             )
+            reopened += retract_reopened
+            invalidated += retract_mirrors
             removed_count = len(doomed_ids)
         for pt in inserts:
             account = by_provider_id.get(pt.provider_account_id)

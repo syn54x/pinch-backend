@@ -218,26 +218,37 @@ async def test_counterpart_review_consumes_both_sides_atomically(client, run_job
     }
 
 
-async def test_reviewed_counterpart_answers_409_and_rolls_everything_back(client, run_jobs) -> None:
+async def test_reviewed_counterpart_links_and_stays_reviewed(client, run_jobs) -> None:
+    """M7 CP4 relaxed the M6 409: a reviewed counterpart is fair game — the
+    link is created, its category vacated, its reviewed state stands, and
+    the transfer decision lands as a later log entry. (Dates sit outside
+    the detector's window so the explicit motion is what's under test.)"""
     await _signup(client)
     checking = await _account(client, "Checking")
     savings = await _account(client, "Savings")
     await _commit_csv(client, checking, [("2026-07-01", "-250.00", "TRANSFER TO SAVINGS")])
-    await _commit_csv(client, savings, [("2026-07-02", "250.00", "TRANSFER FROM CHECKING")])
+    await _commit_csv(client, savings, [("2026-07-12", "250.00", "TRANSFER FROM CHECKING")])
     await run_jobs()
     inbox = await _inbox(client)
     outflow = next(t for t in inbox if t["amount_minor"] < 0)
     inflow = next(t for t in inbox if t["amount_minor"] > 0)
     assert (await _review(client, inflow["id"])).status_code == 200  # counterpart decided first
+    reviewed_at = (await client.get(f"{TX}/{inflow['id']}")).json()["reviewed_at"]
 
     r = await _review(client, outflow["id"], {"transfer": {"counterpart": inflow["id"]}})
-    assert r.status_code == 409, r.text
-    # Atomicity: the rejected motion left nothing behind.
-    detail = (await client.get(f"{TX}/{outflow['id']}")).json()
-    assert detail["reviewed_at"] is None
-    assert detail["transfer"] is None
-    assert (await client.get(TRANSFERS)).json()["items"] == []
-    assert len(await _log_entries(client, kind="decision")) == 1  # only the first review
+    assert r.status_code == 200, r.text
+    outflow_detail = (await client.get(f"{TX}/{outflow['id']}")).json()
+    inflow_detail = (await client.get(f"{TX}/{inflow['id']}")).json()
+    assert outflow_detail["transfer"] is not None
+    assert inflow_detail["transfer"] is not None
+    assert inflow_detail["category"] is None  # vacated by the link
+    assert inflow_detail["reviewed_at"] == reviewed_at  # never re-reviewed
+    assert len((await client.get(TRANSFERS)).json()["items"]) == 1
+    # "A changed mind is a later entry": the counterpart's original decision
+    # stands and the transfer decision follows it.
+    entries = await _log_entries(client, kind="decision")
+    inflow_entries = [e for e in entries if e["transaction_id"] == inflow["id"]]
+    assert len(inflow_entries) == 2
 
 
 # ----------------------------------------------------------- exclusivity

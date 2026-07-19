@@ -93,6 +93,9 @@ class ProposalOut(BaseModel):
     tags: list[str]
     display_name: str | None
     proposed_transfer: bool
+    counterpart_transaction_id: uuid.UUID | None = None
+    """Set on a detection proposal (M7 CP4): the matched counterpart —
+    "who decided" made concrete, so the inbox can render the pairing."""
     provenance: ProposalProvenance
 
 
@@ -288,6 +291,7 @@ async def hydrate_transactions(txns: list[Transaction]) -> list[TransactionOut]:
                 tags=tags_by_proposal.get(proposal.id, []),
                 display_name=proposal.proposed_display_name,
                 proposed_transfer=proposal.proposed_transfer,
+                counterpart_transaction_id=proposal.counterpart_transaction_id,  # ty: ignore[unresolved-attribute]
                 provenance=proposal.provenance,
             )
         result.append(

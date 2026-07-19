@@ -114,6 +114,76 @@ async def _split_transfer_state(
     return decision_splits, decision_transfer
 
 
+async def _eligible_counterpart(
+    ledger: Ledger, txn: Transaction, counterpart_id: "uuid.UUID"
+) -> Transaction | None:
+    """The detection proposal's counterpart, re-validated at accept time
+    against the M6 model invariants — None means the link degraded away
+    (the counterpart was linked, split, rewritten, or removed since)."""
+    counterpart = await Transaction.where(
+        lambda t, cid=counterpart_id, lid=ledger.id: (t.id == cid) & (t.ledger_id == lid)
+    ).first()
+    if counterpart is None:
+        return None
+    if (
+        (txn.amount_minor < 0) == (counterpart.amount_minor < 0)
+        or abs(txn.amount_minor) != abs(counterpart.amount_minor)
+        or txn.currency != counterpart.currency
+        or txn.account_id == counterpart.account_id  # ty: ignore[unresolved-attribute]
+    ):
+        return None
+    cid = counterpart.id
+    if (
+        await SplitLine.where(lambda ln, c=cid: ln.transaction_id == c).first() is not None
+        or await Transfer.where(
+            lambda tr, c=cid: (tr.outflow_transaction_id == c) | (tr.inflow_transaction_id == c)
+        ).first()
+        is not None
+    ):
+        return None
+    return counterpart
+
+
+async def log_transfer_decision_on_reviewed(ledger: Ledger, counterpart: Transaction) -> None:
+    """A later decision entry on an already-reviewed counterpart: it had no
+    pending proposal (provenance=none records that honestly); the decision
+    is the fresh linked state its snapshot reads."""
+    decision_splits, decision_transfer = await _split_transfer_state(counterpart.id)
+    await CorrectionLogEntry.create(
+        ledger=ledger,
+        transaction_id=counterpart.id,
+        kind=CorrectionKind.DECISION,
+        actor=CorrectionActor.USER,
+        input_description_raw=counterpart.description_raw,
+        input_payee=counterpart.description_normalized,
+        input_amount_minor=counterpart.amount_minor,
+        input_currency=counterpart.currency,
+        input_date=counterpart.date,
+        input_account_id=counterpart.account_id,  # ty: ignore[unresolved-attribute]
+        proposal_provenance=ProposalProvenance.NONE,
+        decision_category_id=None,
+        decision_tags=[],
+        decision_splits=decision_splits,
+        decision_transfer=decision_transfer,
+    )
+
+
+async def _invalidate_mirror(*, counterpart_id: "uuid.UUID", txn_id: "uuid.UUID") -> None:
+    """Delete the counterpart's mirror proposal if it still names this
+    transaction. Only an unconsumed mirror can exist (consume deletes on
+    review), so this never touches a decided row's history."""
+    mirror = await Proposal.where(
+        lambda p, cid=counterpart_id, tid=txn_id: (
+            (p.transaction_id == cid) & (p.counterpart_transaction_id == tid)
+        )
+    ).first()
+    if mirror is None:
+        return
+    mirror_id = mirror.id
+    await ProposalTag.where(lambda pt, pid=mirror_id: pt.proposal_id == pid).delete()
+    await mirror.delete()
+
+
 async def consume_proposal(
     ledger: Ledger,
     txn: Transaction,
@@ -162,6 +232,7 @@ async def consume_proposal(
         ).update(reviewed_at=stamp, updated_at=stamp)
         if claimed == 0:
             raise AlreadyReviewedError(f"transaction {txn_id} is already reviewed")
+        linked_counterpart: Transaction | None = None
         if (
             apply_proposed_transfer
             and proposal is not None
@@ -186,13 +257,38 @@ async def consume_proposal(
                 ).first()
                 is not None
             )
-            if not already_split and not already_linked:
+            counterpart_wanted: uuid.UUID | None = proposal.counterpart_transaction_id  # ty: ignore[unresolved-attribute]
+            if not already_split and not already_linked and counterpart_wanted is None:
                 negative = txn.amount_minor < 0
                 await Transfer.create(
                     ledger=ledger,
                     outflow_transaction_id=txn_id if negative else None,
                     inflow_transaction_id=None if negative else txn_id,
                 )
+            elif not already_split and not already_linked and counterpart_wanted is not None:
+                # A detection proposal (M7 CP4): the linked create. The same
+                # degradation stance as above — a counterpart that turned
+                # ineligible since detection (linked, split, rewritten, gone)
+                # means accept WITHOUT a transfer, never an error; the
+                # snapshot records what actually happened.
+                linked_counterpart = await _eligible_counterpart(ledger, txn, counterpart_wanted)
+                if linked_counterpart is not None:
+                    negative = txn.amount_minor < 0
+                    outflow, inflow = (
+                        (txn, linked_counterpart) if negative else (linked_counterpart, txn)
+                    )
+                    await Transfer.create(
+                        ledger=ledger,
+                        outflow_transaction_id=outflow.id,
+                        inflow_transaction_id=inflow.id,
+                    )
+                    # In a transfer ⇒ category NULL, both sides. The txn's
+                    # own vacating rides the snapshot logic below; the
+                    # counterpart — possibly already reviewed — vacates here
+                    # (the relaxed M6 semantics: link created, category
+                    # vacated, reviewed state untouched).
+                    linked_counterpart.category_id = None  # ty: ignore[unresolved-attribute]
+                    await linked_counterpart.save()
         # Split/transfer awareness (M6 CP3): when the transaction ends up
         # split or in a transfer, the category layer is not this row's to
         # hold — the caller's category is not applied, and the decision is
@@ -237,6 +333,34 @@ async def consume_proposal(
             proposal_id = proposal.id
             await ProposalTag.where(lambda pt, pid=proposal_id: pt.proposal_id == pid).delete()
             await proposal.delete()
+        if linked_counterpart is not None:
+            # One consent consumes both sides (M7 CP4). An unreviewed
+            # counterpart is consumed with the link as its decision (its
+            # snapshot reads the fresh Transfer); a reviewed one stays
+            # reviewed and gets the transfer decision as a later entry —
+            # "a changed mind is a later entry, never an edit".
+            if linked_counterpart.reviewed_at is None:
+                await consume_proposal(
+                    ledger,
+                    linked_counterpart,
+                    category_id=None,
+                    tags=[],
+                    display_name=None,
+                    actor=actor,
+                    apply_proposed_transfer=False,
+                )
+            else:
+                await log_transfer_decision_on_reviewed(ledger, linked_counterpart)
+        elif proposal is not None and proposal.counterpart_transaction_id is not None:  # ty: ignore[unresolved-attribute]
+            # The linked interpretation did not happen — the user decided
+            # otherwise, or the counterpart turned ineligible. The mirror on
+            # the other side is now a trap (accepting it would vacate a
+            # category the user just chose) and dies here; the caller
+            # re-classifies its owner.
+            await _invalidate_mirror(
+                counterpart_id=proposal.counterpart_transaction_id,  # ty: ignore[unresolved-attribute]
+                txn_id=txn_id,
+            )
     log.info(
         "proposal.consumed",
         transaction_id=str(txn.id),
