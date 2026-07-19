@@ -63,15 +63,16 @@ docs, and conversation. Implementation details do not belong in this file.
   even one matched by a user rule — carries a proposal, never an accepted
   category. A proposal may be **empty**: every stage of the pipeline
   abstained, and the suggestion is "no category". Each proposal records its
-  **provenance**: rule, history, AI, or none.
+  **provenance**: rule, history, AI, detection, or none.
 - **Payee** — the normalized form of a transaction's raw description: the
   deterministic key that rule conditions and history matching operate on,
   ledger-wide. Exact by design — recognizing "the same merchant, written
   differently" is the AI stage's job, never the deterministic pipeline's.
 - **Provenance** — how a proposal was produced: *rule* (a user rule matched),
   *history* (same payee previously confirmed), *AI* (Penny classified it),
-  or *none* (the pipeline ran and every stage abstained). Always shown to
-  the user during review.
+  *detection* (the transfer detector matched a counterpart transaction), or
+  *none* (the pipeline ran and every stage abstained). Always shown to the
+  user during review.
 - **Review** — the act of accepting or correcting proposals on incoming
   transactions. All incoming transactions require review. The dashboard
   presents them grouped by day; the user may accept transactions
@@ -115,11 +116,13 @@ docs, and conversation. Implementation details do not belong in this file.
 - **Connection** — a live link to an external data source (e.g. one Plaid
   Item = one institution login). A connection yields one or more accounts and
   owns credentials and sync state. Manual accounts have no connection.
+  Disconnecting severs the link, never the data: the connection's accounts
+  live on as manual accounts, history intact.
 - **Manual account** — an account maintained by the user without a
   connection: balances entered by hand, transactions entered manually or via
   file import.
 - **Balance entry** — one observed balance for an account at a point in
-  time, hand-entered by the user (providers supply them too, later). An
+  time, hand-entered by the user or supplied by a provider sync. An
   account's current balance is its latest entry; transactions are records
   of money movement, never balance arithmetic — reconciling the two is a
   deliberate future design, not an omission.
@@ -166,7 +169,10 @@ docs, and conversation. Implementation details do not belong in this file.
   predecessor's user data.
 - **Pending / Posted** — a transaction's settlement state at the institution.
   Pending transactions are ingested and shown from day one; posting replaces
-  the pending record (with user-data inheritance) rather than duplicating it.
+  the pending record rather than duplicating it. The replacement always
+  inherits the predecessor's user data; what was built on the amount —
+  splits, transfer links, reviewed status — survives only if the amount is
+  unchanged, since a material amount change reopens review.
 - **Split line** — a division of a transaction into parts (at least two),
   each with its own amount and category, summing exactly to the transaction
   amount. Splitting never creates or replaces transactions: the original
