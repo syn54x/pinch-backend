@@ -75,12 +75,38 @@ class Settings(BaseSettings):
     """Attempts per client IP per window on auth endpoints."""
     auth_rate_limit_window: timedelta = timedelta(minutes=15)
 
+    plaid_client_id: str = ""
+    """Instance-level, like everything Plaid (PRD #31): hosted uses Pinch's
+    developer account, a self-host uses the operator's. Absent ⇒ connection
+    endpoints refuse cleanly and manual tracking is untouched."""
+    plaid_secret: str = ""
+    plaid_environment: str = "sandbox"
+    """`sandbox` or `production` — same code path, different base URL."""
+    plaid_country_codes: list[str] = ["US"]
+    """Passed to link-token creation; self-hosters elsewhere reconfigure."""
+    secret_encryption_key: str = ""
+    """Fernet key encrypting provider access tokens at rest
+    (`Fernet.generate_key()`); required the moment Plaid is configured.
+    Single-key in v0 — rotation is a documented MultiFernet upgrade path."""
+
+    @property
+    def plaid_configured(self) -> bool:
+        return bool(self.plaid_client_id and self.plaid_secret)
+
     @model_validator(mode="after")
     def _resolve_secret_key(self) -> "Settings":
         if not self.secret_key:
             if self.environment != "development":
                 raise ValueError("PINCH_SECRET_KEY is required outside development")
             self.secret_key = secrets.token_urlsafe(32)
+        return self
+
+    @model_validator(mode="after")
+    def _require_encryption_key_with_plaid(self) -> "Settings":
+        """Fail at startup, not at first link: a half-configured instance
+        must not discover the gap when a user connects a bank (PRD #31)."""
+        if self.plaid_configured and not self.secret_encryption_key:
+            raise ValueError("PINCH_SECRET_ENCRYPTION_KEY is required when Plaid is configured")
         return self
 
 
