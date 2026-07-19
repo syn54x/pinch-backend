@@ -108,7 +108,8 @@ async def _current_balance(account_id: uuid.UUID) -> BalanceOut | None:
     return BalanceOut(amount_minor=entry.amount_minor, currency=entry.currency, as_of=entry.as_of)
 
 
-async def _account_out(account: Account) -> AccountOut:
+async def account_out(account: Account) -> AccountOut:
+    """Public: the connections surface renders its accounts through this."""
     return AccountOut(
         id=account.id,
         kind=account.kind,
@@ -146,7 +147,7 @@ async def create_account(
         ledger_id=str(current_ledger.id),
         kind=data.kind.value,
     )
-    return await _account_out(account)
+    return await account_out(account)
 
 
 @get("/")
@@ -162,14 +163,14 @@ async def list_accounts(
     rows, next_cursor = await paginate(
         Account.where(lambda a: a.ledger_id == ledger_id), cursor=cursor, limit=limit
     )
-    return Page(items=[await _account_out(a) for a in rows], next_cursor=next_cursor)
+    return Page(items=[await account_out(a) for a in rows], next_cursor=next_cursor)
 
 
 @get("/{account_id:uuid}")
 async def get_account(
     account_id: FromPath[uuid.UUID], current_ledger: NamedDependency[Ledger]
 ) -> AccountOut:
-    return await _account_out(await _get_account(current_ledger, account_id))
+    return await account_out(await _get_account(current_ledger, account_id))
 
 
 @patch("/{account_id:uuid}")
@@ -188,7 +189,7 @@ async def update_account_label(
         account_id=str(account.id),
         ledger_id=str(current_ledger.id),
     )
-    return await _account_out(account)
+    return await account_out(account)
 
 
 @post("/{account_id:uuid}/archive", status_code=HTTP_200_OK)
@@ -206,7 +207,7 @@ async def archive_account(
             account_id=str(account.id),
             ledger_id=str(current_ledger.id),
         )
-    return await _account_out(account)
+    return await account_out(account)
 
 
 @post("/{account_id:uuid}/balance-entries")

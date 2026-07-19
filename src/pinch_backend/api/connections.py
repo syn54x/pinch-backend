@@ -20,12 +20,13 @@ from datetime import datetime
 
 from litestar import Router, get, post
 from litestar.di import NamedDependency
-from litestar.exceptions import NotFoundException, PermissionDeniedException
+from litestar.exceptions import ClientException, NotFoundException, PermissionDeniedException
 from litestar.params import FromPath
+from litestar.status_codes import HTTP_502_BAD_GATEWAY
 from pydantic import BaseModel
 
 from pinch_backend import providers
-from pinch_backend.api.accounts import AccountOut, _account_out
+from pinch_backend.api.accounts import AccountOut, account_out
 from pinch_backend.api.pagination import (
     DEFAULT_PAGE_LIMIT,
     CursorParam,
@@ -40,6 +41,8 @@ from pinch_backend.models import (
     ConnectionProvider,
     ConnectionStatus,
     Ledger,
+    LedgerMember,
+    LedgerRole,
     User,
     transaction,
 )
@@ -77,6 +80,35 @@ def _require_plaid() -> None:
         raise PermissionDeniedException(detail="Plaid is not configured on this instance")
 
 
+def _surface(error: providers.ProviderError) -> Exception:
+    """The recovery point for provider failures: the code — the only
+    provider detail allowed out (PRD #31) — reaches the client instead of
+    an opaque 500. A rejected public token is the client's fault (400);
+    anything else is upstream's (502)."""
+    detail = f"Plaid request failed: {error.code}"
+    if error.code == "INVALID_PUBLIC_TOKEN":
+        return ClientException(detail=detail)
+    return ClientException(detail=detail, status_code=HTTP_502_BAD_GATEWAY)
+
+
+async def _ledger_primary_currency(ledger: Ledger) -> str:
+    """The ledger's primary currency is its owner's (PRD #31): the fallback
+    must not depend on which member happened to click connect."""
+    owner = await LedgerMember.where(
+        lambda m: (m.ledger_id == ledger.id) & (m.role == LedgerRole.OWNER)
+    ).first()
+    user = (
+        await User.where(lambda u, uid=owner.user_id: u.id == uid).first()  # ty: ignore[unresolved-attribute]
+        if owner
+        else None
+    )
+    if user is None:
+        # Every ledger is created with an owner (M1 invariant); reaching
+        # here means corrupted membership, not a request problem.
+        raise RuntimeError(f"ledger {ledger.id} has no owner")
+    return user.primary_currency
+
+
 async def _connection_out(connection: Connection) -> ConnectionOut:
     cid = connection.id
     accounts = await Account.where(lambda a: a.connection_id == cid).all()
@@ -86,7 +118,7 @@ async def _connection_out(connection: Connection) -> ConnectionOut:
         status=connection.status,
         last_synced_at=connection.last_synced_at,
         error_detail=connection.error_detail,
-        accounts=[await _account_out(a) for a in accounts],
+        accounts=[await account_out(a) for a in accounts],
         created_at=connection.created_at,
     )
 
@@ -96,23 +128,31 @@ async def create_link_token(current_user: NamedDependency[User]) -> LinkTokenOut
     """Shaped for a future frontend to drop Plaid Link on top unchanged;
     sandbox tests shortcut the widget between this and the exchange."""
     _require_plaid()
-    token = await providers.get_provider().create_link_token(client_user_id=str(current_user.id))
+    try:
+        token = await providers.get_provider().create_link_token(
+            client_user_id=str(current_user.id)
+        )
+    except providers.ProviderError as error:
+        raise _surface(error) from error
     return LinkTokenOut(link_token=token)
 
 
 @post("/")
 async def create_connection(
     data: ConnectionCreateIn,
-    current_user: NamedDependency[User],
     current_ledger: NamedDependency[Ledger],
 ) -> ConnectionOut:
     """Exchange the public token; create the Connection and one Account per
-    account on the Item, atomically. Currency falls back to the acting
-    user's primary currency when the provider omits it."""
+    account on the Item, atomically. Currency falls back to the ledger's
+    primary currency when the provider omits it."""
     _require_plaid()
     provider = providers.get_provider()
-    exchanged = await provider.exchange_public_token(data.public_token)
-    provider_accounts = await provider.get_accounts(exchanged.access_token)
+    try:
+        exchanged = await provider.exchange_public_token(data.public_token)
+        provider_accounts = await provider.get_accounts(exchanged.access_token)
+    except providers.ProviderError as error:
+        raise _surface(error) from error
+    fallback_currency = await _ledger_primary_currency(current_ledger)
     async with transaction():
         connection = await Connection.create(
             ledger=current_ledger,
@@ -126,7 +166,7 @@ async def create_connection(
                 ledger=current_ledger,
                 kind=pa.kind,
                 label=pa.name,
-                currency=pa.currency or current_user.primary_currency,
+                currency=pa.currency or fallback_currency,
                 connection=connection,
                 provider_account_id=pa.provider_account_id,
             )

@@ -210,6 +210,35 @@ async def test_connected_accounts_appear_in_accounts_list(client, db, fake_provi
     }
 
 
+async def test_rejected_public_token_answers_400(client, db, fake_provider) -> None:
+    """The recovery point: Plaid's code — and only the code — reaches the
+    client, never an opaque 500."""
+
+    async def refuse(public_token: str):
+        raise providers.ProviderError("INVALID_PUBLIC_TOKEN", "expired")
+
+    fake_provider.exchange_public_token = refuse
+    await _signup(client)
+    response = await client.post(
+        CONNECTIONS, json={"public_token": "public-stale"}, headers=await _csrf(client)
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Plaid request failed: INVALID_PUBLIC_TOKEN"
+
+
+async def test_provider_outage_answers_502(client, db, fake_provider) -> None:
+    async def refuse(public_token: str):
+        raise providers.ProviderError("INTERNAL_SERVER_ERROR", "plaid is down")
+
+    fake_provider.exchange_public_token = refuse
+    await _signup(client)
+    response = await client.post(
+        CONNECTIONS, json={"public_token": "public-x"}, headers=await _csrf(client)
+    )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Plaid request failed: INTERNAL_SERVER_ERROR"
+
+
 async def test_connection_detail_and_tenancy_404(client, db, fake_provider) -> None:
     await _signup(client)
     body = await _connect(client, fake_provider)
