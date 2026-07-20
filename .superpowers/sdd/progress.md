@@ -260,3 +260,8 @@ Branch: m7. Delivery: single PR, one slice at a time, human verification between
   scan per sweep (v0 posture; indexed candidate query when ledgers grow), invariant list
   encoded in establish/_eligible_counterpart/detector (documented, kept in sync by hand).
   CONTEXT.md: mirror + declined-pairing sentences added to Proposal.
+- M7 MERGED 2026-07-20: PR #37 rebase-merged to main (b47ed71..df9fe3c); #31-#36 closed;
+  branch m7 retained until frontend-enablers lands. Suite 528 green in CI. Live-sandbox
+  smoke run by Taylor surfaced + fixed PRODUCT_NOT_READY (empty-cursor initial-pull state).
+  Post-merge follow-ups filed/known: CLI domain command surface (story-31 debt, deliberate —
+  pair with M10's published skill), CORS + typed-client enablers for the frontend repo.
