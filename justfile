@@ -20,6 +20,12 @@ fix:
 test *args:
     uv run pytest {{args}}
 
+# Export the OpenAPI document for typed-client generation (frontend repo:
+# point openapi-typescript / @hey-api/openapi-ts at the output, or at a
+# running server's /api/v1/schema/openapi.json). No database needed.
+openapi out="openapi.json":
+    uv run litestar --app pinch_backend.api.app:app schema openapi --output {{out}}
+
 docs-cli:
     uv run python scripts/gen_cli_docs.py
 

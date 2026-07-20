@@ -135,6 +135,22 @@ async def test_openapi_schema_is_served_under_the_versioned_api(client) -> None:
         assert path in schema["paths"], f"{path} missing from the OpenAPI document"
 
 
+async def test_operation_ids_are_handler_names(client) -> None:
+    """Typed-client method names (frontend enabler): operation ids are the
+    handler names — `list_accounts`, never `ApiV1AccountsListAccounts` —
+    unique across the whole surface."""
+    schema = (await client.get(SCHEMA_JSON)).json()
+    ids = [
+        meta["operationId"]
+        for item in schema["paths"].values()
+        for meta in item.values()
+        if isinstance(meta, dict) and "operationId" in meta
+    ]
+    assert len(ids) == len(set(ids)), "operation ids must be unique"
+    assert "signup" in ids and "list_accounts" in ids and "create_link_token" in ids
+    assert all(oid.replace("_", "").islower() for oid in ids), "snake_case handler names only"
+
+
 async def test_openapi_documents_the_pagination_convention(client) -> None:
     schema = (await client.get(SCHEMA_JSON)).json()
     sessions_get = schema["paths"]["/api/v1/auth/sessions"]["get"]

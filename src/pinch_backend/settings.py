@@ -55,7 +55,10 @@ class Settings(BaseSettings):
     verification_token_ttl: timedelta = timedelta(hours=24)
     reset_token_ttl: timedelta = timedelta(hours=1)
     frontend_base_url: str = "http://localhost:5173"
-    """Base for links in outbound mail (verification, reset)."""
+    """The frontend's origin: base for links in outbound mail (verification,
+    reset) and the CORS-allowed origin — one setting because they are
+    genuinely the same place. Same-origin deployments simply never send
+    cross-origin requests; the allowance is inert."""
     mailer_backend: str = "console"
     """v0 ships console delivery; SMTP is config later, never a fork."""
     turnstile_enabled: bool = False
