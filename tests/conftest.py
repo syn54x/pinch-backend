@@ -15,6 +15,14 @@ def pytest_configure() -> None:
     # No live network calls in CI (PRD M2): breach-check tests opt back in
     # through a stubbed transport.
     os.environ.setdefault("PINCH_BREACH_CHECK_ENABLED", "false")
+    # Hermetic against the developer's .env (M7): pydantic-settings reads it,
+    # but real Plaid credentials must never leak into the suite — "keyless"
+    # is the tested baseline, and env vars outrank the file. The empty
+    # string reads as unconfigured; tests that want Plaid monkeypatch the
+    # settings object directly.
+    os.environ["PINCH_PLAID_CLIENT_ID"] = ""
+    os.environ["PINCH_PLAID_SECRET"] = ""
+    os.environ["PINCH_SECRET_ENCRYPTION_KEY"] = ""
 
 
 def _test_database_url() -> str:

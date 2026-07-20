@@ -226,3 +226,6 @@ __marimo__/
 
 # Subagent-driven-development scratch (briefs, reports, review packages, ledger)
 .superpowers/
+
+# Exported OpenAPI document (generated artifact: `just openapi`)
+openapi.json

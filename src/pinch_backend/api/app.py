@@ -1,4 +1,5 @@
 from litestar import Litestar, get
+from litestar.config.cors import CORSConfig
 from litestar.config.csrf import CSRFConfig
 from litestar.di import Provide
 from litestar.middleware import DefineMiddleware
@@ -88,6 +89,11 @@ def create_app(*, manage_database: bool = True) -> Litestar:
             version=__version__,
             description=API_DESCRIPTION,
             path="/api/v1/schema",
+            # Handler names ARE the client method names (frontend enabler):
+            # a generated client reads `client.list_accounts(...)`, not
+            # `client.ApiV1AccountsListAccounts(...)`. Uniqueness is enforced
+            # at schema build, so a colliding name fails loudly here.
+            operation_id_creator=lambda handler, http_method, path: handler.handler_name,
             # One interactive UI plus the raw document — a deliberate trim
             # of Litestar's default four-UI set. Swagger because it can
             # execute requests: Authorize with a PAT and try-it-out works.
@@ -112,6 +118,15 @@ def create_app(*, manage_database: bool = True) -> Litestar:
                 }
             ),
             security=[{"bearerToken": []}, {"sessionCookie": []}],
+        ),
+        # The browser frontend is a cross-origin caller in development
+        # (Vite on :5173 → API on :8000) and possibly in deployment.
+        # Credentialed CORS requires exact origins — never "*" — so the
+        # allowance is the configured frontend origin and nothing else.
+        cors_config=CORSConfig(
+            allow_origins=[settings.frontend_base_url.rstrip("/")],
+            allow_credentials=True,
+            allow_headers=["content-type", "x-csrftoken", "authorization"],
         ),
         # CSRF on every unsafe cookie-credentialed request (PRD M2 story 14):
         # the double-submit cookie is issued on first response; clients echo
