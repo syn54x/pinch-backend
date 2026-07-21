@@ -89,6 +89,13 @@ class Settings(BaseSettings):
     every other misconfiguration, not at first request."""
     plaid_country_codes: list[str] = ["US"]
     """Passed to link-token creation; self-hosters elsewhere reconfigure."""
+    plaid_redirect_uri: str = ""
+    """Where OAuth institutions send the user back — typically
+    {frontend_base_url}/connect/oauth-return (the frontend's fixed return
+    route). Deliberately NOT derived: Plaid rejects link-token creation
+    outright when the URI isn't registered in the dashboard, so setting
+    this and registering it are one operator chore — empty (the default)
+    omits it and keeps non-OAuth connects working (F2 enabler, #39)."""
     secret_encryption_key: str = ""
     """Fernet key encrypting provider access tokens at rest
     (`Fernet.generate_key()`); required the moment Plaid is configured.

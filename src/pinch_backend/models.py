@@ -213,6 +213,10 @@ class Connection(TimestampMixin, Model):
     ledger: Annotated[Ledger, ForeignKey(related_name="connections", index=True)]
     provider: ConnectionProvider = ConnectionProvider.PLAID
     provider_item_id: str
+    institution_name: str | None = None
+    """Captured server-side at exchange (F2 enabler, #39); backfilled by
+    sync for pre-enabler rows. A nicety: never load-bearing, never trusted
+    from the client."""
     status: ConnectionStatus = ConnectionStatus.ACTIVE
     last_synced_at: datetime | None = None
     error_detail: str | None = None
@@ -248,6 +252,8 @@ class Account(TimestampMixin, Model):
     the alteration from the pre-M7 CASCADE migrates via ferro>=0.17.1
     (ferro-orm#325)."""
     provider_account_id: str | None = None
+    mask: str | None = None
+    """Provider display digits (···4821); absent for manual accounts."""
     archived: bool = False
     """Archive, don't delete: closed accounts keep their history."""
     created_at: datetime = Field(default_factory=utcnow)

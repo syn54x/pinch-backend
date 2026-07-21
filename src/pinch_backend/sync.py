@@ -132,6 +132,13 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
     ledger_id = connection.ledger_id  # ty: ignore[unresolved-attribute]
     accounts = await Account.where(lambda a: a.connection_id == cid).all()
     by_provider_id = {a.provider_account_id: a for a in accounts}
+    for pa in provider_accounts:
+        # Mask backfill/refresh (#39): pre-enabler rows gain their display
+        # digits; a provider-side change updates them. Nullable nicety.
+        account = by_provider_id.get(pa.provider_account_id)
+        if account is not None and pa.mask is not None and account.mask != pa.mask:
+            account.mask = pa.mask
+            await account.save()
     account_ids = [a.id for a in accounts]
     relevant_ids = sorted(
         {pt.provider_transaction_id for pt in [*batch.added, *batch.modified]}
@@ -276,6 +283,18 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
         connection.error_detail = None
         connection.last_synced_at = utcnow()
         await connection.save()
+
+    if connection.institution_name is None:
+        # Backfill for pre-enabler rows (#39) — best-effort, outside the
+        # effects transaction: a nicety must never fail a sync.
+        try:
+            name = await provider.get_institution_name(access_token)
+        except providers.ProviderError as error:
+            log.info("connection.institution_backfill_failed", code=error.code)
+            name = None
+        if name is not None:
+            connection.institution_name = name
+            await connection.save()
 
     log.info(
         "sync.completed",

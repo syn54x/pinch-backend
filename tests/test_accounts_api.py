@@ -17,6 +17,7 @@ PASSWORD = "correct horse battery staple"
 
 ACCOUNT_FIELDS = {
     "id",
+    "mask",
     "kind",
     "label",
     "currency",

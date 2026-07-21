@@ -73,6 +73,7 @@ class FakeSyncProvider:
         self.accounts = [
             providers.ProviderAccount(
                 provider_account_id="plaid-checking",
+                mask="4821",
                 name="Everyday Checking",
                 kind="depository",
                 currency="USD",
@@ -84,6 +85,8 @@ class FakeSyncProvider:
         self.link_tokens_created: list[dict] = []
         self.failure: providers.ProviderError | None = None
         self.cursor_serial = 0
+
+        self.institution_lookups = 0
 
     async def create_link_token(self, *, client_user_id: str, access_token: str | None = None):
         self.link_tokens_created.append(
@@ -114,6 +117,10 @@ class FakeSyncProvider:
 
     async def remove_item(self, access_token: str) -> None:
         return None
+
+    async def get_institution_name(self, access_token: str) -> str | None:
+        self.institution_lookups += 1
+        return "First Platypus Bank"
 
 
 @pytest.fixture
@@ -341,3 +348,31 @@ async def test_unknown_provider_account_is_skipped(client, db, fake_provider, ru
     # and the sync still completed: cursor advanced, connection healthy
     health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
     assert health["status"] == "active"
+
+
+async def test_sync_backfills_missing_institution_name(client, db, fake_provider, run_jobs) -> None:
+    """Pre-enabler connections gain their bank name on the next sync."""
+    import uuid
+
+    from pinch_backend.models import Connection
+
+    await _signup(client)
+    body = await _connect(client, fake_provider)
+    cid = uuid.UUID(body["id"])
+    connection = (await Connection.where(lambda c, cid=cid: c.id == cid).all())[0]
+    connection.institution_name = None  # simulate a pre-enabler row
+    await connection.save()
+    from pinch_backend.models import Account
+
+    checking = (await Account.where(lambda a: a.provider_account_id == "plaid-checking").all())[0]
+    checking.mask = None  # pre-enabler account, no digits yet
+    await checking.save()
+
+    response = await client.post(f"{CONNECTIONS}/{body['id']}/sync", headers=await _csrf(client))
+    assert response.status_code == 202
+    await run_jobs()
+
+    listed = (await client.get(CONNECTIONS)).json()["items"][0]
+    assert listed["institution_name"] == "First Platypus Bank"
+    masks = {a["label"]: a["mask"] for a in listed["accounts"]}
+    assert masks["Everyday Checking"] == "4821"
