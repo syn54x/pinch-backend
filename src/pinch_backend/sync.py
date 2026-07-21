@@ -277,6 +277,17 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
         connection.last_synced_at = utcnow()
         await connection.save()
 
+    if connection.institution_name is None:
+        # Backfill for pre-enabler rows (#39) — best-effort, outside the
+        # effects transaction: a nicety must never fail a sync.
+        try:
+            name = await provider.get_institution_name(access_token)
+        except providers.ProviderError:
+            name = None
+        if name is not None:
+            connection.institution_name = name
+            await connection.save()
+
     log.info(
         "sync.completed",
         connection_id=str(connection.id),

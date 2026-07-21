@@ -21,6 +21,7 @@ PASSWORD = "correct horse battery staple"
 
 CONNECTION_FIELDS = {
     "id",
+    "institution_name",
     "provider",
     "status",
     "last_synced_at",
@@ -64,6 +65,13 @@ class FakeProvider:
         self.link_tokens_created: list[dict] = []
         self.exchanged: list[str] = []
         self.removed: list[str] = []
+        self.institution_name: str | None = "First Platypus Bank"
+        self.institution_failure: providers.ProviderError | None = None
+
+    async def get_institution_name(self, access_token: str) -> str | None:
+        if self.institution_failure is not None:
+            raise self.institution_failure
+        return self.institution_name
 
     async def remove_item(self, access_token: str) -> None:
         self.removed.append(access_token)
@@ -137,6 +145,7 @@ def _script_accounts(fake: FakeProvider) -> None:
             name="Everyday Checking",
             kind="depository",
             currency="USD",
+            mask="4821",
         ),
         providers.ProviderAccount(
             provider_account_id="plaid-card",
@@ -342,3 +351,25 @@ async def test_connection_detail_and_tenancy_404(client, db, fake_provider) -> N
     cross = await client.get(f"{CONNECTIONS}/{body['id']}")
     assert cross.status_code == 404
     assert (await client.get(f"{CONNECTIONS}/{uuid.uuid4()}")).status_code == 404
+
+
+async def test_connect_captures_institution_and_mask(client, db, fake_provider) -> None:
+    """The humane surface (F2 enabler, #39): rows have bank names, cards
+    have last-digits — captured server-side, never client-trusted."""
+    await _signup(client)
+    body = await _connect(client, fake_provider)
+    assert body["institution_name"] == "First Platypus Bank"
+    labels = {a["label"]: a for a in body["accounts"]}
+    assert labels["Everyday Checking"]["mask"] == "4821"
+    assert labels["Rewards Card"]["mask"] is None
+
+
+async def test_connect_survives_institution_lookup_failure(client, db, fake_provider) -> None:
+    """The name is a nicety — its lookup failing must never block a connect."""
+    fake_provider.institution_failure = providers.ProviderError(
+        code="NETWORK_ERROR", message="boom"
+    )
+    await _signup(client)
+    body = await _connect(client, fake_provider)
+    assert body["status"] == "active"
+    assert body["institution_name"] is None

@@ -76,6 +76,7 @@ class AccountOut(BaseModel):
     kind: AccountKind
     label: str
     currency: str
+    mask: str | None
     manual: bool
     archived: bool
     balance: BalanceOut | None
@@ -115,6 +116,7 @@ async def account_out(account: Account) -> AccountOut:
         kind=account.kind,
         label=account.label,
         currency=account.currency,
+        mask=account.mask,
         manual=account.connection_id is None,  # ty: ignore[unresolved-attribute]
         archived=account.archived,
         balance=await _current_balance(account.id),

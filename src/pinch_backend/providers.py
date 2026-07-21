@@ -73,6 +73,9 @@ class ProviderAccount(BaseModel):
     currency: str | None
     """None when the provider doesn't say; the caller falls back to the
     ledger's primary currency."""
+    mask: str | None = None
+    """The provider's last-2-4 display digits; a nicety, absent for many
+    account types."""
     balance_minor: int | None = None
     """Current balance in integer minor units (exponent-aware conversion
     from the provider's major-unit float); None when unreported."""
@@ -125,6 +128,8 @@ class SyncProvider(Protocol):
     async def exchange_public_token(self, public_token: str) -> ExchangedToken: ...
 
     async def get_accounts(self, access_token: str) -> list[ProviderAccount]: ...
+
+    async def get_institution_name(self, access_token: str) -> str | None: ...
 
     async def sync_transactions(self, access_token: str, cursor: str | None) -> SyncBatch: ...
 
@@ -194,6 +199,10 @@ class PlaidProvider:
             payload["transactions"] = {"days_requested": BACKFILL_DAYS}
         else:
             payload["access_token"] = access_token
+        if settings.plaid_redirect_uri:
+            # OAuth institutions bounce through the registered redirect URI
+            # (F2 enabler, #39); non-OAuth flows ignore it entirely.
+            payload["redirect_uri"] = settings.plaid_redirect_uri
         data = await self._post("/link/token/create", payload)
         return data["link_token"]
 
@@ -219,10 +228,25 @@ class PlaidProvider:
                     name=a["name"],
                     kind=_PLAID_KIND.get(a["type"], AccountKind.ASSET),
                     currency=currency,
+                    mask=a.get("mask"),
                     balance_minor=None if current is None else _to_minor(current, currency),
                 )
             )
         return accounts
+
+    async def get_institution_name(self, access_token: str) -> str | None:
+        """Two documented steps: the Item names its institution id, the
+        institutions endpoint names the institution. Institution-less Items
+        (some sandbox constructs) answer None without a second call."""
+        item = await self._post("/item/get", {"access_token": access_token})
+        institution_id = (item.get("item") or {}).get("institution_id")
+        if not institution_id:
+            return None
+        data = await self._post(
+            "/institutions/get_by_id",
+            {"institution_id": institution_id, "country_codes": settings.plaid_country_codes},
+        )
+        return (data.get("institution") or {}).get("name")
 
     async def sync_transactions(self, access_token: str, cursor: str | None) -> SyncBatch:
         """Drain the cursor: every has_more page in one call. The job is

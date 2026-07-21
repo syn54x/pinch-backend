@@ -78,6 +78,7 @@ class ConnectionOut(BaseModel):
 
     id: uuid.UUID
     provider: ConnectionProvider
+    institution_name: str | None
     status: ConnectionStatus
     last_synced_at: datetime | None
     error_detail: str | None
@@ -145,6 +146,7 @@ async def _connection_out(connection: Connection) -> ConnectionOut:
     return ConnectionOut(
         id=connection.id,
         provider=connection.provider,
+        institution_name=connection.institution_name,
         status=connection.status,
         last_synced_at=connection.last_synced_at,
         error_detail=connection.error_detail,
@@ -196,12 +198,20 @@ async def create_connection(
         provider_accounts = await provider.get_accounts(exchanged.access_token)
     except providers.ProviderError as error:
         raise _surface(error) from error
+    try:
+        institution_name = await provider.get_institution_name(exchanged.access_token)
+    except providers.ProviderError as error:
+        # The name is a nicety — never block a consented connect on it;
+        # sync backfills it opportunistically later.
+        log.info("connection.institution_lookup_failed", code=error.code)
+        institution_name = None
     fallback_currency = await _ledger_primary_currency(current_ledger)
     async with transaction():
         connection = await Connection.create(
             ledger=current_ledger,
             provider=ConnectionProvider.PLAID,
             provider_item_id=exchanged.item_id,
+            institution_name=institution_name,
             status=ConnectionStatus.ACTIVE,
             encrypted_secret=encrypt_secret(exchanged.access_token),
         )
@@ -213,6 +223,7 @@ async def create_connection(
                 currency=pa.currency or fallback_currency,
                 connection=connection,
                 provider_account_id=pa.provider_account_id,
+                mask=pa.mask,
             )
     # Defer-after-commit: the initial sync is auto-enqueued — the story is
     # "accounts appear with balances", not "now call sync yourself" (PRD

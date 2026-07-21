@@ -23,6 +23,9 @@ def pytest_configure() -> None:
     os.environ["PINCH_PLAID_CLIENT_ID"] = ""
     os.environ["PINCH_PLAID_SECRET"] = ""
     os.environ["PINCH_SECRET_ENCRYPTION_KEY"] = ""
+    # Same hermetic stance for the cookie flag: developer .envs flip it off
+    # for plain-http Safari dev; the suite tests the secure default.
+    os.environ["PINCH_SESSION_COOKIE_SECURE"] = "true"
 
 
 def _test_database_url() -> str:

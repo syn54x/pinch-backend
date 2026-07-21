@@ -321,3 +321,91 @@ async def test_plaid_error_surfaces_code_only() -> None:
     with pytest.raises(ProviderError) as excinfo:
         await _provider(handler).exchange_public_token("public-stale")
     assert excinfo.value.code == "INVALID_PUBLIC_TOKEN"
+
+
+async def test_accounts_carry_mask() -> None:
+    """Plaid's mask (last 2-4 digits) rides along; absent stays None."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "accounts": [
+                    {
+                        "account_id": "acc-1",
+                        "name": "Checking",
+                        "type": "depository",
+                        "mask": "4821",
+                        "balances": {"iso_currency_code": "USD", "current": 12.5},
+                    },
+                    {
+                        "account_id": "acc-2",
+                        "name": "No Mask",
+                        "type": "credit",
+                        "balances": {},
+                    },
+                ]
+            },
+        )
+
+    accounts = await _provider(handler).get_accounts("access-x")
+    assert accounts[0].mask == "4821"
+    assert accounts[1].mask is None
+
+
+async def test_link_token_carries_redirect_uri(monkeypatch) -> None:
+    """OAuth institutions need the registered redirect_uri — both modes."""
+    from pinch_backend.settings import settings
+
+    monkeypatch.setattr(
+        settings, "plaid_redirect_uri", "http://localhost:5173/connect/oauth-return"
+    )
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json={"link_token": "link-x"})
+
+    provider = _provider(handler)
+    await provider.create_link_token(client_user_id="user-1")
+    await provider.create_link_token(client_user_id="user-1", access_token="access-1")
+    assert seen[0]["redirect_uri"] == "http://localhost:5173/connect/oauth-return"
+    assert seen[1]["redirect_uri"] == "http://localhost:5173/connect/oauth-return"
+
+
+async def test_link_token_omits_redirect_uri_when_unset(monkeypatch) -> None:
+    from pinch_backend.settings import settings
+
+    monkeypatch.setattr(settings, "plaid_redirect_uri", "")
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"link_token": "link-x"})
+
+    await _provider(handler).create_link_token(client_user_id="user-1")
+    assert "redirect_uri" not in seen
+
+
+async def test_institution_name_resolved_in_two_steps() -> None:
+    """/item/get names the institution id; /institutions/get_by_id names it."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/item/get":
+            return httpx.Response(200, json={"item": {"institution_id": "ins_1"}})
+        assert request.url.path == "/institutions/get_by_id"
+        body = json.loads(request.content)
+        assert body["institution_id"] == "ins_1"
+        return httpx.Response(200, json={"institution": {"name": "First Platypus Bank"}})
+
+    assert await _provider(handler).get_institution_name("access-x") == "First Platypus Bank"
+
+
+async def test_institution_name_none_for_institutionless_item() -> None:
+    """Some Items carry no institution; degrade to None without a second call."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/item/get"
+        return httpx.Response(200, json={"item": {"institution_id": None}})
+
+    assert await _provider(handler).get_institution_name("access-x") is None

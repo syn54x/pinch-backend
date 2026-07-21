@@ -94,6 +94,9 @@ class FakeSyncProvider:
     async def create_link_token(self, *, client_user_id: str, access_token: str | None = None):
         return "link-fake"
 
+    async def get_institution_name(self, access_token: str) -> str | None:
+        return "First Platypus Bank"
+
     async def exchange_public_token(self, public_token: str) -> providers.ExchangedToken:
         return providers.ExchangedToken(
             access_token=f"access-fake-{public_token}", item_id=f"item-{public_token}"
