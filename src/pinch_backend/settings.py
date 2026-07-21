@@ -90,10 +90,12 @@ class Settings(BaseSettings):
     plaid_country_codes: list[str] = ["US"]
     """Passed to link-token creation; self-hosters elsewhere reconfigure."""
     plaid_redirect_uri: str = ""
-    """Where OAuth institutions send the user back; must be registered in
-    the Plaid dashboard. Empty derives {frontend_base_url}/connect/oauth-return
-    (the frontend's fixed return route) — one more place frontend_base_url
-    is genuinely the same place (F2 enabler, #39)."""
+    """Where OAuth institutions send the user back — typically
+    {frontend_base_url}/connect/oauth-return (the frontend's fixed return
+    route). Deliberately NOT derived: Plaid rejects link-token creation
+    outright when the URI isn't registered in the dashboard, so setting
+    this and registering it are one operator chore — empty (the default)
+    omits it and keeps non-OAuth connects working (F2 enabler, #39)."""
     secret_encryption_key: str = ""
     """Fernet key encrypting provider access tokens at rest
     (`Fernet.generate_key()`); required the moment Plaid is configured.
@@ -102,12 +104,6 @@ class Settings(BaseSettings):
     @property
     def plaid_configured(self) -> bool:
         return bool(self.plaid_client_id and self.plaid_secret)
-
-    @model_validator(mode="after")
-    def _derive_plaid_redirect_uri(self) -> "Settings":
-        if not self.plaid_redirect_uri:
-            self.plaid_redirect_uri = f"{self.frontend_base_url.rstrip('/')}/connect/oauth-return"
-        return self
 
     @model_validator(mode="after")
     def _resolve_secret_key(self) -> "Settings":

@@ -73,6 +73,7 @@ class FakeSyncProvider:
         self.accounts = [
             providers.ProviderAccount(
                 provider_account_id="plaid-checking",
+                mask="4821",
                 name="Everyday Checking",
                 kind="depository",
                 currency="USD",
@@ -361,6 +362,11 @@ async def test_sync_backfills_missing_institution_name(client, db, fake_provider
     connection = (await Connection.where(lambda c, cid=cid: c.id == cid).all())[0]
     connection.institution_name = None  # simulate a pre-enabler row
     await connection.save()
+    from pinch_backend.models import Account
+
+    checking = (await Account.where(lambda a: a.provider_account_id == "plaid-checking").all())[0]
+    checking.mask = None  # pre-enabler account, no digits yet
+    await checking.save()
 
     response = await client.post(f"{CONNECTIONS}/{body['id']}/sync", headers=await _csrf(client))
     assert response.status_code == 202
@@ -368,3 +374,5 @@ async def test_sync_backfills_missing_institution_name(client, db, fake_provider
 
     listed = (await client.get(CONNECTIONS)).json()["items"][0]
     assert listed["institution_name"] == "First Platypus Bank"
+    masks = {a["label"]: a["mask"] for a in listed["accounts"]}
+    assert masks["Everyday Checking"] == "4821"
