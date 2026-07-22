@@ -20,6 +20,18 @@ fix:
 test *args:
     uv run pytest {{args}}
 
+# Extra args pass through (`just api --reload`, `just api --port 8100`);
+# litestar defaults to :8000, the port the frontend's dev server expects.
+# Run the API server against the developer .env.
+api *args:
+    uv run litestar --app pinch_backend.api.app:app run {{args}}
+
+# Syncs and classification are background jobs, so a full dev stack is
+# two processes: `just api` and `just worker`.
+# Run the Procrastinate worker.
+worker:
+    uv run python -m pinch_backend.cli.app worker
+
 # Export the OpenAPI document for typed-client generation (frontend repo:
 # point openapi-typescript / @hey-api/openapi-ts at the output, or at a
 # running server's /api/v1/schema/openapi.json). No database needed.
