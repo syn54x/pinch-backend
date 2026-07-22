@@ -13,7 +13,7 @@ import uuid
 from datetime import date, datetime
 from typing import Annotated
 
-from ferro import transaction
+from ferro import fetch_all, transaction
 from litestar import Router, delete, get, patch, post, put
 from litestar.di import NamedDependency
 from litestar.exceptions import ClientException, HTTPException, NotFoundException
@@ -153,6 +153,32 @@ class TransactionPatchIn(BaseModel):
     notes: str | None = Field(default=None, max_length=2000)
     reviewed: bool | None = None
     """True sets reviewed_at to now; False clears it (back to the inbox)."""
+
+
+def _like_escape(needle: str) -> str:
+    """Escape LIKE/ILIKE metacharacters so the needle matches literally.
+    Postgres's default LIKE escape character is backslash, so escaping is
+    a plain prefix — no ESCAPE clause needed."""
+    return needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+async def _text_search_ids(ledger_id: uuid.UUID, needle: str) -> list[uuid.UUID]:
+    """The ``q`` match (F3 enabler #42): case-insensitive substring over the
+    payee (description_normalized), the raw description, the display-name
+    override, and notes. ferro's query surface has no ILIKE, so the match is
+    one raw-SQL id scan (Postgres-only since M5 CP3) that composes with the
+    other filters — and the keyset page — through id membership. Amount
+    search is explicitly out of scope in v0."""
+    pattern = f"%{_like_escape(needle)}%"
+    rows = await fetch_all(
+        f'SELECT id FROM "{Transaction.__ferro_table__}"'  # ty: ignore[unresolved-attribute]
+        " WHERE ledger_id = $1::uuid AND ("
+        "description_raw ILIKE $2 OR description_normalized ILIKE $2"
+        " OR display_name ILIKE $2 OR notes ILIKE $2)",
+        ledger_id,
+        pattern,
+    )
+    return sorted(uuid.UUID(row["id"]) for row in rows)
 
 
 async def _get(ledger: Ledger, txn_id: uuid.UUID) -> Transaction:
@@ -329,6 +355,14 @@ async def list_transactions(
     uncategorized: Annotated[bool | None, QueryParameter()] = None,
     tag: Annotated[list[str] | None, QueryParameter()] = None,
     is_transfer: Annotated[bool | None, QueryParameter()] = None,
+    q: Annotated[
+        str | None,
+        QueryParameter(
+            description="Case-insensitive substring search over the payee/"
+            "description, display name, and notes. Composes with the other "
+            "filters; amounts are not searched."
+        ),
+    ] = None,
     cursor: CursorParam = None,
     limit: LimitParam = DEFAULT_PAGE_LIMIT,
 ) -> Page[TransactionOut]:
@@ -393,9 +427,41 @@ async def list_transactions(
         if not keep_ids:
             return Page(items=[], next_cursor=None)
         query = query.where(lambda t: t.id.in_(keep_ids))
+    if q is not None and (needle := q.strip()):
+        # ILIKE v0 (F3 enabler #42): the raw-SQL scan materializes matching
+        # ids before the keyset page — the same scaling seam (and the same
+        # acceptance) as the tag filter above. A blank q is no filter, not
+        # match-everything.
+        q_ids = await _text_search_ids(ledger_id, needle)
+        if not q_ids:
+            return Page(items=[], next_cursor=None)
+        query = query.where(lambda t: t.id.in_(q_ids))
 
     rows, next_cursor = await paginate_by_date(query, cursor=cursor, limit=limit)
     return Page(items=await hydrate_transactions(rows), next_cursor=next_cursor)
+
+
+class UnreviewedCountOut(BaseModel):
+    """The Inbox badge's number (F3 enabler #42)."""
+
+    count: int
+    """How many transactions in the acting ledger await review — the same
+    predicate as the ``reviewed=false`` listing, so the badge and the list
+    always agree."""
+
+
+@get("/unreviewed-count")
+async def count_unreviewed_transactions(
+    current_ledger: NamedDependency[Ledger],
+) -> UnreviewedCountOut:
+    """One COUNT over the ledger's unreviewed rows (F3 enabler #42) — cheap
+    by construction: no hydration, no pagination, ledger-scoped like every
+    other read (current_ledger, I-2)."""
+    ledger_id = current_ledger.id
+    count = await Transaction.where(
+        lambda t: (t.ledger_id == ledger_id) & (t.reviewed_at == None)  # noqa: E711
+    ).count()
+    return UnreviewedCountOut(count=count)
 
 
 @get("/{txn_id:uuid}")
@@ -732,6 +798,7 @@ transactions_router = Router(
     path="/api/v1/transactions",
     route_handlers=[
         list_transactions,
+        count_unreviewed_transactions,
         get_transaction,
         patch_transaction,
         create_transaction,

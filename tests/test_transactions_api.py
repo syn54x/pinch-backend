@@ -360,6 +360,145 @@ async def test_uncategorized_filter_excludes_categorized_rows(client) -> None:
     assert [i["description_raw"] for i in r.json()["items"]] == ["NOCAT"]
 
 
+# --- q text search (F3 enabler #42): ILIKE v0 over payee/description,
+# display name, and notes — composes with the other filters; no amounts. ---
+
+
+async def test_q_matches_descriptions_case_insensitively(client) -> None:
+    await _setup_txns(
+        client,
+        [
+            ("2026-01-02", "-4.50", "COFFEE SHOP"),
+            ("2026-01-01", "-60.00", "GROCERY STORE"),
+        ],
+    )
+    r = await client.get(TX, params={"q": "coffee"})
+    assert [i["description_raw"] for i in r.json()["items"]] == ["COFFEE SHOP"]
+    r2 = await client.get(TX, params={"q": "Shop"})
+    assert [i["description_raw"] for i in r2.json()["items"]] == ["COFFEE SHOP"]
+
+
+async def test_q_matches_display_name_and_notes(client) -> None:
+    ids = await _setup_txns(
+        client,
+        [
+            ("2026-01-02", "-4.50", "SQ *1234 POS"),
+            ("2026-01-01", "-60.00", "GROCERY STORE"),
+        ],
+    )
+    await client.patch(
+        f"{TX}/{ids['SQ *1234 POS']}",
+        json={"display_name": "Blue Bottle"},
+        headers=await _csrf(client),
+    )
+    await client.patch(
+        f"{TX}/{ids['GROCERY STORE']}",
+        json={"notes": "Reimbursed by work"},
+        headers=await _csrf(client),
+    )
+    r = await client.get(TX, params={"q": "bottle"})
+    assert [i["description_raw"] for i in r.json()["items"]] == ["SQ *1234 POS"]
+    r2 = await client.get(TX, params={"q": "reimbursed"})
+    assert [i["description_raw"] for i in r2.json()["items"]] == ["GROCERY STORE"]
+
+
+async def test_q_composes_with_filters_and_pagination(client) -> None:
+    ids = await _setup_txns(
+        client,
+        [
+            ("2026-01-03", "-1.00", "STORE ONE"),
+            ("2026-01-02", "-2.00", "STORE TWO"),
+            ("2026-01-01", "-3.00", "CAFE"),
+        ],
+    )
+    await client.patch(
+        f"{TX}/{ids['STORE ONE']}", json={"reviewed": True}, headers=await _csrf(client)
+    )
+    r = await client.get(TX, params={"q": "store", "reviewed": "false"})
+    assert [i["description_raw"] for i in r.json()["items"]] == ["STORE TWO"]
+
+    page1 = (await client.get(TX, params={"q": "store", "limit": 1})).json()
+    assert [i["description_raw"] for i in page1["items"]] == ["STORE ONE"]
+    assert page1["next_cursor"] is not None
+    page2 = (
+        await client.get(TX, params={"q": "store", "limit": 1, "cursor": page1["next_cursor"]})
+    ).json()
+    assert [i["description_raw"] for i in page2["items"]] == ["STORE TWO"]
+
+
+async def test_q_treats_like_metacharacters_literally(client) -> None:
+    await _setup_txns(
+        client,
+        [
+            ("2026-01-03", "-1.00", "50% OFF SALE"),
+            ("2026-01-02", "-2.00", "500 OFF SALE"),
+            ("2026-01-01", "-3.00", "A_B WIDGETS"),
+            ("2025-12-31", "-4.00", "AXB WIDGETS"),
+        ],
+    )
+    r = await client.get(TX, params={"q": "50%"})
+    assert [i["description_raw"] for i in r.json()["items"]] == ["50% OFF SALE"]
+    r2 = await client.get(TX, params={"q": "A_B"})
+    assert [i["description_raw"] for i in r2.json()["items"]] == ["A_B WIDGETS"]
+
+
+async def test_q_with_no_match_answers_an_empty_page(client) -> None:
+    await _setup_txns(client, [("2026-01-01", "-5.00", "COFFEE")])
+    body = (await client.get(TX, params={"q": "zzz-nothing"})).json()
+    assert body == {"items": [], "next_cursor": None}
+
+
+async def test_blank_q_is_no_filter(client) -> None:
+    await _setup_txns(client, [("2026-01-01", "-5.00", "COFFEE")])
+    assert len((await client.get(TX, params={"q": "  "})).json()["items"]) == 1
+
+
+async def test_q_is_scoped_to_the_acting_ledger(client) -> None:
+    await _signup(client, "a@example.com")
+    acct = await _account(client)
+    await _import(client, acct, [("2026-01-01", "-5.00", "COFFEE")])
+    await client.post("/api/v1/auth/logout", headers=await _csrf(client))
+    await _signup(client, "b@example.com")
+    assert (await client.get(TX, params={"q": "coffee"})).json()["items"] == []
+
+
+# --- Unreviewed count (F3 enabler #42): the Inbox badge's number -------------
+
+UNREVIEWED_COUNT = f"{TX}/unreviewed-count"
+
+
+async def test_unreviewed_count_agrees_with_the_reviewed_false_listing(client) -> None:
+    ids = await _setup_txns(
+        client,
+        [
+            ("2026-01-03", "-1.00", "A"),
+            ("2026-01-02", "-2.00", "B"),
+            ("2026-01-01", "-3.00", "C"),
+        ],
+    )
+    assert (await client.get(UNREVIEWED_COUNT)).json() == {"count": 3}
+    await client.patch(f"{TX}/{ids['A']}", json={"reviewed": True}, headers=await _csrf(client))
+    count = (await client.get(UNREVIEWED_COUNT)).json()["count"]
+    inbox = (await client.get(f"{TX}?reviewed=false")).json()["items"]
+    assert count == len(inbox) == 2
+    await client.patch(f"{TX}/{ids['A']}", json={"reviewed": False}, headers=await _csrf(client))
+    assert (await client.get(UNREVIEWED_COUNT)).json() == {"count": 3}
+
+
+async def test_unreviewed_count_is_ledger_scoped(client) -> None:
+    await _signup(client, "a@example.com")
+    acct = await _account(client)
+    await _import(client, acct, [("2026-01-01", "-5.00", "MINE")])
+    assert (await client.get(UNREVIEWED_COUNT)).json() == {"count": 1}
+    await client.post("/api/v1/auth/logout", headers=await _csrf(client))
+    await _signup(client, "b@example.com")
+    assert (await client.get(UNREVIEWED_COUNT)).json() == {"count": 0}
+
+
+async def test_unreviewed_count_requires_auth(client) -> None:
+    assert (await client.get(UNREVIEWED_COUNT)).status_code == 401
+
+
 # --- PATCH input validation (PR #23 review: bound user-data, protect the
 # display_name → description_raw fallback) -----------------------------------
 

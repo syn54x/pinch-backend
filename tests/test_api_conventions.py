@@ -135,6 +135,16 @@ async def test_openapi_schema_is_served_under_the_versioned_api(client) -> None:
         assert path in schema["paths"], f"{path} missing from the OpenAPI document"
 
 
+async def test_openapi_documents_the_f3_enabler_surface(client) -> None:
+    """F3 enablers (#42): the frontend regenerates its typed client from this
+    document, so all three additions must be described in it."""
+    schema = (await client.get(SCHEMA_JSON)).json()
+    assert "patch" in schema["paths"]["/api/v1/auth/me"]
+    assert "get" in schema["paths"]["/api/v1/transactions/unreviewed-count"]
+    tx_list = schema["paths"]["/api/v1/transactions"]["get"]
+    assert "q" in {p["name"] for p in tx_list.get("parameters", [])}
+
+
 async def test_operation_ids_are_handler_names(client) -> None:
     """Typed-client method names (frontend enabler): operation ids are the
     handler names — `list_accounts`, never `ApiV1AccountsListAccounts` —
