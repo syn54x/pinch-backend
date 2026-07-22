@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 
 from ferro import UniqueViolationError
-from litestar import Request, Response, Router, delete, get, post
+from litestar import Request, Response, Router, delete, get, patch, post
 from litestar.di import NamedDependency
 from litestar.exceptions import (
     HTTPException,
@@ -84,6 +84,20 @@ class UserOut(BaseModel):
     primary_currency: str
     email_verified: bool
     created_at: datetime
+
+
+class MePatchIn(BaseModel):
+    """The self-profile allowlist (F3 enabler #42): what a signed-in user may
+    change about themselves after signup. Unknown keys are a 400
+    (extra="forbid"), never a silently accepted no-op — the transactions
+    PATCH convention."""
+
+    model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
+
+    primary_currency: str = Field(pattern=r"^[A-Z]{3}$")
+    """ISO 4217 alpha code, same shape rule as signup — unrestricted in v0
+    (reports re-express at current rates), so any three uppercase letters
+    pass and anything else is a 400."""
 
 
 class SessionOut(BaseModel):
@@ -229,6 +243,22 @@ async def logout(request: Request) -> Response[None]:
 
 @get("/me")
 async def me(current_user: NamedDependency[User]) -> UserOut:
+    return _user_out(current_user)
+
+
+@patch("/me")
+async def update_me(data: MePatchIn, current_user: NamedDependency[User]) -> UserOut:
+    """Onboarding's currency step (F3 enabler #42): the value pre-fills from
+    ``me`` and this writes it back. Credential-blind like ``me`` itself — a
+    write-scoped PAT may update the profile; only credential management is
+    cookie-fenced."""
+    current_user.primary_currency = data.primary_currency
+    await current_user.save()
+    log.info(
+        "auth.me.updated",
+        user_id=str(current_user.id),
+        primary_currency=data.primary_currency,
+    )
     return _user_out(current_user)
 
 
@@ -422,6 +452,7 @@ auth_router = Router(
         login,
         logout,
         me,
+        update_me,
         list_sessions,
         revoke_session,
         create_pat,

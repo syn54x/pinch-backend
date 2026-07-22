@@ -89,6 +89,53 @@ async def test_me_without_a_session_is_401(client) -> None:
     assert (await client.get(ME)).status_code == 401
 
 
+# --- PATCH /me: post-signup profile edits (F3 enabler #42) -------------------
+
+
+async def test_patch_me_updates_primary_currency_and_me_reflects_it(client) -> None:
+    await _signup(client)
+    response = await client.patch(ME, json={"primary_currency": "EUR"}, headers=await _csrf(client))
+    assert response.status_code == 200
+    assert response.json()["primary_currency"] == "EUR"
+    assert (await client.get(ME)).json()["primary_currency"] == "EUR"
+
+
+async def test_patch_me_accepts_any_iso4217_shaped_code(client) -> None:
+    """Unrestricted in v0 (issue #42): the shape rule is the only gate."""
+    await _signup(client)
+    response = await client.patch(ME, json={"primary_currency": "ZAR"}, headers=await _csrf(client))
+    assert response.status_code == 200
+    assert response.json()["primary_currency"] == "ZAR"
+
+
+async def test_patch_me_rejects_invalid_currency_codes(client) -> None:
+    await _signup(client)
+    for bad in ("eur", "EURO", "E1R", ""):
+        response = await client.patch(
+            ME, json={"primary_currency": bad}, headers=await _csrf(client)
+        )
+        assert response.status_code == 400, f"primary_currency={bad!r} must be rejected"
+    assert (await client.get(ME)).json()["primary_currency"] == "USD"
+
+
+async def test_patch_me_rejects_unknown_fields(client) -> None:
+    """The allowlist stance: email is not self-serve editable, and an unknown
+    key is a 400 — never a silently accepted no-op."""
+    await _signup(client)
+    response = await client.patch(
+        ME,
+        json={"primary_currency": "EUR", "email": "new@example.com"},
+        headers=await _csrf(client),
+    )
+    assert response.status_code == 400
+    assert (await client.get(ME)).json()["primary_currency"] == "USD"
+
+
+async def test_patch_me_without_a_session_is_401(client) -> None:
+    response = await client.patch(ME, json={"primary_currency": "EUR"}, headers=await _csrf(client))
+    assert response.status_code == 401
+
+
 # --- Signup edges ------------------------------------------------------------
 
 
