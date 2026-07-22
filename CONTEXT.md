@@ -78,7 +78,7 @@ docs, and conversation. Implementation details do not belong in this file.
   *none* (the pipeline ran and every stage abstained). Always shown to the
   user during review.
 - **Review** — the act of accepting or correcting proposals on incoming
-  transactions. All incoming transactions require review. The dashboard
+  transactions. All incoming transactions require review. The Inbox
   presents them grouped by day; the user may accept transactions
   individually or accept a whole day at once. Corrections feed back into the
   classification system (the flywheel). A reviewed transaction returns to
