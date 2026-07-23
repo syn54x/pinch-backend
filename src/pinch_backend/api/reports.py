@@ -15,12 +15,22 @@ from typing import Annotated, Literal
 
 from litestar import Router, get
 from litestar.di import NamedDependency
+from litestar.exceptions import ClientException
 from litestar.params import QueryParameter
 from pydantic import BaseModel
 
 from pinch_backend.api.connections import ledger_primary_currency
 from pinch_backend.fx import get_rate
-from pinch_backend.models import Account, AccountKind, BalanceEntry, Ledger, utcnow
+from pinch_backend.models import (
+    Account,
+    AccountKind,
+    BalanceEntry,
+    Category,
+    Ledger,
+    SplitLine,
+    Transaction,
+    utcnow,
+)
 from pinch_backend.observability import get_logger
 
 log = get_logger(__name__)
@@ -301,4 +311,252 @@ async def net_worth_report(
     )
 
 
-reports_router = Router(path="/api/v1/reports", route_handlers=[net_worth_report])
+class CategorySpendingRow(BaseModel):
+    """One category's month, reported as positive magnitudes. ``rolled_up``
+    includes descendants by ancestry (derived at read time, never stored);
+    ``percent_change`` compares rolled-up against the previous month and is
+    null when the previous month is zero. ``category_id``/``name`` null =
+    the uncategorized bucket."""
+
+    category_id: uuid.UUID | None
+    name: str | None
+    parent_id: uuid.UUID | None
+    direct_minor: int
+    rolled_up_minor: int
+    previous_minor: int
+    percent_change: float | None
+
+
+class DaySpending(BaseModel):
+    date: date
+    total_minor: int
+
+
+class PreviousMonth(BaseModel):
+    month: str
+    total_minor: int
+
+
+class ExcludedSpending(BaseModel):
+    currency: str
+    total_minor: int
+
+
+class SpendingOut(BaseModel):
+    month: str
+    currency: str
+    total_minor: int
+    by_day: list[DaySpending]
+    by_category: list[CategorySpendingRow]
+    previous: PreviousMonth
+    change: Delta
+    excluded: list[ExcludedSpending]
+
+
+def _parse_month(month: str) -> date:
+    try:
+        parsed = datetime.strptime(month, "%Y-%m")
+    except ValueError as error:
+        raise ClientException(detail="month must be YYYY-MM") from error
+    return date(parsed.year, parsed.month, 1)
+
+
+def _next_month(month_start: date) -> date:
+    return (
+        date(month_start.year + 1, 1, 1)
+        if month_start.month == 12
+        else date(month_start.year, month_start.month + 1, 1)
+    )
+
+
+def _prev_month(month_start: date) -> date:
+    return (
+        date(month_start.year - 1, 12, 1)
+        if month_start.month == 1
+        else date(month_start.year, month_start.month - 1, 1)
+    )
+
+
+async def _spending_by_category(
+    ledger_id: uuid.UUID, primary: str, start: date, end: date
+) -> dict[uuid.UUID | None, int]:
+    """Spending magnitudes per category for one window — the PRD's one
+    definition: unsplit outflows under their own category plus outflow
+    lines under theirs; transfers excluded by existence, the vacated split
+    parent excluded by its lines' existence. Two grouped queries, merged."""
+    unsplit = (
+        await Transaction.select(lambda t: {"cat": t.category_id, "total": t.amount_minor.sum()})
+        .where(
+            lambda t: (
+                (t.ledger_id == ledger_id)
+                & (t.currency == primary)
+                & (t.amount_minor < 0)
+                & (t.date >= start)
+                & (t.date < end)
+                & ~t.transfer_out.exists()
+                & ~t.transfer_in.exists()
+                & ~t.split_lines.exists()
+            )
+        )
+        .all()
+    )
+    lines = (
+        await SplitLine.select(lambda ln: {"cat": ln.category_id, "total": ln.amount_minor.sum()})
+        .where(
+            lambda ln: (
+                (ln.ledger_id == ledger_id)
+                & (ln.amount_minor < 0)
+                & (ln.transaction.currency == primary)
+                & (ln.transaction.date >= start)
+                & (ln.transaction.date < end)
+            )
+        )
+        .all()
+    )
+    totals: dict[uuid.UUID | None, int] = {}
+    for row in [*unsplit, *lines]:
+        totals[row.cat] = totals.get(row.cat, 0) + -row.total  # ty: ignore[unresolved-attribute]
+    return totals
+
+
+async def _spending_by_day(
+    ledger_id: uuid.UUID, primary: str, start: date, end: date
+) -> dict[date, int]:
+    """Daily grain straight from SQL (GROUP BY the date column — the CP0-
+    verified backbone); sparse: only days with spending appear."""
+    unsplit = (
+        await Transaction.select(lambda t: {"d": t.date, "total": t.amount_minor.sum()})
+        .where(
+            lambda t: (
+                (t.ledger_id == ledger_id)
+                & (t.currency == primary)
+                & (t.amount_minor < 0)
+                & (t.date >= start)
+                & (t.date < end)
+                & ~t.transfer_out.exists()
+                & ~t.transfer_in.exists()
+                & ~t.split_lines.exists()
+            )
+        )
+        .all()
+    )
+    lines = (
+        await SplitLine.select(
+            lambda ln: {"d": ln.transaction.date, "total": ln.amount_minor.sum()}
+        )
+        .where(
+            lambda ln: (
+                (ln.ledger_id == ledger_id)
+                & (ln.amount_minor < 0)
+                & (ln.transaction.currency == primary)
+                & (ln.transaction.date >= start)
+                & (ln.transaction.date < end)
+            )
+        )
+        .all()
+    )
+    totals: dict[date, int] = {}
+    for row in [*unsplit, *lines]:
+        totals[row.d] = totals.get(row.d, 0) + -row.total  # ty: ignore[unresolved-attribute]
+    return totals
+
+
+def _rollup(
+    direct: dict[uuid.UUID | None, int], categories: list[Category]
+) -> dict[uuid.UUID | None, int]:
+    """Rolled-up magnitudes: each category's direct plus its descendants',
+    by walking the parent chain of every spent category. The uncategorized
+    bucket has no ancestry — it rolls up to itself."""
+    parents = {c.id: c.parent_id for c in categories}  # ty: ignore[unresolved-attribute]
+    rolled: dict[uuid.UUID | None, int] = {}
+    for category_id, amount in direct.items():
+        if category_id is None:
+            rolled[None] = rolled.get(None, 0) + amount
+            continue
+        node: uuid.UUID | None = category_id
+        while node is not None:
+            rolled[node] = rolled.get(node, 0) + amount
+            node = parents.get(node)
+    return rolled
+
+
+@get("/spending")
+async def spending_report(
+    current_ledger: NamedDependency[Ledger],
+    month: Annotated[str | None, QueryParameter()] = None,
+    as_of: Annotated[date | None, QueryParameter()] = None,
+) -> SpendingOut:
+    """One month of spending — total, daily trend, by-category with rollup,
+    and the period-over-period comparison against the prior month."""
+    as_of = as_of if as_of is not None else utcnow().date()
+    month_start = _parse_month(month) if month is not None else as_of.replace(day=1)
+    month_end = _next_month(month_start)
+    previous_start = _prev_month(month_start)
+    primary = await ledger_primary_currency(current_ledger)
+    ledger_id = current_ledger.id
+
+    direct = await _spending_by_category(ledger_id, primary, month_start, month_end)
+    previous_direct = await _spending_by_category(ledger_id, primary, previous_start, month_start)
+    by_day = await _spending_by_day(ledger_id, primary, month_start, month_end)
+
+    categories = await Category.where(lambda c: c.ledger_id == ledger_id).all()
+    names = {c.id: c.name for c in categories}
+    parent_ids = {c.id: c.parent_id for c in categories}  # ty: ignore[unresolved-attribute]
+    rolled = _rollup(direct, categories)
+    previous_rolled = _rollup(previous_direct, categories)
+
+    rows: list[CategorySpendingRow] = []
+    for category_id in sorted(
+        set(rolled) | set(previous_rolled), key=lambda c: (c is None, names.get(c, ""))
+    ):
+        current_rolled = rolled.get(category_id, 0)
+        prior = previous_rolled.get(category_id, 0)
+        rows.append(
+            CategorySpendingRow(
+                category_id=category_id,
+                name=names.get(category_id),
+                parent_id=parent_ids.get(category_id),
+                direct_minor=direct.get(category_id, 0),
+                rolled_up_minor=current_rolled,
+                previous_minor=prior,
+                percent_change=(
+                    None if prior == 0 else round((current_rolled - prior) / prior * 100, 4)
+                ),
+            )
+        )
+
+    total = sum(direct.values())
+    previous_total = sum(previous_direct.values())
+
+    excluded_rows = (
+        await Transaction.select(lambda t: {"currency": t.currency, "total": t.amount_minor.sum()})
+        .where(
+            lambda t: (
+                (t.ledger_id == ledger_id)
+                & (t.currency != primary)
+                & (t.amount_minor < 0)
+                & (t.date >= month_start)
+                & (t.date < month_end)
+                & ~t.transfer_out.exists()
+                & ~t.transfer_in.exists()
+            )
+        )
+        .all()
+    )
+
+    return SpendingOut(
+        month=month_start.strftime("%Y-%m"),
+        currency=primary,
+        total_minor=total,
+        by_day=[DaySpending(date=d, total_minor=amount) for d, amount in sorted(by_day.items())],
+        by_category=rows,
+        previous=PreviousMonth(month=previous_start.strftime("%Y-%m"), total_minor=previous_total),
+        change=_delta(total, previous_total),
+        excluded=[
+            ExcludedSpending(currency=row.currency, total_minor=-row.total)  # ty: ignore[unresolved-attribute]
+            for row in sorted(excluded_rows, key=lambda r: r.currency)
+        ],
+    )
+
+
+reports_router = Router(path="/api/v1/reports", route_handlers=[net_worth_report, spending_report])
