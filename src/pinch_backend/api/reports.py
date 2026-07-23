@@ -685,7 +685,114 @@ async def debt_report(
     )
 
 
+class UpcomingBill(BaseModel):
+    display_name: str
+    due_date: date
+    amount_minor: int
+
+
+class SubscriptionsCard(BaseModel):
+    monthly_minor: int
+    count: int
+
+
+class BucketSlice(BaseModel):
+    """One donut slice: recurring monthly outflow grouped by derived
+    bucket (modal member category, Debt for loan-payment series, null for
+    uncategorized)."""
+
+    bucket: str | None
+    monthly_minor: int
+
+
+class CycleCard(BaseModel):
+    paid: int
+    total: int
+
+
+class RecurringSummaryOut(BaseModel):
+    """The Recurring screen's stat cards and donut, plus the Dashboard's
+    next-7-days bills card — active, non-lapsed series only; income never
+    counts into the outflow totals."""
+
+    as_of: date
+    monthly_recurring_minor: int
+    due_next_7_days_minor: int
+    due_next_7_days: list[UpcomingBill]
+    subscriptions: SubscriptionsCard
+    by_bucket: list[BucketSlice]
+    cycle: CycleCard
+
+
+@get("/recurring")
+async def recurring_report(
+    current_ledger: NamedDependency[Ledger],
+    as_of: Annotated[date | None, QueryParameter()] = None,
+) -> RecurringSummaryOut:
+    from pinch_backend import recurring
+    from pinch_backend.models import RecurringStatus
+
+    as_of = as_of if as_of is not None else utcnow().date()
+    ledger_id = current_ledger.id
+    series_rows = await recurring.RecurringSeries.where(
+        lambda s: (s.ledger_id == ledger_id) & (s.status == RecurringStatus.ACTIVE)
+    ).all()
+    names = await recurring.category_names_for(ledger_id)
+
+    monthly_total = 0
+    upcoming: list[UpcomingBill] = []
+    subscriptions_total = 0
+    subscriptions_count = 0
+    buckets: dict[str | None, int] = {}
+    paid = 0
+    total = 0
+    for series in series_rows:
+        members = await recurring.series_members(series, as_of)
+        state = recurring.cycle_state(series, members, as_of)
+        if state.status == "lapsed":
+            continue
+        total += 1
+        if state.status == "paid":
+            paid += 1
+        if series.direction > 0:
+            continue
+        monthly = state.monthly_minor or 0
+        monthly_total += monthly
+        if series.kind.value == "subscription":
+            subscriptions_total += monthly
+            subscriptions_count += 1
+        bucket = await recurring.series_bucket(series, members, names)
+        buckets[bucket] = buckets.get(bucket, 0) + monthly
+        if (
+            state.next_due_date is not None
+            and state.due_in_days is not None
+            and 0 <= state.due_in_days <= 7
+        ):
+            upcoming.append(
+                UpcomingBill(
+                    display_name=recurring.default_display_name(series),
+                    due_date=state.next_due_date,
+                    amount_minor=state.est_amount_minor or 0,
+                )
+            )
+
+    return RecurringSummaryOut(
+        as_of=as_of,
+        monthly_recurring_minor=monthly_total,
+        due_next_7_days_minor=sum(abs(u.amount_minor) for u in upcoming),
+        due_next_7_days=sorted(upcoming, key=lambda u: u.due_date),
+        subscriptions=SubscriptionsCard(
+            monthly_minor=subscriptions_total, count=subscriptions_count
+        ),
+        by_bucket=[
+            BucketSlice(bucket=bucket, monthly_minor=amount)
+            for bucket, amount in sorted(buckets.items(), key=lambda item: -item[1])
+        ],
+        cycle=CycleCard(paid=paid, total=total),
+    )
+
+
 reports_router = Router(
     path="/api/v1/reports",
-    route_handlers=[net_worth_report, spending_report, debt_report],
+    route_handlers=[net_worth_report, spending_report, debt_report, recurring_report],
 )

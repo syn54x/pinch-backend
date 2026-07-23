@@ -65,6 +65,7 @@ async def classify_ledger(ledger_id: str, auto_file_import_id: str | None = None
     correctness guard; the lock just cuts violation noise)."""
     from pinch_backend.classification.detection import detect_transfers
     from pinch_backend.classification.pipeline import sweep_ledger
+    from pinch_backend.recurring import detect_recurring
 
     async with engines.session():
         await sweep_ledger(
@@ -75,6 +76,9 @@ async def classify_ledger(ledger_id: str, auto_file_import_id: str | None = None
         # pairs, which no per-transaction stage can, and outranks whatever
         # shape the stages proposed for a matched pair.
         await detect_transfers(uuid.UUID(ledger_id))
+        # The recurring detector rides the same pass (M8 CP3): cadences
+        # live in history, which no per-transaction stage can see.
+        await detect_recurring(uuid.UUID(ledger_id))
 
 
 SYNC_MAX_ATTEMPTS = 5

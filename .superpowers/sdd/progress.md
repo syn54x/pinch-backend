@@ -315,3 +315,26 @@ Branch: m8. Delivery: single PR, slices in order CP0 → CP1 → CP2 → CP4 →
   excluded-count markers per aggregate, foreign-currency debt in excluded remainder.
   Deploy note: this slice's schema lands via existing database_migrate_updates
   setting (verified present in db.connect_database — no wiring needed).
+- CP3 (#49): complete — NOT cut, same as M6 promotion / M7 detector (13 tests in
+  test_recurring.py; TDD red→green; suite 597 green + ruff + ty). models.py:
+  RecurringSeries (stored MATCHER: account+payee+direction+nullable exact
+  amount_minor, composite unique = re-sweep idempotency guard; no links — members
+  match-on-read, self-healing vs retraction/undo) + 3 enums. recurring.py:
+  detect_recurring in classify_ledger after detect_transfers (manual/import/sync all
+  funnel through); two-pass fitting (merged payee first — holds price hikes and
+  variable bills together; amount sub-group second — the Apple trio); per-cadence
+  guards (weekly/biweekly = one weekday, monthly+ = dom spread ≤3 clamped at 28) make
+  interleaved same-amount anchors deterministic silence; inflow legs on loan/credit
+  accounts skipped (payment-received ≠ income — session decision, flag in review).
+  Cycle state computed in a CALENDAR-MONTH frame (paid = member this month; due/
+  overdue vs next expected; upcoming; lapsed = 2 cadences empty, computed never
+  stored). Fixed = recents within ~1%, est = median. api/recurring.py: Page list
+  (kind/unpaid filters — unpaid applied post-page, documented), PATCH kind+
+  display_name only (income not re-segmentable → 400; matcher writes 400 via
+  extra=forbid), POST dismiss (permanent, idempotent; detection matches and leaves
+  it). /reports/recurring: monthly normalization (52/12 etc), due-next-7-days card +
+  contributors, subscriptions card, by-bucket donut (Debt via transfer counterpart
+  kind, else modal member category), cycle paid/total. CONTEXT.md: Recurring
+  series / Cadence / Cycle section added. Engine nuance found by tests: a
+  single-amount payee fits pass 1 → merged (None) matcher; amount scoping only
+  exists when a shared payee forces it.

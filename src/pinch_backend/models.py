@@ -72,6 +72,34 @@ class BalanceSource(StrEnum):
     first connect, feeding M8's net-worth-over-time."""
 
 
+class RecurringCadence(StrEnum):
+    """How often a recurring series recurs (PRD M8 #45, CP3)."""
+
+    WEEKLY = "weekly"
+    BIWEEKLY = "biweekly"
+    MONTHLY = "monthly"
+    QUARTERLY = "quarterly"
+    YEARLY = "yearly"
+
+
+class RecurringKind(StrEnum):
+    """The Recurring screen's segments. Income is sign-inferred and never
+    user-flippable; bill vs subscription is taste, so it is the user's."""
+
+    BILL = "bill"
+    SUBSCRIPTION = "subscription"
+    INCOME = "income"
+
+
+class RecurringStatus(StrEnum):
+    """Dismissed is the user's verdict and permanent (the rejection-memory
+    analog). Lapse — the data's verdict — is computed at read time, never
+    stored."""
+
+    ACTIVE = "active"
+    DISMISSED = "dismissed"
+
+
 class ImportStatus(StrEnum):
     """The four locked lifecycle stages (PRD M4, CONTEXT.md: Importing).
 
@@ -157,6 +185,7 @@ class Ledger(TimestampMixin, Model):
     correction_log_entries: Relation[list["CorrectionLogEntry"]] = BackRef()
     split_lines: Relation[list["SplitLine"]] = BackRef()
     transfers: Relation[list["Transfer"]] = BackRef()
+    recurring_series: Relation[list["RecurringSeries"]] = BackRef()
 
 
 class User(TimestampMixin, Model):
@@ -274,6 +303,7 @@ class Account(TimestampMixin, Model):
     balance_entries: Relation[list["BalanceEntry"]] = BackRef()
     imports: Relation[list["Import"]] = BackRef()
     transactions: Relation[list["Transaction"]] = BackRef()
+    recurring_series: Relation[list["RecurringSeries"]] = BackRef()
 
 
 class BalanceEntry(TimestampMixin, Model):
@@ -489,6 +519,47 @@ class Transaction(TimestampMixin, Model):
     # API keeps it to one transfer total (membership queries test both).
     transfer_out: "Transfer" = BackRef()
     transfer_in: "Transfer" = BackRef()
+
+
+class RecurringSeries(TimestampMixin, Model):
+    """A detected recurring money movement (PRD M8 #45, CP3; CONTEXT.md:
+    Recurring series).
+
+    Stores a **matcher**, never links: members resolve by query at read
+    time — ``(account, payee, direction[, amount])`` — so sync rewrites,
+    retraction, and import undo never maintain membership; match-on-read
+    is self-healing. ``amount_minor`` NULL matches any amount (the merged-
+    payee series); not-null is exact minor-unit equality (the aggregator-
+    payee series — bands rejected: overlap breaks matcher disjointness).
+    Detection writes rows idempotently (the composite unique is the
+    re-sweep guard); users curate ``kind``/``display_name`` and dismiss —
+    there is no manual creation ("no manual setup" is the wireframe's law).
+    """
+
+    __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
+        ("account_id", "payee", "direction", "amount_minor"),
+    )
+    __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (("ledger_id", "status"),)
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    ledger: Annotated[Ledger, ForeignKey(related_name="recurring_series", index=True)]
+    account: Annotated[Account, ForeignKey(related_name="recurring_series", index=True)]
+    payee: str
+    """The normalized payee (description_normalized) — the deterministic
+    match key, same as rules and history."""
+    direction: int
+    """+1 inflow / -1 outflow: a payee can be both a merchant and a refund
+    source; the sign is part of the identity."""
+    amount_minor: int | None = None
+    """The optional exact-amount scope; NULL = any amount."""
+    cadence: RecurringCadence
+    kind: RecurringKind = RecurringKind.BILL
+    status: RecurringStatus = RecurringStatus.ACTIVE
+    display_name: str | None = None
+    """User curation; NULL renders the payee (amount-scoped series
+    disambiguate as "payee · amount")."""
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class Category(TimestampMixin, Model):

@@ -149,6 +149,31 @@ docs, and conversation. Implementation details do not belong in this file.
   observed payment behavior (from transfer history into the loan) and (b) the
   contractual minimum. The difference between the two is the headline number.
 
+## Recurring
+
+- **Recurring series** — a detected repeating money movement: the same payee,
+  on the same account, in the same direction, recurring on a cadence — a
+  bill, a subscription, or income (income is inferred from the sign and is
+  never re-segmented by hand). Series are detected from history, never set
+  up manually; the user curates a detected series (rename it, flip bill vs
+  subscription) or dismisses it — a dismissed series is never proposed
+  again. A series identifies its transactions by matching, not by links:
+  membership is derived at read time, so undoing an import or a sync
+  rewrite never leaves a series pointing at ghosts. Loan and credit-card
+  payments form series like any other movement — Recurring is a cash-flow
+  calendar, not a spending report, so the transfers-excluded rule does not
+  apply to it.
+- **Cadence** — how often a series recurs: weekly, biweekly, monthly,
+  quarterly, or yearly. Inferred from the spacing of past occurrences and
+  updated as the data drifts. When history fits no cadence honestly, the
+  answer is no series — a wrong series is worse than a missing one.
+- **Cycle** — one recurrence period of a series, framed by the calendar
+  month for display: a series is *paid* for the current cycle when a
+  matching transaction has arrived, *due* or *overdue* against its next
+  expected date otherwise. A series with no occurrence for two cadences is
+  **lapsed** — the data's verdict, distinct from dismissal (the user's),
+  and self-reversing if the merchant returns.
+
 ## Money
 
 - **Amount** — every money value is an integer count of minor units plus an
