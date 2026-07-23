@@ -338,3 +338,14 @@ Branch: m8. Delivery: single PR, slices in order CP0 → CP1 → CP2 → CP4 →
   series / Cadence / Cycle section added. Engine nuance found by tests: a
   single-amount payee fits pass 1 → merged (None) matcher; amount scoping only
   exists when a shared payee forces it.
+- CP5 (#51): complete (4 tests in test_ledger_stats.py; TDD red→green; suite 601
+  green + ruff + ty). api/ledgers.py GET /api/v1/ledgers/current/stats:
+  transactions_total, classified (reviewed + unreviewed-with-proposal — empty
+  proposals count, the pipeline answered), unreviewed, unreviewed_by_provenance
+  (grouped count over unreviewed txns' proposals, all five provenance keys),
+  recurring_found (active series count), last_synced_at (max across connections,
+  null never-synced). Provenance split uses the CP0-verified traversed-where +
+  grouped-projection composition.
+- M8 COMPLETE: all 6 CPs on branch m8, suite 601 green, pushed as one PR
+  (closes #46–#51 at merge). Frontend follow-up: `just openapi-sync` (AccountOut
+  gained terms; new reports/recurring/payoff/stats endpoints).
