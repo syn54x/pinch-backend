@@ -104,7 +104,7 @@ def _surface(error: providers.ProviderError) -> Exception:
     return ClientException(detail=detail, status_code=HTTP_502_BAD_GATEWAY)
 
 
-async def _ledger_primary_currency(ledger: Ledger) -> str:
+async def ledger_primary_currency(ledger: Ledger) -> str:
     """The ledger's primary currency is its owner's (PRD #31): the fallback
     must not depend on which member happened to click connect."""
     owner = await LedgerMember.where(
@@ -205,7 +205,7 @@ async def create_connection(
         # sync backfills it opportunistically later.
         log.info("connection.institution_lookup_failed", code=error.code)
         institution_name = None
-    fallback_currency = await _ledger_primary_currency(current_ledger)
+    fallback_currency = await ledger_primary_currency(current_ledger)
     async with transaction():
         connection = await Connection.create(
             ledger=current_ledger,
