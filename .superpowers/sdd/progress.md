@@ -297,3 +297,21 @@ Branch: m8. Delivery: single PR, slices in order CP0 → CP1 → CP2 → CP4 →
   outflows as excluded remainder (whole parent amounts — lines never double it),
   month=YYYY-MM validated 400, as_of default for the month. ty note: Row projection
   fields need scoped ty:ignore[unresolved-attribute] at access sites.
+- CP4 (#50): complete (9 tests in test_debt_loans.py; TDD red→green; suite 584 green
+  + ruff + ty). models.py: five nullable terms columns on Account (apr percent float,
+  minimum_payment_minor, origination_date, origination_amount_minor account-signed
+  negative, maturity_date). accounts PATCH grew from label-only to AccountPatchIn
+  (present-field semantics, present-and-null clears; kind guard: loan=all five,
+  credit=apr+minimum, others none → 400). AccountOut gains nested terms (null until
+  any set; ACCOUNT_FIELDS updated in test_accounts_api). loans.py: observed_pace
+  (median of trailing 6 COMPLETE calendar months' inflow-transfer totals, zero months
+  count — a single payment yields pace 0 by design, test corrected to match spec),
+  simulate_payoff (monthly apr/1200 compounding, round-to-minor interest, payment ≤
+  interest OR >1200 months → never_pays_off with empty projections), add_months
+  day-clamping. GET /accounts/{id}/payoff (400 on non-debt kinds, extra_monthly>0
+  scenario vs at-pace, headline when both sims finite, payoff_percent from
+  origination). GET /reports/debt: per-loan rows via the same account_payoff
+  derivation, weighted APR balance-weighted, debt_free_by = max finite payoff,
+  excluded-count markers per aggregate, foreign-currency debt in excluded remainder.
+  Deploy note: this slice's schema lands via existing database_migrate_updates
+  setting (verified present in db.connect_database — no wiring needed).
