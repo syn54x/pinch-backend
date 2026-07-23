@@ -265,3 +265,25 @@ Branch: m7. Delivery: single PR, one slice at a time, human verification between
   smoke run by Taylor surfaced + fixed PRODUCT_NOT_READY (empty-cursor initial-pull state).
   Post-merge follow-ups filed/known: CLI domain command surface (story-31 debt, deliberate —
   pair with M10's published skill), CORS + typed-client enablers for the frontend repo.
+
+# M8 — the look-ahead engine (PRD #45, CP issues #46–#51)
+
+Branch: m8. Delivery: single PR, slices in order CP0 → CP1 → CP2 → CP4 → CP3 → CP5
+(CP3 recurring is the pre-flagged cut, second-to-last so cutting strands nothing).
+
+- CP0 (#46): complete (findings comment on issue; scratch scripts run against Postgres
+  and deleted). ALL capabilities PASS on ferro 0.17.1 — no gates, floor unchanged.
+  ferro#282 closed upstream (scope had shipped in 0.16.0 — stale issue state);
+  ferro#327 filed (PRD 0012, temporal trunc, NON-blocking); no latest-per-group PRD
+  (per-account seed queries acceptable, served by (account_id, as_of) index).
+  Deploy note for CP3/CP4: schema changes require migrate_updates=True (ADR-0010).
+  API learnings: descending = order_by(field, "desc"); raw reads = fetch_all.
+- CP1 (#47): complete (11 tests in test_reports_net_worth.py; TDD red→green; suite
+  567 green + ruff + ty). fx.py seam (no provider; same-currency=1, else None),
+  api/reports.py /api/v1/reports/net-worth: forward-filled compute-on-read series,
+  fixed-step buckets (1m/daily 30d, 6m/weekly 182d, 1y/weekly 365d, all/monthly
+  from first observation), kind-split totals, MTD + since-range-start deltas
+  (percent null-on-zero), OLS projection over observed buckets (horizon = range
+  length, null under 2 observed buckets), archived invisible, excluded remainder
+  per currency, as_of clock seam. connections.ledger_primary_currency promoted
+  public (was _-private, M7 owner-fallback semantics unchanged).
