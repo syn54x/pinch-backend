@@ -287,3 +287,13 @@ Branch: m8. Delivery: single PR, slices in order CP0 → CP1 → CP2 → CP4 →
   length, null under 2 observed buckets), archived invisible, excluded remainder
   per currency, as_of clock seam. connections.ledger_primary_currency promoted
   public (was _-private, M7 owner-fallback semantics unchanged).
+- CP2 (#48): complete (8 tests in test_reports_spending.py; TDD red→green; suite 575
+  green + ruff + ty). /api/v1/reports/spending: the PRD's one spending definition
+  (unsplit outflows by own category + outflow lines by theirs; transfers excluded by
+  existence, split parents excluded by their lines' existence; primary-currency
+  scoped), positive magnitudes, sparse by_day from GROUP BY date, Python hierarchy
+  rollup (uncategorized rolls to itself), previous-month block + per-category
+  previous/percent_change (null-on-zero) + total change delta, foreign-currency
+  outflows as excluded remainder (whole parent amounts — lines never double it),
+  month=YYYY-MM validated 400, as_of default for the month. ty note: Row projection
+  fields need scoped ty:ignore[unresolved-attribute] at access sites.
