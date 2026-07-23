@@ -24,6 +24,7 @@ ACCOUNT_FIELDS = {
     "manual",
     "archived",
     "balance",
+    "terms",
     "created_at",
 }
 BALANCE_ENTRY_FIELDS = {"id", "amount_minor", "currency", "as_of", "source", "created_at"}

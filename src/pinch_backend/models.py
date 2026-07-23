@@ -256,6 +256,18 @@ class Account(TimestampMixin, Model):
     """Provider display digits (···4821); absent for manual accounts."""
     archived: bool = False
     """Archive, don't delete: closed accounts keep their history."""
+    apr: float | None = None
+    """Loan terms (PRD M8 #45, CP4): five nullable scalars on the account —
+    no LoanTerms model. Hand-entered in v0 (Plaid liabilities deferred);
+    the API guards which kinds may carry which terms (loan: all five;
+    credit: apr + minimum only). ``apr`` is a percentage (4.9 = 4.9%)."""
+    minimum_payment_minor: int | None = None
+    """The contractual minimum, integer minor units, positive."""
+    origination_date: CalendarDate | None = None
+    origination_amount_minor: int | None = None
+    """Signed from the account's perspective like every amount: negative —
+    the loan's opening balance. Powers the payoff-percent ring."""
+    maturity_date: CalendarDate | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 

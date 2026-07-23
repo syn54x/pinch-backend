@@ -559,4 +559,133 @@ async def spending_report(
     )
 
 
-reports_router = Router(path="/api/v1/reports", route_handlers=[net_worth_report, spending_report])
+class DebtLoanRow(BaseModel):
+    """One debt account's observation row. ``payoff_date`` is the at-pace
+    projection — null when the loan lacks an APR/balance or never pays off
+    at the observed pace."""
+
+    id: uuid.UUID
+    label: str
+    kind: AccountKind
+    apr: float | None
+    balance_minor: int | None
+    minimum_payment_minor: int | None
+    pace_payment_minor: int
+    payoff_percent: float | None
+    payoff_date: date | None
+
+
+class DebtOut(BaseModel):
+    """The Debt screen's summary: total and count are always exact; every
+    partial aggregate names how many loans it excluded — partial data
+    annotates, never lies (PRD #45)."""
+
+    as_of: date
+    currency: str
+    total_debt_minor: int
+    loan_count: int
+    monthly_minimums_minor: int
+    minimums_excluded_count: int
+    weighted_apr: float | None
+    apr_excluded_count: int
+    debt_free_by: date | None
+    debt_free_excluded_count: int
+    loans: list[DebtLoanRow]
+    excluded: list[ExcludedBalance]
+
+
+@get("/debt")
+async def debt_report(
+    current_ledger: NamedDependency[Ledger],
+    as_of: Annotated[date | None, QueryParameter()] = None,
+) -> DebtOut:
+    """Every non-archived loan and credit account, observed and projected
+    through the same derivation as GET /accounts/{id}/payoff."""
+    from pinch_backend.api.accounts import account_payoff
+
+    as_of = as_of if as_of is not None else utcnow().date()
+    primary = await ledger_primary_currency(current_ledger)
+    ledger_id = current_ledger.id
+    debt_kinds = [AccountKind.LOAN, AccountKind.CREDIT]
+    accounts = await Account.where(
+        lambda a: (
+            (a.ledger_id == ledger_id)
+            & (a.archived == False)  # noqa: E712
+            & (a.kind.in_(debt_kinds))
+        )
+    ).all()
+
+    rows: list[DebtLoanRow] = []
+    excluded_totals: dict[str, int] = {}
+    total_debt = 0
+    minimums = 0
+    minimums_excluded = 0
+    apr_weight_total = 0.0
+    apr_balance_total = 0
+    apr_excluded = 0
+    payoff_dates: list[date] = []
+    debt_free_excluded = 0
+    for account in accounts:
+        payoff = await account_payoff(account, as_of, None)
+        if await get_rate(account.currency, primary, as_of) is None:
+            if payoff.balance_minor is not None:
+                excluded_totals[account.currency] = (
+                    excluded_totals.get(account.currency, 0) + payoff.balance_minor
+                )
+            continue
+        balance = payoff.balance_minor
+        total_debt += balance or 0
+        if account.minimum_payment_minor is not None:
+            minimums += account.minimum_payment_minor
+        else:
+            minimums_excluded += 1
+        if account.apr is not None and balance is not None:
+            apr_weight_total += account.apr * abs(balance)
+            apr_balance_total += abs(balance)
+        else:
+            apr_excluded += 1
+        at_pace = payoff.projections.at_pace if payoff.projections is not None else None
+        payoff_date = at_pace.payoff_date if at_pace is not None else None
+        if payoff_date is not None:
+            payoff_dates.append(payoff_date)
+        else:
+            debt_free_excluded += 1
+        rows.append(
+            DebtLoanRow(
+                id=account.id,
+                label=account.label,
+                kind=account.kind,
+                apr=account.apr,
+                balance_minor=balance,
+                minimum_payment_minor=account.minimum_payment_minor,
+                pace_payment_minor=payoff.pace_payment_minor,
+                payoff_percent=payoff.payoff_percent,
+                payoff_date=payoff_date,
+            )
+        )
+
+    return DebtOut(
+        as_of=as_of,
+        currency=primary,
+        total_debt_minor=total_debt,
+        loan_count=len(rows),
+        monthly_minimums_minor=minimums,
+        minimums_excluded_count=minimums_excluded,
+        weighted_apr=(
+            round(apr_weight_total / apr_balance_total, 4) if apr_balance_total else None
+        ),
+        apr_excluded_count=apr_excluded,
+        debt_free_by=max(payoff_dates) if payoff_dates else None,
+        debt_free_excluded_count=debt_free_excluded,
+        loans=rows,
+        excluded=[
+            ExcludedBalance(currency=currency, balance_minor=total)
+            for currency, total in sorted(excluded_totals.items())
+        ],
+    )
+
+
+reports_router = Router(
+    path="/api/v1/reports",
+    route_handlers=[net_worth_report, spending_report, debt_report],
+)
