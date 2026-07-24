@@ -34,23 +34,36 @@ class PennyDeps:
     CSRF material is needed or forwarded."""
 
 
-async def api_get(deps: PennyDeps, path: str, params: dict[str, Any] | None = None) -> Any:
-    """One in-process GET as the caller; parsed JSON on 2xx.
+async def api_request(
+    deps: PennyDeps,
+    method: str,
+    path: str,
+    *,
+    params: dict[str, Any] | None = None,
+    json_body: Any = None,
+) -> Any:
+    """One in-process request as the caller; parsed JSON on 2xx.
 
     Non-2xx raises ApiDeclined with the error envelope's ``detail`` — the
     API's own words, which are stable enough to display and therefore
-    stable enough for Penny to relay.
+    stable enough for Penny to relay. Write calls ride the same forwarded
+    credential; for session callers the CSRF pair is forwarded too (the
+    chat POST itself passed the check, so the material is at hand).
     """
     transport = httpx.ASGITransport(app=deps.app)
     async with httpx.AsyncClient(
         transport=transport, base_url=_SELF_CALL_BASE, headers=deps.auth_headers
     ) as client:
         filtered = {k: v for k, v in (params or {}).items() if v is not None}
-        response = await client.get(path, params=filtered)
+        response = await client.request(method, path, params=filtered, json=json_body)
     if response.is_success:
-        return response.json()
+        return response.json() if response.content else None
     try:
         detail = response.json().get("detail", response.reason_phrase)
     except ValueError:
         detail = response.reason_phrase
     raise ApiDeclined(f"The API declined this request: {detail} (HTTP {response.status_code})")
+
+
+async def api_get(deps: PennyDeps, path: str, params: dict[str, Any] | None = None) -> Any:
+    return await api_request(deps, "GET", path, params=params)

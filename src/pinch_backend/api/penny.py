@@ -22,9 +22,20 @@ from litestar.exceptions import (
 from litestar.params import FromPath
 from litestar.response import Stream
 from pydantic import BaseModel
-from pydantic_ai.messages import ModelMessagesTypeAdapter
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelMessagesTypeAdapter,
+    ModelRequest,
+    ModelResponse,
+    ToolCallPart,
+    ToolReturnPart,
+)
 from pydantic_ai.ui.vercel_ai import VercelAIAdapter
-from pydantic_ai.ui.vercel_ai.request_types import TextUIPart
+from pydantic_ai.ui.vercel_ai.request_types import (
+    DynamicToolApprovalRespondedPart,
+    TextUIPart,
+    ToolApprovalRespondedPart,
+)
 
 from pinch_backend.api.pagination import (
     DEFAULT_PAGE_LIMIT,
@@ -176,12 +187,65 @@ def _conversation_uuid(raw: str) -> uuid.UUID:
 def _caller_headers(request: Request) -> dict[str, str]:
     """The chatting caller's own credential, verbatim (PRD M9: tools run as
     the caller). Bearer wins when both are present — the guard's invariant,
-    mirrored so the self-call resolves the same principal."""
+    mirrored so the self-call resolves the same principal. Session callers
+    also get their CSRF pair forwarded: write tools make unsafe self-calls,
+    and the chat POST itself just passed the same check, so the material is
+    the caller's own."""
     authorization = request.headers.get("authorization", "")
     if authorization.split(" ", 1)[0].lower() == "bearer":
         return {"Authorization": authorization}
-    cookie = request.cookies.get(settings.session_cookie_name, "")
-    return {"Cookie": f"{settings.session_cookie_name}={cookie}"}
+    cookie_parts = [
+        f"{settings.session_cookie_name}={request.cookies.get(settings.session_cookie_name, '')}"
+    ]
+    headers: dict[str, str] = {}
+    if csrf_cookie := request.cookies.get("csrftoken"):
+        cookie_parts.append(f"csrftoken={csrf_cookie}")
+    if csrf_header := request.headers.get("x-csrftoken"):
+        headers["x-csrftoken"] = csrf_header
+    headers["Cookie"] = "; ".join(cookie_parts)
+    return headers
+
+
+_VERDICT_PARTS = (ToolApprovalRespondedPart, DynamicToolApprovalRespondedPart)
+
+
+def _is_pure_verdict(message) -> bool:
+    """An assistant message that only answers approvals. Its verdicts are
+    consumed via ``deferred_tool_results``; replaying it as history would
+    duplicate the tool-call response the server already holds."""
+    return message.role == "assistant" and all(
+        isinstance(part, _VERDICT_PARTS) for part in message.parts
+    )
+
+
+def _expire_dangling(history: list[ModelMessage], answered_ids: set[str]) -> list[ModelMessage]:
+    """Approvals are ephemeral (PRD M9): a stored transcript ending in
+    tool calls nobody answered means the stream died mid-approval. The
+    write never happened — materialize that as denied tool returns, so the
+    model can say so and no provider ever sees a dangling call."""
+    if not history or not isinstance(history[-1], ModelResponse):
+        return history
+    pending = [
+        part
+        for part in history[-1].parts
+        if isinstance(part, ToolCallPart) and part.tool_call_id not in answered_ids
+    ]
+    if not pending:
+        return history
+    return [
+        *history,
+        ModelRequest(
+            parts=[
+                ToolReturnPart(
+                    tool_name=part.tool_name,
+                    tool_call_id=part.tool_call_id,
+                    content="The approval expired unanswered; the action was never taken.",
+                    outcome="denied",
+                )
+                for part in pending
+            ]
+        ),
+    ]
 
 
 def _title_from(run_input) -> str | None:
@@ -235,6 +299,16 @@ async def penny_chat(
         accept=request.headers.get("accept"),
         sdk_version=6,
     )
+    # Order matters: reading deferred_tool_results caches the verdicts;
+    # only then are pure-verdict messages dropped from the run input (the
+    # adapter's messages property hasn't been computed yet). The verdicts
+    # answer tool calls the SERVER's history holds — the stored args are
+    # what execute, never the client's echo of them.
+    deferred = adapter.deferred_tool_results
+    if deferred is not None:
+        run_input.messages = [m for m in run_input.messages if not _is_pure_verdict(m)]
+    answered = set(deferred.approvals) if deferred is not None else set()
+    history = _expire_dangling(history, answered)
     deps = PennyDeps(app=request.app, auth_headers=_caller_headers(request))
 
     async def persist(result) -> None:

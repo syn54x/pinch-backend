@@ -422,3 +422,29 @@ Order: CP0 → CP1 ∥ CP3 → CP2 → CP4 → CP5 (CP5 mapping agent is the pre
   persistence semantics (approvals are ephemeral — decide what a deferred-ending
   run persists), conversation-delete under read+penny rank (blanket gate still
   requires WRITE for DELETE; acceptable, noted).
+- CP2 (#56): complete — writes & approvals (5 tests in test_penny_writes.py;
+  TDD red→green; suite 632 green + ruff + ty). bundles.py: write_bundle
+  Capability — recategorize_transaction / accept_review / create_rule /
+  mark_transfer / create_category, each Tool(requires_approval=True), each via
+  api_request (new generic self-call in deps.py). agents.py: chat_agent
+  composes read+write bundles, output_type=[str, DeferredToolRequests].
+  _caller_headers forwards the session caller's CSRF pair (csrftoken cookie +
+  x-csrftoken header) — the chat POST passed the same check, so the material
+  is the caller's own; bearer path unchanged. Approval flow (api/penny.py):
+  verdict messages (assistant, all parts approval-responded) are CONSUMED into
+  deferred_tool_results and dropped from run input — the server's stored
+  tool-call args execute, never the client's echo (tamper-proof by
+  construction); ordering matters: read adapter.deferred_tool_results (caches)
+  BEFORE filtering run_input.messages (adapter.messages not yet cached).
+  EXPIRY = _expire_dangling: stored history ending in unanswered
+  approval-required calls gets denied ToolReturnParts appended ("approval
+  expired unanswered; the action was never taken") before the run — no
+  provider ever sees a dangling tool_use, the write never happens, Penny says
+  so on resume, and the repair persists with the completed run. Approve/deny/
+  expire all asserted from the wire; accept_review actor=user in the
+  correction log BY CONSTRUCTION (same public endpoint as the inbox, caller's
+  credential); read+penny caller approving a write hears the API's 403
+  conversationally (tool returns the decline as its answer). Learned: on
+  resume, pydantic-ai merges the repair request + new user prompt into one
+  ModelRequest — scripts asserting expiry should look at returns anywhere in
+  the last request, not branch on message count.
