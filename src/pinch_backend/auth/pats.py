@@ -29,13 +29,16 @@ _TOUCH_GRANULARITY = timedelta(minutes=1)
 the list view's liveness signal doesn't need per-request UPDATEs."""
 
 
-async def issue_pat(user: User, *, name: str, scope: PatScope) -> tuple[PersonalAccessToken, str]:
+async def issue_pat(
+    user: User, *, name: str, scope: PatScope, penny: bool = False
+) -> tuple[PersonalAccessToken, str]:
     """Mint a PAT for ``user``; returns the row and the one-time secret."""
     token = generate_token(prefix=PAT_PREFIX)
     pat = await PersonalAccessToken.create(
         user=user,
         name=name,
         scope=scope,
+        penny_scope=penny,
         token_hash=token.token_hash,
         display_prefix=token.secret[: len(PAT_PREFIX) + _DISPLAY_CHARS],
     )

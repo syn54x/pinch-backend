@@ -45,6 +45,10 @@ class Credential:
     scope: PatScope
     """Sessions carry WRITE — a signed-in browser has the user's full
     power; scoping is what PATs add."""
+    penny: bool = False
+    """May this credential chat with Penny (PRD M9)? Sessions always may —
+    the browser chats with no extra ceremony; a PAT needs the explicit
+    penny grant because chat spends money."""
     session: Session | None = None
     """Set iff the cookie authenticated the request."""
     pat: PersonalAccessToken | None = None
@@ -84,6 +88,7 @@ async def provide_current_credential(request: Request) -> Credential:
         credential = Credential(
             user_id=pat.user_id,  # ty: ignore[unresolved-attribute]
             scope=pat.scope,
+            penny=pat.penny_scope,
             pat=pat,
         )
     else:
@@ -94,10 +99,18 @@ async def provide_current_credential(request: Request) -> Credential:
         credential = Credential(
             user_id=session.user_id,  # ty: ignore[unresolved-attribute]
             scope=PatScope.WRITE,
+            penny=True,
             session=session,
         )
     if credential.scope is not PatScope.WRITE and request.method not in SAFE_METHODS:
-        raise PermissionDeniedException(detail="This token does not permit write operations")
+        # A route may declare the penny grant as its gate instead of the
+        # write rank (PRD M9): POST /penny/chat is a conversation, not a
+        # domain write — a read+penny token yields a read-only Penny, and
+        # requiring WRITE here would hand every chat token the whole write
+        # surface. The handler still enforces the penny grant itself.
+        handler = request.scope.get("route_handler")
+        if not (handler is not None and handler.opt.get("penny_gated")):
+            raise PermissionDeniedException(detail="This token does not permit write operations")
     return credential
 
 

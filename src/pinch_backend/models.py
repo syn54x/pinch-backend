@@ -186,6 +186,7 @@ class Ledger(TimestampMixin, Model):
     split_lines: Relation[list["SplitLine"]] = BackRef()
     transfers: Relation[list["Transfer"]] = BackRef()
     recurring_series: Relation[list["RecurringSeries"]] = BackRef()
+    conversations: Relation[list["Conversation"]] = BackRef()
 
 
 class User(TimestampMixin, Model):
@@ -862,6 +863,28 @@ class CorrectionLogEntry(TimestampMixin, Model):
     """The entry this one retracts — a bare id, same reasoning as
     transaction_id."""
     void_reason: str | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class Conversation(TimestampMixin, Model):
+    """A persistent, ledger-owned chat thread with Penny (CONTEXT.md:
+    Conversation; PRD M9 CP1). The server's record is authoritative:
+    clients contribute new messages via POST /penny/chat, never rewrite
+    history — the whole transcript is persisted on each completed run.
+
+    ``messages`` is pydantic-ai's native message JSON, round-tripped
+    losslessly through JSONB (CP0-verified); the UI rendering (Vercel AI
+    format) is derived at read time, never stored. ``id`` is client-minted
+    UUIDv7 (the chat protocol's conversation id), so list order stays
+    creation order under the id-keyset pagination convention.
+    """
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    ledger: Annotated[Ledger, ForeignKey(related_name="conversations", index=True)]
+    title: str | None = None
+    """First user message, truncated — the conversation list's label."""
+    messages: list[dict] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 

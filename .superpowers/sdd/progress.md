@@ -391,3 +391,34 @@ Order: CP0 → CP1 ∥ CP3 → CP2 → CP4 → CP5 (CP5 mapping agent is the pre
      (anthropic, openai, ...). Operator action: rename the console routes; code
      stays gateway-ignorant (gateway_provider(..., route=...) rejected — Pinch
      code never knows the gateway exists).
+- CP1 (#55): complete — chat core, read-only (26 new tests across
+  test_penny_{status,conversations,bundle,chat}.py + settings/PAT additions;
+  TDD red→green per slice; suite 627 green + ruff + ty). settings: ai_chat_model /
+  ai_categorization_model / ai_mapping_model knobs (empty = disabled); conftest
+  blanks all AI knobs AND pops gateway/anthropic keys — keyless is the tested
+  baseline. Scopes: PatScope.PENNY is a wire value only; the rank column stays
+  READ/WRITE and PAT grows penny_scope bool (orthogonal, never widens the rank;
+  sessions always penny). GUARD CHANGE: routes may declare opt penny_gated=True
+  to swap the blanket write-rank gate for the penny gate — POST /penny/chat is a
+  conversation, not a domain write; requiring WRITE would hand every chat token
+  the whole write surface (least-privilege argument, recorded in guards.py).
+  Conversation model: client-minted UUIDv7 pk (enforced, 400 otherwise — keeps
+  id-keyset creation order), ledger FK + BackRef, title (first user text, 80
+  chars, set once), messages JSONB (pydantic-ai native; UI rendering derived at
+  read via dump_messages sdk_version=6). pagination.py grew paginate_desc
+  (newest-first id keyset). penny/ package: availability.py (per-agent, reason =
+  infer_model's own complaint, so missing-key reporting can't drift),
+  deps.py (PennyDeps + api_get raising ApiDeclined w/ error-envelope detail),
+  bundles.py (read_bundle Capability: 10 tools, _relay_declines decorator makes
+  4xx the tool's honest string answer, _all_pages caps at 4 pages), prompts.py
+  (v1: grounding + minor-units + relay-declines + read-only), agents.py
+  (chat_agent built model-less; model resolved per run from the knob).
+  api/penny.py: status (credentialed, per-agent map), conversations
+  list/get/delete (ownership-404), chat (503+reason keyless; penny 403;
+  server-authoritative history; persist-on-complete inside the stream — ferro
+  session middleware spans response streaming, so on_complete just works;
+  foreign-uuid7 collision answers 404 and never appends). Deferred to CP2:
+  DeferredToolRequests in chat output_type (no write tools yet), approval-run
+  persistence semantics (approvals are ephemeral — decide what a deferred-ending
+  run persists), conversation-delete under read+penny rank (blanket gate still
+  requires WRITE for DELETE; acceptable, noted).

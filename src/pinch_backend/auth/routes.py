@@ -117,8 +117,10 @@ class PatCreateIn(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     """User-chosen label; display-only, never unique."""
     scopes: list[PatScope] = Field(min_length=1)
-    """The requested grant. Write implies read (PRD M3): the stored scope
-    is the strongest one requested, and responses render the full grant."""
+    """The requested grant. Write implies read (PRD M3): the stored rank
+    is the strongest one requested, and responses render the full grant.
+    ``penny`` (PRD M9) is orthogonal — granted iff requested, and never
+    widens the rank: a penny-only token reads."""
 
 
 class PatOut(BaseModel):
@@ -311,10 +313,14 @@ async def revoke_session(
     log.info("auth.session.revoked", user_id=str(user_id), session_id=str(session_id))
 
 
-def _scopes_out(scope: PatScope) -> list[PatScope]:
-    """Render the stored rank as the full grant: write implies read, and
-    the wire format stays a list so per-resource scopes later are additive."""
-    return [PatScope.READ, PatScope.WRITE] if scope is PatScope.WRITE else [PatScope.READ]
+def _scopes_out(scope: PatScope, penny: bool) -> list[PatScope]:
+    """Render the stored grant as the full list: write implies read, and
+    penny appears iff its flag is set — the wire format stays a list so
+    further orthogonal scopes are additive."""
+    scopes = [PatScope.READ, PatScope.WRITE] if scope is PatScope.WRITE else [PatScope.READ]
+    if penny:
+        scopes.append(PatScope.PENNY)
+    return scopes
 
 
 @post("/pats")
@@ -331,12 +337,19 @@ async def create_pat(data: PatCreateIn, current_session: NamedDependency[Session
         window=settings.auth_rate_limit_window,
     )
     scope = PatScope.WRITE if PatScope.WRITE in data.scopes else PatScope.READ
-    pat, secret = await issue_pat(user, name=data.name, scope=scope)
-    log.info("auth.pat.created", user_id=str(user.id), pat_id=str(pat.id), scope=scope.value)
+    penny = PatScope.PENNY in data.scopes
+    pat, secret = await issue_pat(user, name=data.name, scope=scope, penny=penny)
+    log.info(
+        "auth.pat.created",
+        user_id=str(user.id),
+        pat_id=str(pat.id),
+        scope=scope.value,
+        penny=penny,
+    )
     return PatCreatedOut(
         id=pat.id,
         name=pat.name,
-        scopes=_scopes_out(pat.scope),
+        scopes=_scopes_out(pat.scope, pat.penny_scope),
         display_prefix=pat.display_prefix,
         created_at=pat.created_at,
         last_used_at=pat.last_used_at,
@@ -361,7 +374,7 @@ async def list_pats(
             PatOut(
                 id=p.id,
                 name=p.name,
-                scopes=_scopes_out(p.scope),
+                scopes=_scopes_out(p.scope, p.penny_scope),
                 display_prefix=p.display_prefix,
                 created_at=p.created_at,
                 last_used_at=p.last_used_at,
