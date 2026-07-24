@@ -1,0 +1,45 @@
+- generic [ref=f3e3]:
+  - complementary [ref=f3e4]:
+    - generic [ref=f3e5]: Pinch
+    - navigation "Primary" [ref=f3e8]:
+      - link "Inbox" [ref=f3e9] [cursor=pointer]:
+        - /url: /inbox
+      - link "Register" [ref=f3e13] [cursor=pointer]:
+        - /url: /register
+      - link "Accounts" [ref=f3e15] [cursor=pointer]:
+        - /url: /accounts
+      - generic [ref=f3e18]: Setup
+      - link "Connections" [ref=f3e19] [cursor=pointer]:
+        - /url: /connections
+    - generic [ref=f3e26]:
+      - paragraph [ref=f3e27]: smoke-cp1
+      - paragraph [ref=f3e28]: smoke-cp1@e2e.pinchapp.dev
+  - generic [ref=f3e29]:
+    - banner [ref=f3e30]:
+      - heading "Register" [level=1] [ref=f3e31]
+      - generic [ref=f3e32]:
+        - 'button "Theme: dark. Switch to system." [ref=f3e33]'
+        - button "Log out" [ref=f3e34]
+    - status [ref=f3e35]:
+      - generic [ref=f3e36]: Verify your email — we sent a confirmation link to smoke-cp1@e2e.pinchapp.dev.
+      - generic [ref=f3e37]:
+        - button "Resend" [ref=f3e38]
+        - button "Dismiss" [ref=f3e39]
+    - main [ref=f3e40]:
+      - generic [ref=f3e41]:
+        - generic [ref=f3e42]:
+          - searchbox "Search transactions" [ref=f3e43]
+          - 'button "Account: All accounts" [ref=f3e44]':
+            - generic [ref=f3e45]: All accounts
+          - 'button "Category: Category" [ref=f3e48]':
+            - generic [ref=f3e49]: Category
+          - 'button "Date: All dates" [ref=f3e52]':
+            - generic [ref=f3e53]: All dates
+          - 'button "Tag: Tag" [ref=f3e56]':
+            - generic [ref=f3e57]: Tag
+        - generic [ref=f3e60]:
+          - generic [ref=f3e62]:
+            - generic [ref=f3e63]: Payee
+            - generic [ref=f3e64]: Category
+            - generic [ref=f3e65]: Amount
+          - generic [ref=f3e75]: Transaction

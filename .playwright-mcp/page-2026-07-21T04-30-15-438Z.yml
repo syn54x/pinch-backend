@@ -1,0 +1,26 @@
+- generic [ref=f2e18]:
+  - banner [ref=f2e19]:
+    - generic [ref=f2e20]:
+      - generic [ref=f2e21]: Pinch
+      - navigation [ref=f2e22]:
+        - link "Accounts" [ref=f2e23] [cursor=pointer]:
+          - /url: /accounts
+        - link "Connections" [ref=f2e24] [cursor=pointer]:
+          - /url: /connections
+    - generic [ref=f2e25]:
+      - 'button "Theme: dark. Switch to system." [ref=f2e26]'
+      - button "Log out" [ref=f2e27]
+  - status [ref=f2e28]:
+    - generic [ref=f2e29]: Verify your email — we sent a confirmation link to impeccable-preview@example.com.
+    - generic [ref=f2e30]:
+      - button "Resend" [ref=f2e31]
+      - button "Dismiss" [ref=f2e32]
+  - main [ref=f2e33]:
+    - generic [ref=f2e34]:
+      - heading "Accounts" [level=1] [ref=f2e35]
+      - generic [ref=f2e38]:
+        - paragraph [ref=f2e39]: No accounts yet
+        - paragraph [ref=f2e40]:
+          - link "Connect a bank" [ref=f2e41] [cursor=pointer]:
+            - /url: /connections
+          - text: or import data with the Pinch CLI to get started.

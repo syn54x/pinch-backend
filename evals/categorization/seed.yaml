@@ -1,0 +1,268 @@
+# Categorization seed set (M9 CP3, #57): synthetic/curated cases against
+# the DEFAULT_TAXONOMY answer set. Versioned and PR-reviewed like tests —
+# every case change is a review comment away from being argued with.
+# expected_output null means "the honest answer is to abstain".
+cases:
+  - name: blue-bottle-coffee
+    inputs:
+      payee: blue bottle coffee
+      description: BLUE BOTTLE COFFEE OAK-3
+      amount_minor: -1850
+      currency: USD
+      date: "2026-07-01"
+      account_label: Checking
+      account_kind: depository
+    expected_output: Food & Drink > Coffee
+  - name: whole-foods
+    inputs:
+      payee: whole foods market
+      description: WHOLEFDS MKT #10234 BERKELEY CA
+      amount_minor: -12734
+      currency: USD
+      date: "2026-07-02"
+      account_label: Checking
+      account_kind: depository
+    expected_output: Food & Drink > Groceries
+  - name: chipotle
+    inputs:
+      payee: chipotle
+      description: CHIPOTLE 2280 SAN FRANCISCO
+      amount_minor: -1425
+      currency: USD
+      date: "2026-07-02"
+      account_label: Sapphire Card
+      account_kind: credit
+    expected_output: Food & Drink > Restaurants
+  - name: shell-gas
+    inputs:
+      payee: shell oil
+      description: SHELL OIL 57444291600 QPS
+      amount_minor: -6210
+      currency: USD
+      date: "2026-07-03"
+      account_label: Sapphire Card
+      account_kind: credit
+    expected_output: Transportation > Gas
+  - name: fastrak-tolls
+    inputs:
+      payee: fastrak csc
+      description: FASTRAK CSC PAYMENT
+      amount_minor: -2500
+      currency: USD
+      date: "2026-07-03"
+      account_label: Checking
+      account_kind: depository
+    expected_output: Transportation > Parking & Tolls
+  - name: bart-transit
+    inputs:
+      payee: bart clipper
+      description: CLIPPER SYSTEMS BART
+      amount_minor: -640
+      currency: USD
+      date: "2026-07-05"
+      account_label: Checking
+      account_kind: depository
+    expected_output: Transportation > Public Transit
+  - name: uber-ride
+    inputs:
+      payee: uber trip
+      description: UBER *TRIP HELP.UBER.COM
+      amount_minor: -2340
+      currency: USD
+      date: "2026-07-05"
+      account_label: Sapphire Card
+      account_kind: credit
+    expected_output: Transportation > Auto & Ride Share
+  - name: payroll
+    inputs:
+      payee: acme corp payroll
+      description: ACME CORP DIR DEP PAYROLL
+      amount_minor: 421337
+      currency: USD
+      date: "2026-07-15"
+      account_label: Checking
+      account_kind: depository
+    expected_output: Income > Paycheck
+  - name: interest-payment
+    inputs:
+      payee: interest payment
+      description: INTEREST PAYMENT
+      amount_minor: 512
+      currency: USD
+      date: "2026-07-31"
+      account_label: High Yield Savings
+      account_kind: depository
+    expected_output: Income > Interest
+  - name: rent
+    inputs:
+      payee: bay property management
+      description: BAY PROPERTY MGMT RENT JUL
+      amount_minor: -285000
+      currency: USD
+      date: "2026-07-01"
+      account_label: Checking
+      account_kind: depository
+    expected_output: Housing > Rent & Mortgage
+  - name: pge-utilities
+    inputs:
+      payee: pgande
+      description: PGANDE WEB ONLINE PAYMENT
+      amount_minor: -14380
+      currency: USD
+      date: "2026-07-08"
+      account_label: Checking
+      account_kind: depository
+    expected_output: Housing > Utilities
+  - name: home-depot
+    inputs:
+      payee: home depot
+      description: THE HOME DEPOT #0621
+      amount_minor: -8945
+      currency: USD
+      date: "2026-07-12"
+      account_label: Sapphire Card
+      account_kind: credit
+    expected_output: Housing > Home Improvement
+  - name: netflix
+    inputs:
+      payee: netflix
+      description: NETFLIX.COM 866-579-7172
+      amount_minor: -1549
+      currency: USD
+      date: "2026-07-04"
+      account_label: Sapphire Card
+      account_kind: credit
+    expected_output: Entertainment > Streaming
+  - name: comcast-internet
+    inputs:
+      payee: comcast
+      description: COMCAST CABLE COMM
+      amount_minor: -8999
+      currency: USD
+      date: "2026-07-06"
+      account_label: Checking
+      account_kind: depository
+    expected_output: Bills & Subscriptions > Internet
+  - name: verizon-phone
+    inputs:
+      payee: verizon wireless
+      description: VZWRLSS*APOCC VISB
+      amount_minor: -7024
+      currency: USD
+      date: "2026-07-06"
+      account_label: Checking
+      account_kind: depository
+    expected_output: Bills & Subscriptions > Phone
+  - name: github-software
+    inputs:
+      payee: github
+      description: GITHUB, INC. HTTPSGITHUB.C
+      amount_minor: -400
+      currency: USD
+      date: "2026-07-09"
+      account_label: Sapphire Card
+      account_kind: credit
+    expected_output: Bills & Subscriptions > Software
+  - name: cvs-pharmacy
+    inputs:
+      payee: cvs pharmacy
+      description: CVS/PHARMACY #09876
+      amount_minor: -2311
+      currency: USD
+      date: "2026-07-10"
+      account_label: Sapphire Card
+      account_kind: credit
+    expected_output: Health > Pharmacy
+  - name: equinox-gym
+    inputs:
+      payee: equinox
+      description: EQUINOX MOTO ACH
+      amount_minor: -21500
+      currency: USD
+      date: "2026-07-01"
+      account_label: Checking
+      account_kind: depository
+    expected_output: Health > Fitness
+  - name: united-flight
+    inputs:
+      payee: united airlines
+      description: UNITED 0162341776068
+      amount_minor: -48920
+      currency: USD
+      date: "2026-07-18"
+      account_label: Sapphire Card
+      account_kind: credit
+    expected_output: Travel > Flights
+  - name: marriott-lodging
+    inputs:
+      payee: marriott
+      description: MARRIOTT SLC DOWNTOWN
+      amount_minor: -38804
+      currency: USD
+      date: "2026-07-19"
+      account_label: Sapphire Card
+      account_kind: credit
+    expected_output: Travel > Lodging
+  - name: uniqlo-clothing
+    inputs:
+      payee: uniqlo
+      description: UNIQLO USA LLC
+      amount_minor: -7980
+      currency: USD
+      date: "2026-07-20"
+      account_label: Sapphire Card
+      account_kind: credit
+    expected_output: Shopping > Clothing
+  - name: overdraft-fee
+    inputs:
+      payee: overdraft fee
+      description: OVERDRAFT ITEM FEE
+      amount_minor: -3500
+      currency: USD
+      date: "2026-07-21"
+      account_label: Checking
+      account_kind: depository
+    expected_output: Fees & Charges
+  # Honest-abstain cases: a confident answer here is the failure mode.
+  - name: ambiguous-paypal
+    inputs:
+      payee: paypal
+      description: PAYPAL *8127349 WEB
+      amount_minor: -4200
+      currency: USD
+      date: "2026-07-11"
+      account_label: Checking
+      account_kind: depository
+    expected_output: null
+  - name: ambiguous-venmo
+    inputs:
+      payee: venmo
+      description: VENMO PAYMENT 1029384756
+      amount_minor: -11500
+      currency: USD
+      date: "2026-07-13"
+      account_label: Checking
+      account_kind: depository
+    expected_output: null
+  - name: ambiguous-check
+    inputs:
+      payee: check
+      description: CHECK #1044
+      amount_minor: -30000
+      currency: USD
+      date: "2026-07-14"
+      account_label: Checking
+      account_kind: depository
+    expected_output: null
+  - name: ambiguous-amazon
+    inputs:
+      payee: amazon
+      description: AMAZON MKTPL*RT4Y82 AMZN.COM
+      amount_minor: -3267
+      currency: USD
+      date: "2026-07-16"
+      account_label: Sapphire Card
+      account_kind: credit
+    expected_output: null
+evaluators:
+  - CategoryScore

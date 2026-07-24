@@ -1,0 +1,21 @@
+- generic [ref=f12e3]:
+  - banner [ref=f12e4]:
+    - generic [ref=f12e5]:
+      - generic [ref=f12e6]: Pinch
+      - navigation [ref=f12e7]:
+        - link "Accounts" [ref=f12e8] [cursor=pointer]:
+          - /url: /accounts
+        - link "Connections" [ref=f12e9] [cursor=pointer]:
+          - /url: /connections
+    - generic [ref=f12e10]:
+      - 'button "Theme: dark. Switch to system." [ref=f12e11]'
+      - button "Log out" [ref=f12e12]
+  - status [ref=f12e13]:
+    - generic [ref=f12e14]: Verify your email — we sent a confirmation link to impeccable-preview@example.com.
+    - generic [ref=f12e15]:
+      - button "Resend" [ref=f12e16]
+      - button "Dismiss" [ref=f12e17]
+  - main [ref=f12e18]:
+    - generic [ref=f12e20]:
+      - heading "Connections" [level=1] [ref=f12e21]
+      - button "Connect bank" [ref=f12e23]

@@ -3,7 +3,7 @@
 import uuid
 from datetime import UTC, date, datetime
 
-from pinch_backend.classification.classifier import AbstainingClassifier, active_classifier
+from pinch_backend.classification.classifier import active_classifier
 from pinch_backend.classification.history import history_match
 from pinch_backend.models import (
     Account,
@@ -86,8 +86,13 @@ async def test_history_is_ledger_scoped(db) -> None:
     assert await history_match(uuid.uuid7(), "starbucks") is None
 
 
-async def test_v0_classifier_deterministically_abstains(db) -> None:
+async def test_keyless_classifier_deterministically_abstains(db) -> None:
+    """M9 CP3 swapped Penny in behind the seam; keyless (the suite's
+    baseline) still abstains deterministically without touching a model —
+    the v0 abstainer's contract, preserved."""
+    from pinch_backend.penny.categorization import PennyClassifier
+
     ledger, account, _ = await _seed(db)
     txn = await _txn(ledger, account, "mystery merchant")
-    assert isinstance(active_classifier, AbstainingClassifier)
+    assert isinstance(active_classifier, PennyClassifier)
     assert await active_classifier.classify(txn) is None

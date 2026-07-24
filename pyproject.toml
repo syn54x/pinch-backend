@@ -54,6 +54,7 @@ dev = [
     "mkdocstrings-python>=1.16",
     "pymdown-extensions>=10.7",
     "httpx>=0.28",
+    "pydantic-evals>=2.7.0",
 ]
 
 [tool.ruff]

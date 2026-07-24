@@ -448,3 +448,27 @@ Order: CP0 → CP1 ∥ CP3 → CP2 → CP4 → CP5 (CP5 mapping agent is the pre
   resume, pydantic-ai merges the repair request + new user prompt into one
   ModelRequest — scripts asserting expiry should look at returns anywhere in
   the last request, not branch on message count.
+- CP3 (#57): complete — evals harness + categorization agent (10 tests across
+  test_penny_categorization.py + test_penny_evals.py; TDD red→green; suite 642
+  green + ruff + ty). penny/categorization.py: Categorization output
+  ({category_path: str|null}, no confidence), output_validator draws ModelRetry
+  naming the hallucinated path, PennyClassifier fills the M5 seam (keyless /
+  empty-taxonomy / exhausted-retries / provider-error ALL → abstain);
+  active_classifier = PennyClassifier() — provenance=ai reachable, CI keyless
+  baseline abstains without constructing a model (test pinned).
+  format_prompt shared between classifier and harness so measured ≡ production.
+  penny/evals.py: CategoryScore (exact 1.0 > ancestor 0.5 > abstain 0.25 >
+  wrong 0.0; expected-null scores only an abstain) returning rate flags
+  (exact/abstained/wrong become report columns); seed dataset
+  evals/categorization/seed.yaml (26 cases incl. 4 curated abstains);
+  correction-log exporter (actor=USER, kind=DECISION, voided excluded,
+  split/transfer decisions excluded, uncategorized accepts become abstain
+  cases, expected as full path via live taxonomy). cli: pinch-dev evals
+  run/export (run instruments pydantic-ai for cost, reports Logfire experiment;
+  export target evals/exports/ gitignored). BASELINE (recorded on #57):
+  gateway/anthropic:claude-haiku-4-5, 26 cases — mean 0.923, exact 92.3%,
+  abstain 0%, wrong 7.7% (uber-ride → Travel > Rideshare vs Transportation >
+  Auto & Ride Share — the taxonomy genuinely contains both, case pins the
+  convention; ambiguous-amazon → Shopping vs curated abstain). ~$0.0014/case,
+  ~1.7s/case. Improvement law in effect. ty gotcha: Agent(output_type=...)
+  doesn't thread the generic — annotate + scoped ignore.

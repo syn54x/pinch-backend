@@ -1,0 +1,36 @@
+- generic [ref=f4e19]:
+  - complementary [ref=f4e20]:
+    - generic [ref=f4e21]: Pinch
+    - navigation "Primary" [ref=f4e24]:
+      - link "Inbox 7" [ref=f4e25] [cursor=pointer]:
+        - /url: /inbox
+        - text: Inbox
+        - generic [ref=f4e29]: "7"
+      - link "Register" [ref=f4e30] [cursor=pointer]:
+        - /url: /register
+      - link "Accounts" [ref=f4e32] [cursor=pointer]:
+        - /url: /accounts
+      - generic [ref=f4e35]: Setup
+      - link "Connections" [ref=f4e36] [cursor=pointer]:
+        - /url: /connections
+    - generic [ref=f4e43]:
+      - paragraph [ref=f4e44]: smoke
+      - paragraph [ref=f4e45]: smoke@pinchapp.dev
+  - generic [ref=f4e46]:
+    - banner [ref=f4e47]:
+      - heading "Accounts" [level=1] [ref=f4e48]
+      - generic [ref=f4e49]:
+        - 'button "Theme: system. Switch to light." [ref=f4e50]'
+        - button "Log out" [ref=f4e51]
+    - status [ref=f4e52]:
+      - generic [ref=f4e53]: Verify your email — we sent a confirmation link to smoke@pinchapp.dev.
+      - generic [ref=f4e54]:
+        - button "Resend" [ref=f4e55]
+        - button "Dismiss" [ref=f4e56]
+    - main [ref=f4e57]:
+      - generic [ref=f4e61]:
+        - generic [ref=f4e62]:
+          - generic [ref=f4e63]: Everyday Checking
+          - generic [ref=f4e64]: depository
+          - generic [ref=f4e65]: manual
+        - generic [ref=f4e66]: No balance yet
