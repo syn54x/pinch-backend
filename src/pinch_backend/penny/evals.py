@@ -35,6 +35,14 @@ ABSTAINED = 0.25
 WRONG = 0.0
 
 
+def _record(errors: list[str] | None, model: str, exc: Exception) -> None:
+    """The model string travels with the message: the usual cause is the
+    route itself (unknown identifier, credential absent from the process
+    environment), and that is what the reader needs to see."""
+    if errors is not None:
+        errors.append(f"{model}: {type(exc).__name__}: {exc}")
+
+
 def default_taxonomy_paths() -> list[str]:
     """The seed dataset's answer set: the starter taxonomy every new ledger
     gets, as full paths."""
@@ -79,9 +87,16 @@ def load_dataset(agent: str) -> Dataset:
     )
 
 
-def categorization_task(model: str):
+def categorization_task(model: str, errors: list[str] | None = None):
     """The measured task IS the production shape: same agent, same prompt
-    builder, same degrade-to-abstain on exhausted retries."""
+    builder, same degrade-to-abstain on exhausted retries.
+
+    ``errors`` is an optional sink for the exceptions that degradation
+    swallows. Production wants the silent abstain; a run wants to know
+    that 26/26 abstains came from a broken route rather than from
+    calibration — an abstain *scores*, so without this a misconfigured
+    experiment reads as a real (if poor) number instead of a no-op.
+    Recording the cause never changes what is scored."""
 
     async def task(inputs: dict) -> str | None:
         paths = inputs.get("taxonomy") or default_taxonomy_paths()
@@ -97,7 +112,8 @@ def categorization_task(model: str):
         )
         try:
             result = await categorization_agent.run(prompt, deps=frozenset(paths), model=model)
-        except Exception:
+        except Exception as exc:
+            _record(errors, model, exc)
             return None
         return result.output.category_path
 
@@ -143,11 +159,13 @@ class MappingScore(Evaluator[dict, "dict | None", Any]):
         }
 
 
-def mapping_task(model: str):
+def mapping_task(model: str, errors: list[str] | None = None):
     """The measured leg IS the production agent leg of PennyInferrer: same
     agent, same bounded sample, same degrade-to-no-suggestion. The
     heuristic is deliberately absent — the dataset holds only shapes it
-    abstains on (pinned by a hygiene test), so this measures Penny."""
+    abstains on (pinned by a hygiene test), so this measures Penny.
+
+    ``errors`` is the same optional sink ``categorization_task`` takes."""
     from pinch_backend.penny.mapping import bounded_sample, mapping_agent
 
     async def task(inputs: dict) -> dict | None:
@@ -156,7 +174,8 @@ def mapping_task(model: str):
             result = await mapping_agent.run(
                 f"Map this bank-export sample:\n\n{sample}", deps=sample, model=model
             )
-        except Exception:
+        except Exception as exc:
+            _record(errors, model, exc)
             return None
         return result.output.model_dump()
 

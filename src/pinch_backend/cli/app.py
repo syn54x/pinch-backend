@@ -27,6 +27,26 @@ evals_app = App(
 app.command(evals_app)
 
 
+def _warn_on_errors(errors: list[str], total: int) -> None:
+    """Degrading to an abstain is the production shape, and an abstain
+    scores — so a route that never reached the provider prints a plausible
+    number instead of nothing. Say so, loudly, after the table: the reader
+    is looking at scores, and the whole point is that the scores look
+    fine. Distinct causes only; a broken route repeats one message per
+    case."""
+    import sys
+
+    if not errors:
+        return
+    print(
+        f"\nwarning: {len(errors)}/{total} case(s) errored and were scored as abstains "
+        "— these numbers are not a quality result:",
+        file=sys.stderr,
+    )
+    for message in list(dict.fromkeys(errors))[:3]:
+        print(f"  {message}", file=sys.stderr)
+
+
 @evals_app.command
 def run(agent: str = "categorization", *, model: str | None = None) -> None:
     """Run AGENT's committed dataset against its configured model (or
@@ -57,10 +77,19 @@ def run(agent: str = "categorization", *, model: str | None = None) -> None:
         """categorization and mapping run on text alone — no database."""
         from pinch_backend.penny.evals import categorization_task, load_dataset, mapping_task
 
-        task = mapping_task(resolved) if agent == "mapping" else categorization_task(resolved)
+        errors: list[str] = []
+        task = (
+            mapping_task(resolved, errors)
+            if agent == "mapping"
+            else categorization_task(resolved, errors)
+        )
         dataset = load_dataset(agent)
         report = await dataset.evaluate(task, name=f"{agent}:{resolved}")
-        report.print(include_input=False, include_output=True)
+        # Expected beside output: a score column alone says a case failed,
+        # not what the model actually answered — the first thing you want
+        # when reading a regression.
+        report.print(include_input=False, include_expected_output=True, include_output=True)
+        _warn_on_errors(errors, len(dataset.cases))
 
     async def _run_chat() -> None:
         """Chat golden tasks run the real capability stack: a throwaway
