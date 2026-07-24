@@ -29,8 +29,15 @@ def pytest_configure() -> None:
     os.environ["PINCH_AI_CHAT_MODEL"] = ""
     os.environ["PINCH_AI_CATEGORIZATION_MODEL"] = ""
     os.environ["PINCH_AI_MAPPING_MODEL"] = ""
-    os.environ.pop("PYDANTIC_AI_GATEWAY_API_KEY", None)
-    os.environ.pop("ANTHROPIC_API_KEY", None)
+    # Empty, not popped: settings.py loads .env onto os.environ at import,
+    # which happens when the first test module imports the app — after this
+    # hook. Absence is therefore not durable (the file would refill it);
+    # an empty value is, because dotenv leaves set keys alone. Every
+    # provider reads the key as `key or getenv(...)`, so "" is as
+    # unconfigured as missing, and the error still names the variable.
+    os.environ["PYDANTIC_AI_GATEWAY_API_KEY"] = ""
+    os.environ["ANTHROPIC_API_KEY"] = ""
+    os.environ["OPENAI_API_KEY"] = ""
     # Same hermetic stance for the cookie flag: developer .envs flip it off
     # for plain-http Safari dev; the suite tests the secure default.
     os.environ["PINCH_SESSION_COOKIE_SECURE"] = "true"

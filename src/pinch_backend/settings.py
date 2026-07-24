@@ -2,8 +2,24 @@ import secrets
 from datetime import timedelta
 from typing import Literal
 
+from dotenv import load_dotenv
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# .env onto the process environment, not just onto Settings. Some
+# credentials are deliberately not Pinch settings: pydantic-ai reads the
+# provider key (ANTHROPIC_API_KEY, PYDANTIC_AI_GATEWAY_API_KEY) straight
+# from os.environ, as does logfire (LOGFIRE_TOKEN) — the instance
+# configures *which model*, never the credential (M9). pydantic-settings
+# fills this class from .env and never touches the environment, so those
+# keys reached the process only when something else exported them; `just`
+# recipes do (`set dotenv-load := true`), a bare `uv run pinch-dev` did
+# not, and a missing key degrades to an abstain that still scores.
+# The path is explicit: bare load_dotenv() resolves via find_dotenv(),
+# which walks up from the calling module's directory and would disagree
+# with env_file below about which file it means. override=False keeps the
+# shell ahead of the file, the precedence pydantic-settings already uses.
+load_dotenv(".env", override=False)
 
 
 class Settings(BaseSettings):
