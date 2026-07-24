@@ -41,6 +41,7 @@ def run(agent: str = "categorization", *, model: str | None = None) -> None:
     knobs = {
         "categorization": settings.ai_categorization_model,
         "chat": settings.ai_chat_model,
+        "mapping": settings.ai_mapping_model,
     }
     if agent not in knobs:
         raise SystemExit(f"Unknown agent {agent!r}; v0 evals cover: {', '.join(knobs)}")
@@ -52,11 +53,13 @@ def run(agent: str = "categorization", *, model: str | None = None) -> None:
         )
     logfire.instrument_pydantic_ai()
 
-    async def _run_categorization() -> None:
-        from pinch_backend.penny.evals import categorization_task, load_dataset
+    async def _run_datasets_only() -> None:
+        """categorization and mapping run on text alone — no database."""
+        from pinch_backend.penny.evals import categorization_task, load_dataset, mapping_task
 
+        task = mapping_task(resolved) if agent == "mapping" else categorization_task(resolved)
         dataset = load_dataset(agent)
-        report = await dataset.evaluate(categorization_task(resolved), name=f"{agent}:{resolved}")
+        report = await dataset.evaluate(task, name=f"{agent}:{resolved}")
         report.print(include_input=False, include_output=True)
 
     async def _run_chat() -> None:
@@ -98,7 +101,7 @@ def run(agent: str = "categorization", *, model: str | None = None) -> None:
             await close_job_app()
             await disconnect_database()
 
-    asyncio.run(_run_chat() if agent == "chat" else _run_categorization())
+    asyncio.run(_run_chat() if agent == "chat" else _run_datasets_only())
 
 
 @evals_app.command
