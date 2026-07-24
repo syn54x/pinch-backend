@@ -23,6 +23,14 @@ def pytest_configure() -> None:
     os.environ["PINCH_PLAID_CLIENT_ID"] = ""
     os.environ["PINCH_PLAID_SECRET"] = ""
     os.environ["PINCH_SECRET_ENCRYPTION_KEY"] = ""
+    # Keyless Penny is the tested baseline (PRD M9), same stance as Plaid:
+    # a developer's .env model strings and gateway key must never leak in.
+    # Tests that want an agent monkeypatch settings and agent.override().
+    os.environ["PINCH_AI_CHAT_MODEL"] = ""
+    os.environ["PINCH_AI_CATEGORIZATION_MODEL"] = ""
+    os.environ["PINCH_AI_MAPPING_MODEL"] = ""
+    os.environ.pop("PYDANTIC_AI_GATEWAY_API_KEY", None)
+    os.environ.pop("ANTHROPIC_API_KEY", None)
     # Same hermetic stance for the cookie flag: developer .envs flip it off
     # for plain-http Safari dev; the suite tests the secure default.
     os.environ["PINCH_SESSION_COOKIE_SECURE"] = "true"

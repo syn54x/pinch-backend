@@ -337,3 +337,20 @@ async def test_pat_list_paginates_on_the_convention(client) -> None:
     ids = [item["id"] for item in first["items"] + rest["items"]]
     assert ids == sorted(ids)
     assert (await client.get(PATS, params={"cursor": "junk"})).status_code == 400
+
+
+async def test_penny_scope_is_granted_only_when_requested(client) -> None:
+    """The penny scope is orthogonal to the read/write rank (PRD M9): chat
+    spends money, so a narrowly-scoped automation token never gets it
+    implicitly — and asking for it never widens the rank."""
+    await _signup(client)
+    body, _ = await _mint(client, name="chatty", scopes=["read", "penny"])
+    assert set(body["scopes"]) == {"read", "penny"}
+
+    body, _ = await _mint(client, name="plain", scopes=["read", "write"])
+    assert "penny" not in body["scopes"]
+
+    listed = (await client.get(PATS)).json()["items"]
+    by_name = {p["name"]: set(p["scopes"]) for p in listed}
+    assert by_name["chatty"] == {"read", "penny"}
+    assert by_name["plain"] == {"read", "write"}

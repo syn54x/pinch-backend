@@ -88,6 +88,21 @@ async def paginate[ModelT: HasUuid7Id](
     return rows, None
 
 
+async def paginate_desc[ModelT: HasUuid7Id](
+    query: "Query[ModelT]", *, cursor: str | None, limit: int
+) -> tuple[list[ModelT], str | None]:
+    """``paginate`` mirrored newest-first: id-descending over uuid7 ids is
+    reverse creation order (M9: the conversation list leads with the most
+    recent thread). Same opaque id cursor, same probe-row idiom."""
+    if cursor is not None:
+        after = decode_cursor(cursor)
+        query = query.where(lambda row: row.id < after)
+    rows = await query.order_by(lambda row: row.id, "desc").limit(limit + 1).all()
+    if len(rows) > limit:
+        return rows[:limit], str(rows[limit - 1].id)
+    return rows, None
+
+
 def encode_date_cursor(txn_date: date, row_id: uuid.UUID) -> str:
     """Opaque position for the (date, id) keyset: base64url of
     ``<iso-date>|<uuid>``. Opaque means clients pass it back verbatim and

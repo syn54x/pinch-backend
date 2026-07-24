@@ -46,13 +46,16 @@ class Session(TimestampMixin, Model):
 
 
 class PatScope(StrEnum):
-    """v0 scopes, exactly two (PRD M3): a rank, not a set — write implies
-    read, so one column holds the whole truth and a guard check is a single
-    comparison. Per-resource scopes later are new machinery, not new values
-    here (deliberately deferred in #8)."""
+    """v0 scopes (PRD M3): READ/WRITE are a rank — write implies read, so
+    one column holds that truth and a guard check is a single comparison.
+    PENNY (PRD M9) is the first orthogonal grant, a wire value only: it
+    gates the chat endpoint (chat spends money, so no automation token gets
+    it implicitly) and is stored as its own flag, never in the rank column.
+    Per-resource scopes later are new machinery, not new values here."""
 
     READ = "read"
     WRITE = "write"
+    PENNY = "penny"
 
 
 class PersonalAccessToken(TimestampMixin, Model):
@@ -69,6 +72,10 @@ class PersonalAccessToken(TimestampMixin, Model):
     name: str
     """User-chosen label ("ci-script"); display-only, never unique."""
     scope: PatScope
+    """The read/write rank only; PENNY never lands here."""
+    penny_scope: bool = False
+    """The orthogonal penny grant (PRD M9): may this token chat? Its own
+    column because it is not a rank — write neither implies nor denies it."""
     display_prefix: str
     """Plaintext head of the secret (``pinch_pat_`` + a few characters) so
     the list view lets a user match a leaked token to a row. Far too short

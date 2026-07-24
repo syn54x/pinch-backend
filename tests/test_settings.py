@@ -33,3 +33,14 @@ def test_plaid_configured_with_key() -> None:
     )
     assert s.plaid_configured is True
     assert s.plaid_environment == "sandbox"
+
+
+def test_ai_model_knobs_unset_by_default() -> None:
+    """One knob per agent, holding a pydantic-ai model string (PRD M9).
+    Empty means that agent is disabled — keyless is a first-class state,
+    and the conftest blanks the developer's .env values so the suite
+    always tests that baseline."""
+    s = Settings()
+    assert s.ai_chat_model == ""
+    assert s.ai_categorization_model == ""
+    assert s.ai_mapping_model == ""

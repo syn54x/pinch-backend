@@ -73,6 +73,19 @@ class Settings(BaseSettings):
     ferro chunks under backend bind-parameter limits since 0.16.1
     (ferro-orm#298)."""
 
+    ai_chat_model: str = ""
+    """Penny's chat agent: any pydantic-ai model identifier —
+    ``anthropic:...`` with ``ANTHROPIC_API_KEY``, or ``gateway/anthropic:...``
+    with ``PYDANTIC_AI_GATEWAY_API_KEY`` (PRD M9: one knob per agent; Pinch
+    code never knows the gateway exists). Empty disables the agent: chat
+    answers Penny-unavailable with a reason and nothing else is touched."""
+    ai_categorization_model: str = ""
+    """The categorization agent behind the classifier seam (M9 CP3).
+    Empty ⇒ the AI stage abstains, exactly today's behavior."""
+    ai_mapping_model: str = ""
+    """The import-mapping agent behind the inferrer seam (M9 CP5).
+    Empty ⇒ the deterministic heuristic stands alone."""
+
     auth_rate_limit_per_email: int = 10
     """Attempts per email per window on credentialed endpoints."""
     auth_rate_limit_per_ip: int = 30
