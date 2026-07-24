@@ -496,3 +496,26 @@ Order: CP0 → CP1 ∥ CP3 → CP2 → CP4 → CP5 (CP5 mapping agent is the pre
   refinements (years, shown-work sums) unit-pinned. Chat evals sandbox note:
   runs write throwaway penny-evals-*@pinch.local users into the connected
   dev database — acceptable dev-db litter, delete by hand if it bothers.
+- CP5 (#59): complete — NOT cut, same as M6 promotion / M7 detector / M8
+  recurring (6 seam tests in test_penny_mapping.py + 3 evals tests; suite 661
+  green + ruff + ty). penny/mapping.py: mapping_agent (output_type=MappingSpec
+  directly — the M4 spec IS the structured output), output_validator checks
+  the spec against the ACTUAL sample (delimiter re-split, 0-based column
+  bounds incl. description_columns, date_format must parse a majority of
+  sampled date values — ModelRetry names the failure); PennyInferrer layers
+  heuristic-first (normal files never cost a token), agent on abstention,
+  bounded_sample 20 lines, every failure → no suggestion (manual mapping,
+  today's floor). Seam swap at inference.py tail (lazy HeuristicInferrer
+  import in PennyInferrer.__init__ breaks the cycle). Keyless byte-identical
+  (explode-model pinned). evals: MappingScore (4 equal field-groups: shape/
+  date/amount+sign/descriptions; abstain 0.25 > wrong 0; hopeless-file
+  expects None), evals/mapping/seed.yaml 6 gnarly shapes with a hygiene test
+  PINNING that the heuristic abstains on every case (an inert case measures
+  nothing); pinch-dev evals run mapping. BASELINE (haiku, on #59): mean
+  0.958, 5/6 exact; the miss is paren-negatives sign=positive_out (parser
+  reads parens as negative, so negative_out is right — the trickiest sign
+  case, kept). ~$0.0025/case, ~2s.
+- M9 COMPLETE: all 6 CPs on branch m9, one commit per CP, suite 661 green.
+  PR closes #53–#59 at merge. Frontend follow-up: `just openapi-sync`
+  (penny routes: status/conversations/chat). F6 is next (useChat +
+  sdk_version 6 approval rendering; GET conversation answers UI messages).

@@ -199,6 +199,12 @@ class HeuristicInferrer:
         )
 
 
-active_inferrer: MappingInferrer = HeuristicInferrer()
+# Imported at the tail on purpose: penny.mapping's PennyInferrer wraps
+# HeuristicInferrer (defined above) — the M9 CP5 seam swap. Keyless
+# instances keep the heuristic's behavior byte-identical: the agent layer
+# only wakes when the heuristic abstains AND a mapping model is configured.
+from pinch_backend.penny.mapping import PennyInferrer  # noqa: E402
+
+active_inferrer: MappingInferrer = PennyInferrer()
 """The seam (PRD M4): swap this for Penny in M9 — or a stub in tests —
 without touching the API layer."""

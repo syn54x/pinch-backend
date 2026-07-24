@@ -1,0 +1,75 @@
+# Mapping seed set (M9 CP5, #59): gnarly bank-export shapes the heuristic
+# abstains on (pinned by a hygiene test) → expected MappingSpecs. A null
+# expected_output means the honest answer is no suggestion.
+cases:
+  - name: paren-negatives-mmm-dd-yy
+    inputs:
+      csv: "When;How Much;What Happened\nJul-01-26;(42.00);BLUE BOTTLE COFFEE\nJul-02-26;(12.50);MUNI FARE\nJul-03-26;1500.00;PAYROLL\n"
+    expected_output:
+      delimiter: ";"
+      has_header: true
+      date_column: 0
+      date_format: "%b-%d-%y"
+      amount_column: 1
+      debit_column: null
+      credit_column: null
+      sign: negative_out
+      description_columns: [2]
+  - name: compact-dates-paid-out-in-pair
+    inputs:
+      csv: "Booked,Paid Out,Paid In,Reference\n20260701,42.00,,BLUE BOTTLE COFFEE\n20260702,12.50,,MUNI FARE\n20260703,,1500.00,PAYROLL ACME\n"
+    expected_output:
+      delimiter: ","
+      has_header: true
+      date_column: 0
+      date_format: "%Y%m%d"
+      amount_column: null
+      debit_column: 1
+      credit_column: 2
+      sign: negative_out
+      description_columns: [3]
+  - name: card-charges-positive-out
+    inputs:
+      csv: "Cycle Day;Charges;Merchant\nJul-05-26;42.00;BLUE BOTTLE COFFEE\nJul-06-26;12.50;MUNI FARE\nJul-07-26;89.99;COMCAST CABLE\n"
+    expected_output:
+      delimiter: ";"
+      has_header: true
+      date_column: 0
+      date_format: "%b-%d-%y"
+      amount_column: 1
+      debit_column: null
+      credit_column: null
+      sign: positive_out
+      description_columns: [2]
+  - name: pipe-headerless-long-month
+    inputs:
+      csv: "July 01, 2026|-42.00|BLUE BOTTLE COFFEE\nJuly 02, 2026|-12.50|MUNI FARE\nJuly 03, 2026|1500.00|PAYROLL ACME\n"
+    expected_output:
+      delimiter: "|"
+      has_header: false
+      date_column: 0
+      date_format: "%B %d, %Y"
+      amount_column: 1
+      debit_column: null
+      credit_column: null
+      sign: negative_out
+      description_columns: [2]
+  - name: two-description-columns
+    inputs:
+      csv: "Ts;Amt;Merchant;Memo\nJul-01-26;-42.00;BLUE BOTTLE;morning coffee\nJul-02-26;-12.50;MUNI;fare\nJul-03-26;1500.00;ACME CORP;payroll\n"
+    expected_output:
+      delimiter: ";"
+      has_header: true
+      date_column: 0
+      date_format: "%b-%d-%y"
+      amount_column: 1
+      debit_column: null
+      credit_column: null
+      sign: negative_out
+      description_columns: [2, 3]
+  - name: hopeless-prose
+    inputs:
+      csv: "Dear customer, thank you for banking with us.\nYour statement is attached as a PDF.\nThis file contains no transaction data.\n"
+    expected_output: null
+evaluators:
+  - MappingScore

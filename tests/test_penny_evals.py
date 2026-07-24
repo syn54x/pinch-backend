@@ -164,3 +164,87 @@ async def test_export_of_an_uncategorized_decision_is_an_abstain_case(
     assert await export_correction_log(out) == 1
     exported = Dataset.from_file(out, custom_evaluator_types=[CategoryScore])
     assert exported.cases[0].expected_output is None
+
+
+async def test_mapping_dataset_holds_only_shapes_the_heuristic_abstains_on() -> None:
+    """Hygiene: a case the heuristic already maps measures nothing — the
+    dataset exists to score Penny's layer, so every case must be a
+    heuristic abstention."""
+    from pinch_backend.imports.inference import HeuristicInferrer
+
+    dataset = load_dataset("mapping")
+    assert len(dataset.cases) >= 5
+    assert any(case.expected_output is None for case in dataset.cases)
+    heuristic = HeuristicInferrer()
+    for case in dataset.cases:
+        suggestion = await heuristic.suggest(case.inputs["csv"])
+        assert suggestion is None, f"{case.name}: heuristic maps this; the case is inert"
+
+
+async def test_mapping_score_orders_exact_partial_abstain_wrong() -> None:
+    from pinch_backend.penny.evals import MappingScore
+
+    expected = {
+        "delimiter": ";",
+        "has_header": True,
+        "date_column": 0,
+        "date_format": "%b-%d-%y",
+        "amount_column": 1,
+        "debit_column": None,
+        "credit_column": None,
+        "sign": "negative_out",
+        "description_columns": [2],
+    }
+    answers: dict[str, dict | None] = {
+        "exact": expected,
+        "partial": expected | {"amount_column": 2, "description_columns": [1]},
+        "abstain": None,
+        "wrong": {
+            "delimiter": ",",
+            "has_header": False,
+            "date_column": 3,
+            "date_format": "%Y",
+            "amount_column": 0,
+            "debit_column": None,
+            "credit_column": None,
+            "sign": "positive_out",
+            "description_columns": [],
+        },
+    }
+    dataset = Dataset(
+        name="mapping-probe",
+        cases=[
+            Case(name=name, inputs={"answer": name}, expected_output=expected) for name in answers
+        ],
+        evaluators=[MappingScore()],
+    )
+
+    async def task(inputs: dict) -> dict | None:
+        return answers[inputs["answer"]]
+
+    report = await dataset.evaluate(task, progress=False)
+    scores = {case.name: case.scores["score"].value for case in report.cases}
+    assert scores["exact"] == 1.0
+    assert scores["exact"] > scores["partial"] > scores["abstain"] > scores["wrong"]
+    assert scores["wrong"] == 0.0
+
+
+async def test_mapping_score_on_a_hopeless_file() -> None:
+    from pinch_backend.penny.evals import MappingScore
+
+    dataset = Dataset(
+        name="hopeless-probe",
+        cases=[Case(name="hopeless", inputs={}, expected_output=None)],
+        evaluators=[MappingScore()],
+    )
+
+    async def honest(inputs: dict) -> dict | None:
+        return None
+
+    async def confident(inputs: dict) -> dict | None:
+        return {"delimiter": ",", "has_header": True, "date_column": 0}
+
+    honest_report = await dataset.evaluate(honest, progress=False)
+    confident_report = await dataset.evaluate(confident, progress=False)
+    assert honest_report.cases[0].scores["score"].value == 1.0
+    assert confident_report.cases[0].scores["score"].value == 0.0

@@ -74,7 +74,8 @@ def load_dataset(agent: str) -> Dataset:
     """The committed seed set for ``agent`` — versioned and PR-reviewed
     like tests."""
     return Dataset.from_file(
-        EVALS_ROOT / agent / "seed.yaml", custom_evaluator_types=[CategoryScore]
+        EVALS_ROOT / agent / "seed.yaml",
+        custom_evaluator_types=[CategoryScore, MappingScore],
     )
 
 
@@ -99,6 +100,65 @@ def categorization_task(model: str):
         except Exception:
             return None
         return result.output.category_path
+
+    return task
+
+
+@dataclass
+class MappingScore(Evaluator[dict, "dict | None", Any]):
+    """Field-group scoring for mapping specs: the shape (delimiter +
+    header), the date read, the amount read (single-or-pair + sign), and
+    the description set — equal weight. An abstain on a mappable file
+    scores above a wrong spec (the CategoryScore principle); a spec for a
+    hopeless file scores zero."""
+
+    def evaluate(self, ctx: EvaluatorContext[dict, "dict | None", Any]) -> dict[str, float | bool]:
+        expected, got = ctx.expected_output, ctx.output
+        if expected is None:
+            return {
+                "score": EXACT if got is None else WRONG,
+                "abstained": got is None,
+                "exact": got is None,
+                "wrong": got is not None,
+            }
+        if got is None:
+            return {"score": ABSTAINED, "abstained": True, "exact": False, "wrong": False}
+        shape_ok = got.get("delimiter") == expected.get("delimiter") and got.get(
+            "has_header"
+        ) == expected.get("has_header")
+        date_ok = got.get("date_column") == expected.get("date_column") and got.get(
+            "date_format"
+        ) == expected.get("date_format")
+        amount_ok = all(
+            got.get(field) == expected.get(field)
+            for field in ("amount_column", "debit_column", "credit_column")
+        ) and got.get("sign", "negative_out") == expected.get("sign", "negative_out")
+        desc_ok = got.get("description_columns") == expected.get("description_columns")
+        score = (shape_ok + date_ok + amount_ok + desc_ok) / 4
+        return {
+            "score": score,
+            "abstained": False,
+            "exact": score == EXACT,
+            "wrong": score == WRONG,
+        }
+
+
+def mapping_task(model: str):
+    """The measured leg IS the production agent leg of PennyInferrer: same
+    agent, same bounded sample, same degrade-to-no-suggestion. The
+    heuristic is deliberately absent — the dataset holds only shapes it
+    abstains on (pinned by a hygiene test), so this measures Penny."""
+    from pinch_backend.penny.mapping import bounded_sample, mapping_agent
+
+    async def task(inputs: dict) -> dict | None:
+        sample = bounded_sample(inputs["csv"])
+        try:
+            result = await mapping_agent.run(
+                f"Map this bank-export sample:\n\n{sample}", deps=sample, model=model
+            )
+        except Exception:
+            return None
+        return result.output.model_dump()
 
     return task
 
