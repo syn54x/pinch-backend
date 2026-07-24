@@ -472,3 +472,27 @@ Order: CP0 → CP1 ∥ CP3 → CP2 → CP4 → CP5 (CP5 mapping agent is the pre
   convention; ambiguous-amazon → Shopping vs curated abstain). ~$0.0014/case,
   ~1.7s/case. Improvement law in effect. ty gotcha: Agent(output_type=...)
   doesn't thread the generic — annotate + scoped ignore.
+- CP4 (#58): complete — chat golden-task evals (10 tests in
+  test_penny_chat_evals.py; suite 652 green + ruff + ty).
+  penny/evals_chat.py: ChatTrajectory evaluator (right_tool any-of, pause_ok,
+  write_safe = no unapproved write executed, grounded = money-shaped numbers
+  traceable to tool results); numbers_grounded heuristic is minor-units
+  aligned, ignores bare years/dates, and accepts SHOWN-WORK sums (a total
+  equal to pair/whole-sum of grounded addends is math, not fabrication —
+  bare unshown totals still fail). chat_task runs the REAL capability stack:
+  provision_sandbox (model-layer user+PAT, uuid4 email suffix — uuid7 hex
+  prefix collides within ~65s! — then seeds via public API as the caller),
+  deterministic ledger (checking 12.5k, car loan -8.9k, 3mo rent/payroll/
+  Netflix, July groceries+coffee). evals/chat/seed.yaml: 8 golden cases
+  (4 grounded reads w/ LLMJudge rubrics on gateway sonnet, 2 write-pauses,
+  cannot-see-imports honesty, out-of-domain refusal). pinch-dev evals run
+  chat: connect db + job app, ambient ferro session, drain job chain once
+  (recurring detection), evaluate max_concurrency=2. IMPROVEMENT LAW CYCLE 1
+  (recorded on #58): prompt v1 baseline 0.875 trajectory — grounded-spending
+  FAILED for a real reason: literal substring search for "Whole Foods" missed
+  "WHOLEFDS MKT" and Penny concluded no transactions existed. Prompt v2 adds
+  (a) show-your-addends when totaling and (b) bank-abbreviation retry
+  guidance → 1.000 trajectory (8/8), ~$0.0069/case, ~3s/case. Both heuristic
+  refinements (years, shown-work sums) unit-pinned. Chat evals sandbox note:
+  runs write throwaway penny-evals-*@pinch.local users into the connected
+  dev database — acceptable dev-db litter, delete by hand if it bothers.
