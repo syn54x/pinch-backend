@@ -36,25 +36,69 @@ def run(agent: str = "categorization", *, model: str | None = None) -> None:
 
     import logfire
 
-    from pinch_backend.penny.evals import categorization_task, load_dataset
     from pinch_backend.settings import settings
 
-    if agent != "categorization":
-        raise SystemExit(f"Unknown agent {agent!r}; v0 evals cover: categorization")
-    resolved = model or settings.ai_categorization_model
+    knobs = {
+        "categorization": settings.ai_categorization_model,
+        "chat": settings.ai_chat_model,
+    }
+    if agent not in knobs:
+        raise SystemExit(f"Unknown agent {agent!r}; v0 evals cover: {', '.join(knobs)}")
+    resolved = model or knobs[agent]
     if not resolved:
         raise SystemExit(
-            "No model: set PINCH_AI_CATEGORIZATION_MODEL or pass --model "
+            f"No model: set PINCH_AI_{agent.upper()}_MODEL or pass --model "
             "(any pydantic-ai identifier, gateway or direct)."
         )
     logfire.instrument_pydantic_ai()
 
-    async def _run() -> None:
+    async def _run_categorization() -> None:
+        from pinch_backend.penny.evals import categorization_task, load_dataset
+
         dataset = load_dataset(agent)
         report = await dataset.evaluate(categorization_task(resolved), name=f"{agent}:{resolved}")
         report.print(include_input=False, include_output=True)
 
-    asyncio.run(_run())
+    async def _run_chat() -> None:
+        """Chat golden tasks run the real capability stack: a throwaway
+        sandbox user in THIS database, tools through the public API."""
+        import ferro
+        from pydantic_evals import Dataset
+
+        from pinch_backend.api.app import create_app
+        from pinch_backend.db import connect_database, disconnect_database
+        from pinch_backend.jobs import close_job_app, ensure_job_schema, job_app, open_job_app
+        from pinch_backend.penny.evals import EVALS_ROOT
+        from pinch_backend.penny.evals_chat import ChatTrajectory, chat_task, provision_sandbox
+
+        await connect_database()
+        await open_job_app()
+        await ensure_job_schema()
+        try:
+            # The ambient session covers the model-layer sandbox
+            # provisioning; each in-process API self-call nests its own.
+            async with ferro.engines.session():
+                app_instance = create_app(manage_database=False)
+                sandbox = await provision_sandbox(app_instance)
+                # Drain the deferred classification/detection chain so the
+                # sandbox has proposals and recurring series to talk about.
+                await job_app.run_worker_async(
+                    wait=False, listen_notify=False, install_signal_handlers=False
+                )
+                dataset = Dataset.from_file(
+                    EVALS_ROOT / "chat" / "seed.yaml", custom_evaluator_types=[ChatTrajectory]
+                )
+                report = await dataset.evaluate(
+                    chat_task(resolved, app_instance, sandbox),
+                    name=f"chat:{resolved}",
+                    max_concurrency=2,
+                )
+                report.print(include_input=True, include_output=False)
+        finally:
+            await close_job_app()
+            await disconnect_database()
+
+    asyncio.run(_run_chat() if agent == "chat" else _run_categorization())
 
 
 @evals_app.command
