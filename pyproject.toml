@@ -9,6 +9,9 @@ requires-python = ">=3.14"
 dependencies = [
     "pydantic[email]>=2.0",
     "pydantic-settings>=2.0",
+    # Direct dependency, not merely pydantic-settings': settings.py loads
+    # .env onto os.environ so provider keys reach pydantic-ai and logfire.
+    "python-dotenv>=1",
     "structlog>=24",
     "cyclopts>=4",
     "litestar[standard]>=2",

@@ -1456,6 +1456,7 @@ dependencies = [
     { name = "pydantic", extra = ["email"] },
     { name = "pydantic-ai" },
     { name = "pydantic-settings" },
+    { name = "python-dotenv" },
     { name = "structlog" },
 ]
 
@@ -1489,6 +1490,7 @@ requires-dist = [
     { name = "pydantic", extras = ["email"], specifier = ">=2.0" },
     { name = "pydantic-ai", specifier = ">=2,<3" },
     { name = "pydantic-settings", specifier = ">=2.0" },
+    { name = "python-dotenv", specifier = ">=1" },
     { name = "structlog", specifier = ">=24" },
 ]
 
