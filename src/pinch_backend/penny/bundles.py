@@ -16,11 +16,12 @@ from typing import TYPE_CHECKING, Any
 # annotations are evaluated (the litestar-decorator precedent, guards.py).
 from pydantic_ai import RunContext  # noqa: TC002
 from pydantic_ai.capabilities import Capability
+from pydantic_ai.tools import Tool
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-from pinch_backend.penny.deps import ApiDeclined, PennyDeps, api_get
+from pinch_backend.penny.deps import ApiDeclined, PennyDeps, api_get, api_request
 
 _MAX_TOOL_PAGES = 4
 """Internal-pagination ceiling: enough for every realistic taxonomy or
@@ -204,6 +205,138 @@ async def ledger_stats(ctx: RunContext[PennyDeps]) -> dict:
     """Ledger-level counts: transactions total, classified, unreviewed (by
     provenance), recurring series found, last sync time."""
     return await api_get(ctx.deps, "/api/v1/ledgers/current/stats")
+
+
+# --- The write bundle (CP2 #56): every tool requires approval ------------
+
+
+@_relay_declines
+async def create_category(
+    ctx: RunContext[PennyDeps], name: str, parent_id: str | None = None
+) -> dict:
+    """Create a category in the user's taxonomy. ``parent_id`` nests it
+    under an existing category."""
+    return await api_request(
+        ctx.deps, "POST", "/api/v1/categories", json_body={"name": name, "parent_id": parent_id}
+    )
+
+
+@_relay_declines
+async def create_rule(
+    ctx: RunContext[PennyDeps],
+    payee_contains: str,
+    category_id: str | None = None,
+    add_tags: list[str] | None = None,
+    rename_to: str | None = None,
+    mark_transfer: bool = False,
+) -> dict:
+    """Create a classification rule: when a transaction's payee contains
+    ``payee_contains``, propose the given category, tags, rename, or
+    transfer marking. Rules never rewrite history — they act on incoming
+    transactions."""
+    return await api_request(
+        ctx.deps,
+        "POST",
+        "/api/v1/rules",
+        json_body={
+            "condition": {"payee": {"op": "contains", "value": payee_contains}},
+            "action_category_id": category_id,
+            "action_add_tags": add_tags or [],
+            "action_rename_to": rename_to,
+            "action_mark_transfer": mark_transfer,
+        },
+    )
+
+
+@_relay_declines
+async def recategorize_transaction(
+    ctx: RunContext[PennyDeps],
+    transaction_id: str,
+    category_id: str | None = None,
+    clear_category: bool = False,
+    tags: list[str] | None = None,
+    display_name: str | None = None,
+    notes: str | None = None,
+) -> dict:
+    """Edit a transaction's user data: category, tags (the complete new tag
+    set), display name, notes. Only the fields you pass change;
+    ``clear_category=true`` makes it uncategorized."""
+    body: dict[str, Any] = {}
+    if clear_category:
+        body["category_id"] = None
+    elif category_id is not None:
+        body["category_id"] = category_id
+    if tags is not None:
+        body["tags"] = tags
+    if display_name is not None:
+        body["display_name"] = display_name
+    if notes is not None:
+        body["notes"] = notes
+    return await api_request(
+        ctx.deps, "PATCH", f"/api/v1/transactions/{transaction_id}", json_body=body
+    )
+
+
+@_relay_declines
+async def accept_review(
+    ctx: RunContext[PennyDeps],
+    transaction_id: str,
+    category_id: str | None = None,
+    tags: list[str] | None = None,
+    display_name: str | None = None,
+) -> dict:
+    """Accept an unreviewed transaction, optionally correcting the category,
+    tags, or display name first — the same decision as the inbox's Accept
+    button, recorded with the same weight."""
+    body = {
+        k: v
+        for k, v in {
+            "category_id": category_id,
+            "tags": tags,
+            "display_name": display_name,
+        }.items()
+        if v is not None
+    }
+    return await api_request(
+        ctx.deps,
+        "POST",
+        f"/api/v1/transactions/{transaction_id}/review",
+        json_body=body or None,
+    )
+
+
+@_relay_declines
+async def mark_transfer(
+    ctx: RunContext[PennyDeps],
+    transaction_id: str,
+    counterpart_transaction_id: str | None = None,
+) -> dict:
+    """Mark money movement between accounts as a transfer (excluded from
+    spending). With a counterpart, the two transactions link; without one,
+    the counterparty is untracked (the other account isn't in Pinch)."""
+    ids = [transaction_id]
+    if counterpart_transaction_id is not None:
+        ids.append(counterpart_transaction_id)
+    return await api_request(
+        ctx.deps, "POST", "/api/v1/transfers", json_body={"transaction_ids": ids}
+    )
+
+
+write_bundle: Capability[PennyDeps] = Capability(
+    id="pinch-writes",
+    description="Change the user's data through the public API — every tool "
+    "pauses for the user's explicit in-conversation approval.",
+    tools=[
+        Tool(tool, requires_approval=True)
+        for tool in (
+            recategorize_transaction,
+            accept_review,
+            create_rule,
+            mark_transfer,
+            create_category,
+        )
+    ],
+)
 
 
 read_bundle: Capability[PennyDeps] = Capability(
