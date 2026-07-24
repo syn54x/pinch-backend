@@ -349,3 +349,45 @@ Branch: m8. Delivery: single PR, slices in order CP0 → CP1 → CP2 → CP4 →
 - M8 COMPLETE: all 6 CPs on branch m8, suite 601 green, pushed as one PR
   (closes #46–#51 at merge). Frontend follow-up: `just openapi-sync` (AccountOut
   gained terms; new reports/recurring/payoff/stats endpoints).
+
+# M9 — Penny comes to life (PRD #53, CP issues #54–#59)
+
+Branch: m9. Delivery: single PR, one commit per CP, rebase-merge clean.
+Order: CP0 → CP1 ∥ CP3 → CP2 → CP4 → CP5 (CP5 mapping agent is the pre-flagged cut).
+
+- CP0 (#54): complete — integration spike, ALL FOUR legs PASS (6 scratch tests, incl.
+  the live gateway smoke; file deleted after findings, per M7/M8 precedent; results
+  comment on #54). pydantic-ai 2.7.0 pinned observations:
+  1. Vercel adapter on Litestar: PROVEN. The glue is exactly three calls —
+     build_run_input(await request.body()) → VercelAIAdapter(agent, run_input,
+     accept=<accept header>, sdk_version=6) → litestar Stream(
+     adapter.encode_stream(adapter.run_stream(...)), media_type/headers from
+     build_event_stream().content_type/.response_headers). Approval round-trip
+     over the wire works both ways: round 1 emits tool-input-available +
+     tool-approval-request chunks then [DONE]; round 2 (assistant part
+     state=approval-responded) auto-parses into adapter.deferred_tool_results —
+     approve executes the tool (tool-output-available + final text), deny
+     withholds it and the reason reaches the model. Gotchas for CP1:
+     (a) @post needs status_code=200 (Litestar's POST default is 201);
+     (b) agent needs output_type=[str, DeferredToolRequests] or approvals error;
+     (c) run_stream_events makes STREAMED model requests → FunctionModel test
+     scripts must pass stream_function= (yield str or {0: DeltaToolCall(...)});
+     (d) CSRF double-submit applies to cookie-credentialed chat POSTs (browser
+     clients already do the dance; bearer callers exempt by construction).
+  2. In-process self-call: PROVEN. httpx.AsyncClient(transport=
+     ASGITransport(app=request.app)) + forwarded Authorization header calls
+     GET /api/v1/accounts through the full middleware chain (ferro session
+     nests cleanly) with the caller's own PAT scopes; no event-loop grief.
+  3. Message persistence: PROVEN LOSSLESS. json.loads(result.all_messages_json())
+     → ferro list[dict] column (JSONB) → ModelMessagesTypeAdapter.validate_python
+     == original history (tool calls/returns, ThinkingPart signature, unicode,
+     timestamps), and the restored history fed a second run unchanged.
+  4. Gateway smoke: PROVEN LIVE (claude-haiku-4-5 via gateway-us, usage > 0) with
+     ONE design consequence recorded on #53: "gateway/<seg>:<model>" resolves
+     <seg> as both the provider kind and the gateway URL route segment; custom
+     console route names (ours: pinch-anthropic-provider) 404 and no string
+     syntax carries a route override. The one-knob model-string story therefore
+     requires gateway console routes named exactly after the provider kind
+     (anthropic, openai, ...). Operator action: rename the console routes; code
+     stays gateway-ignorant (gateway_provider(..., route=...) rejected — Pinch
+     code never knows the gateway exists).

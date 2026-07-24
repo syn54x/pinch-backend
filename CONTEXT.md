@@ -174,6 +174,23 @@ docs, and conversation. Implementation details do not belong in this file.
   **lapsed** — the data's verdict, distinct from dismissal (the user's),
   and self-reversing if the merchant returns.
 
+## Penny
+
+- **Capability** — one curated action Penny can take on the user's behalf: a
+  tool that bottoms out in public developer-API calls, executed as the
+  chatting user with exactly the caller's credentials and scopes. Read
+  capabilities execute freely; write capabilities require the user's explicit
+  approval. A capability the public API can't support is a missing endpoint,
+  never a private backdoor — Penny is an API client, like the CLI.
+- **Conversation** — a persistent, ledger-owned chat thread with Penny. The
+  server's record is authoritative: clients contribute new messages, never
+  rewrite history. Conversations survive devices and sessions; they are part
+  of the user's data, not UI state.
+- **Approval** — the user's explicit, in-the-moment consent to one proposed
+  write capability. Requested and answered inside the conversation; an
+  approval left unanswered expires and the write never happens. There is no
+  durable queue of pending approvals — Penny asks again next time instead.
+
 ## Money
 
 - **Amount** — every money value is an integer count of minor units plus an
