@@ -12,11 +12,44 @@ Pinch backend developer CLI (internal; the public CLI is pinch-cli)
 
 ## Table of Contents
 
+- [`evals`](#pinch-dev-evals)
+    - [`run`](#pinch-dev-evals-run)
+    - [`export`](#pinch-dev-evals-export)
 - [`worker`](#pinch-dev-worker)
 
 **Commands**:
 
+* [`evals`](#pinch-dev-evals): The evals harness (PRD M9): offline quality gate, never CI pass/fail. No prompt or model change merges without before/after numbers.
 * [`worker`](#pinch-dev-worker): Run the background-job worker (deployment shape: API + worker + Postgres, ADR-0006). Applies Procrastinate's schema on first run when PINCH_DATABASE_AUTO_MIGRATE is on.
+
+## pinch-dev evals
+
+The evals harness (PRD M9): offline quality gate, never CI pass/fail. No prompt or model change merges without before/after numbers.
+
+### pinch-dev evals run
+
+```console
+pinch-dev evals run [OPTIONS] [ARGS]
+```
+
+Run AGENT's committed dataset against its configured model (or ``--model``), print the report, and record a Logfire experiment — accuracy, abstain rate, wrong rate, cost, latency over time.
+
+**Parameters**:
+
+* `AGENT, --agent`:   *[default: categorization]*
+* `--model`:
+
+### pinch-dev evals export
+
+```console
+pinch-dev evals export [ARGS]
+```
+
+Export this database's correction log as eval cases — user decisions only (auto-filed entries excluded by charter). Exports stay local: evals/exports/ is gitignored; promote scrubbed cases by hand.
+
+**Parameters**:
+
+* `OUT, --out`:   *[default: evals/exports/correction-log.yaml]*
 
 ## pinch-dev worker
 

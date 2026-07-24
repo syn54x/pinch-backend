@@ -229,3 +229,6 @@ __marimo__/
 
 # Exported OpenAPI document (generated artifact: `just openapi`)
 openapi.json
+
+# Real-ledger eval exports stay local (PRD M9): promote scrubbed cases by hand
+evals/exports/

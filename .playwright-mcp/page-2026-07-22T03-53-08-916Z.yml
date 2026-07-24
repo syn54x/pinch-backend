@@ -1,0 +1,113 @@
+- generic [ref=f7e1]:
+  - generic [ref=f7e3]:
+    - complementary [ref=f7e4]:
+      - generic [ref=f7e5]: Pinch
+      - navigation "Primary" [ref=f7e8]:
+        - link "Inbox" [ref=f7e9] [cursor=pointer]:
+          - /url: /inbox
+        - link "Register" [ref=f7e13] [cursor=pointer]:
+          - /url: /register
+        - link "Accounts" [ref=f7e15] [cursor=pointer]:
+          - /url: /accounts
+        - generic [ref=f7e18]: Setup
+        - link "Connections" [ref=f7e19] [cursor=pointer]:
+          - /url: /connections
+      - generic [ref=f7e26]:
+        - paragraph [ref=f7e27]: smoke-cp1
+        - paragraph [ref=f7e28]: smoke-cp1@e2e.pinchapp.dev
+    - generic [ref=f7e29]:
+      - banner [ref=f7e30]:
+        - heading "Register" [level=1] [ref=f7e31]
+        - generic [ref=f7e32]:
+          - 'button "Theme: dark. Switch to system." [ref=f7e33]'
+          - button "Log out" [ref=f7e34]
+      - status [ref=f7e35]:
+        - generic [ref=f7e36]: Verify your email — we sent a confirmation link to smoke-cp1@e2e.pinchapp.dev.
+        - generic [ref=f7e37]:
+          - button "Resend" [ref=f7e38]
+          - button "Dismiss" [ref=f7e39]
+      - main [ref=f7e40]:
+        - generic [ref=f7e41]:
+          - generic [ref=f7e42]:
+            - searchbox "Search transactions" [ref=f7e43]
+            - 'button "Account: All accounts" [expanded] [ref=f7e44]':
+              - generic [ref=f7e45]: All accounts
+            - 'button "Category: Category" [ref=f7e48]':
+              - generic [ref=f7e49]: Category
+            - 'button "Date: All dates" [ref=f7e52]':
+              - generic [ref=f7e53]: All dates
+            - 'button "Tag: Tag" [ref=f7e56]':
+              - generic [ref=f7e57]: Tag
+          - generic [ref=f7e60]:
+            - generic [ref=f7e61]:
+              - generic [ref=f7e62]:
+                - generic [ref=f7e63]: Payee
+                - generic [ref=f7e64]: Category
+                - generic [ref=f7e65]: Amount
+              - generic [ref=f7e66]:
+                - generic [ref=f7e78]: Jul 21
+                - generic [ref=f7e79]:
+                  - button "Inspect Mystery Charge" [ref=f7e80]
+                  - generic:
+                    - generic: Mystery Charge
+                    - link "unreviewed" [ref=f7e81] [cursor=pointer]:
+                      - /url: /inbox
+                  - generic: —
+                  - generic: −$9.99
+                - generic [ref=f7e82]:
+                  - button "Inspect Costco" [ref=f7e83]
+                  - generic:
+                    - generic: Costco
+                    - generic: 2 splits
+                  - generic: split
+                  - generic: −$214.90
+                - generic [ref=f7e84]:
+                  - button "Inspect Venmo from Chase" [ref=f7e85]
+                  - generic:
+                    - generic: Venmo from Chase
+                    - generic "Transfer — excluded from spending": transfer
+                    - link "unreviewed" [ref=f7e86] [cursor=pointer]:
+                      - /url: /inbox
+                  - generic: —
+                  - generic: +$120.00
+                - generic [ref=f7e87]:
+                  - button "Inspect Venmo → Alex" [ref=f7e88]
+                  - generic:
+                    - generic: Venmo → Alex
+                    - generic "Transfer — excluded from spending": transfer
+                    - link "unreviewed" [ref=f7e89] [cursor=pointer]:
+                      - /url: /inbox
+                  - generic: —
+                  - generic: −$120.00
+                - generic [ref=f7e90]:
+                  - button "Inspect Whole Foods Market" [ref=f7e91]
+                  - generic: Whole Foods Market
+                  - generic:
+                    - generic:
+                      - generic: 🍽️
+                      - generic: Dining
+                  - generic: −$62.40
+                - generic [ref=f7e92]: Jul 20
+                - generic [ref=f7e93]:
+                  - button "Inspect Payroll - Acme" [ref=f7e94]
+                  - generic: Payroll - Acme
+                  - generic:
+                    - generic:
+                      - generic: 💰
+                      - generic: Income
+                  - generic: +$4,200.00
+                - generic [ref=f7e95]:
+                  - button "Inspect Netflix" [ref=f7e96]
+                  - generic: Netflix
+                  - generic:
+                    - generic:
+                      - generic: 📺
+                      - generic: Subscriptions
+                  - generic: −$15.49
+            - generic [ref=f7e75]:
+              - generic [ref=f7e76]: Transaction
+              - paragraph [ref=f7e77]: Select a transaction to see everything about it — and edit it in place.
+  - dialog [ref=f7e98]:
+    - button "All accounts" [active] [ref=f7e99]
+    - button "Chase Checking" [ref=f7e103]
+    - button "Ally Savings" [ref=f7e105]
