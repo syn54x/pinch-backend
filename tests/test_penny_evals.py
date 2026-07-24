@@ -18,9 +18,11 @@ from pinch_backend.models import (
 )
 from pinch_backend.penny.evals import (
     CategoryScore,
+    categorization_task,
     default_taxonomy_paths,
     export_correction_log,
     load_dataset,
+    mapping_task,
 )
 
 PASSWORD = "correct horse battery staple"
@@ -85,6 +87,43 @@ async def test_expected_abstain_scores_only_an_abstain() -> None:
     honest_report = await dataset.evaluate(honest, progress=False)
     assert confident_report.cases[0].scores["score"].value == 0.0
     assert honest_report.cases[0].scores["score"].value == 1.0
+
+
+CATEGORIZATION_INPUTS = {
+    "payee": "Blue Bottle Coffee",
+    "description": "BLUE BOTTLE COFFEE SF",
+    "amount_minor": -575,
+    "currency": "USD",
+    "date": "2026-07-01",
+    "account_label": "Checking",
+    "account_kind": "depository",
+}
+BROKEN_ROUTE = "nonexistent-provider:nonexistent-model"
+
+
+async def test_categorization_records_the_provider_errors_it_degrades_over() -> None:
+    """A broken route degrades to abstain — which *scores*, and reads
+    exactly like honest calibration. Degradation stays (it is the
+    production shape); the swallowed cause becomes visible."""
+    errors: list[str] = []
+    task = categorization_task(BROKEN_ROUTE, errors)
+
+    assert await task(CATEGORIZATION_INPUTS) is None
+    assert len(errors) == 1
+    assert BROKEN_ROUTE in errors[0]
+
+
+async def test_mapping_records_the_provider_errors_it_degrades_over() -> None:
+    errors: list[str] = []
+    task = mapping_task(BROKEN_ROUTE, errors)
+
+    assert await task({"csv": "date,amount\n2026-07-01,-5.75\n"}) is None
+    assert len(errors) == 1
+
+
+async def test_the_error_sink_is_optional_so_production_shape_is_unchanged() -> None:
+    """No sink, no bookkeeping: the task still abstains silently."""
+    assert await categorization_task(BROKEN_ROUTE)(CATEGORIZATION_INPUTS) is None
 
 
 async def _seed_log_entry(ledger: Ledger, **overrides) -> CorrectionLogEntry:
