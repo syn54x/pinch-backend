@@ -55,10 +55,21 @@ def default_taxonomy_paths() -> list[str]:
 
 @dataclass
 class CategoryScore(Evaluator[dict, str | None, Any]):
-    """The asymmetric score plus the rate flags the headline numbers
-    aggregate: accuracy (exact), abstain rate, wrong rate."""
+    """One result per pydantic-evals kind, each doing the job its type
+    implies: ``score`` (float) is the asymmetric quality metric, ``exact``
+    (bool) is the sole assertion — True when the model did the right thing,
+    correct abstention included, so the report's pass rate IS exact-match
+    accuracy — and ``outcome`` (str) is a categorical label whose aggregate
+    distribution carries the abstain and wrong rates.
 
-    def evaluate(self, ctx: EvaluatorContext[dict, str | None, Any]) -> dict[str, float | bool]:
+    The flags this replaces (``abstained``/``wrong`` bools, True when the
+    bad thing happened) were rate counters wearing assertion types: every
+    bool is a pass/fail check to pydantic-evals, so a perfect case passed
+    1 of 3 and dashboards capped the pass rate at 33.3%."""
+
+    def evaluate(
+        self, ctx: EvaluatorContext[dict, str | None, Any]
+    ) -> dict[str, float | bool | str]:
         expected, got = ctx.expected_output, ctx.output
         if expected is None:
             score = EXACT if got is None else WRONG
@@ -70,12 +81,8 @@ class CategoryScore(Evaluator[dict, str | None, Any]):
             score = ABSTAINED
         else:
             score = WRONG
-        return {
-            "score": score,
-            "exact": score == EXACT,
-            "abstained": got is None and expected is not None,
-            "wrong": score == WRONG and got is not None,
-        }
+        outcome = {EXACT: "exact", ANCESTOR: "ancestor", ABSTAINED: "abstained", WRONG: "wrong"}
+        return {"score": score, "exact": score == EXACT, "outcome": outcome[score]}
 
 
 def load_dataset(agent: str) -> Dataset:
@@ -126,19 +133,24 @@ class MappingScore(Evaluator[dict, "dict | None", Any]):
     header), the date read, the amount read (single-or-pair + sign), and
     the description set — equal weight. An abstain on a mappable file
     scores above a wrong spec (the CategoryScore principle); a spec for a
-    hopeless file scores zero."""
+    hopeless file scores zero.
 
-    def evaluate(self, ctx: EvaluatorContext[dict, "dict | None", Any]) -> dict[str, float | bool]:
+    Result shape mirrors CategoryScore — score / sole ``exact`` assertion /
+    ``outcome`` label — with ``partial`` covering the fractional band."""
+
+    def evaluate(
+        self, ctx: EvaluatorContext[dict, "dict | None", Any]
+    ) -> dict[str, float | bool | str]:
         expected, got = ctx.expected_output, ctx.output
         if expected is None:
+            correct = got is None
             return {
-                "score": EXACT if got is None else WRONG,
-                "abstained": got is None,
-                "exact": got is None,
-                "wrong": got is not None,
+                "score": EXACT if correct else WRONG,
+                "exact": correct,
+                "outcome": "exact" if correct else "wrong",
             }
         if got is None:
-            return {"score": ABSTAINED, "abstained": True, "exact": False, "wrong": False}
+            return {"score": ABSTAINED, "exact": False, "outcome": "abstained"}
         shape_ok = got.get("delimiter") == expected.get("delimiter") and got.get(
             "has_header"
         ) == expected.get("has_header")
@@ -151,12 +163,8 @@ class MappingScore(Evaluator[dict, "dict | None", Any]):
         ) and got.get("sign", "negative_out") == expected.get("sign", "negative_out")
         desc_ok = got.get("description_columns") == expected.get("description_columns")
         score = (shape_ok + date_ok + amount_ok + desc_ok) / 4
-        return {
-            "score": score,
-            "abstained": False,
-            "exact": score == EXACT,
-            "wrong": score == WRONG,
-        }
+        outcome = "exact" if score == EXACT else ("wrong" if score == WRONG else "partial")
+        return {"score": score, "exact": score == EXACT, "outcome": outcome}
 
 
 def mapping_task(model: str, errors: list[str] | None = None):

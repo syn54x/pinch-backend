@@ -126,6 +126,91 @@ async def test_the_error_sink_is_optional_so_production_shape_is_unchanged() -> 
     assert await categorization_task(BROKEN_ROUTE)(CATEGORIZATION_INPUTS) is None
 
 
+async def test_a_perfect_case_passes_every_assertion() -> None:
+    """pydantic-evals treats every bool as an assertion — pass/fail, True is
+    the pass. The old shape returned abstained/wrong *rate flags* (True when
+    the bad thing happened), so a perfect case passed 1 of 3 assertions and
+    every dashboard showed a 33.3% pass rate as its ceiling. One assertion
+    (exact — did the right thing, correct abstention included) plus one
+    categorical `outcome` label whose aggregate distribution IS the
+    abstain/wrong rate the flags were reaching for."""
+    answers = {
+        "exact": "Food & Drink > Coffee",
+        "ancestor": "Food & Drink",
+        "abstain": None,
+        "wrong": "Travel > Flights",
+    }
+    dataset = Dataset(
+        name="assertion-probe",
+        cases=[
+            Case(name=name, inputs={"answer": name}, expected_output="Food & Drink > Coffee")
+            for name in answers
+        ]
+        + [Case(name="expected-abstain", inputs={"answer": "abstain"}, expected_output=None)],
+        evaluators=[CategoryScore()],
+    )
+
+    async def task(inputs: dict) -> str | None:
+        return answers[inputs["answer"]]
+
+    report = await dataset.evaluate(task, progress=False)
+    by_name = {case.name: case for case in report.cases}
+
+    for name, passed in [
+        ("exact", True),
+        ("ancestor", False),
+        ("abstain", False),
+        ("wrong", False),
+        ("expected-abstain", True),  # correct abstention IS the right answer
+    ]:
+        assert by_name[name].assertions.keys() == {"exact"}, name
+        assert by_name[name].assertions["exact"].value is passed, name
+
+    for name, outcome in [
+        ("exact", "exact"),
+        ("ancestor", "ancestor"),
+        ("abstain", "abstained"),
+        ("wrong", "wrong"),
+        ("expected-abstain", "exact"),
+    ]:
+        assert by_name[name].labels["outcome"].value == outcome, name
+
+
+async def test_mapping_outcome_label_carries_the_partial_band() -> None:
+    from pinch_backend.penny.evals import MappingScore
+
+    expected = {"delimiter": ",", "has_header": True, "date_column": 0, "date_format": "%Y-%m-%d"}
+    answers: dict[str, dict | None] = {
+        "exact": dict(expected),
+        "partial": expected | {"date_column": 3, "date_format": "%Y"},
+        "abstain": None,
+    }
+    dataset = Dataset(
+        name="mapping-label-probe",
+        cases=[
+            Case(name=name, inputs={"answer": name}, expected_output=expected) for name in answers
+        ]
+        + [Case(name="hopeless-mapped", inputs={"answer": "exact"}, expected_output=None)],
+        evaluators=[MappingScore()],
+    )
+
+    async def task(inputs: dict) -> dict | None:
+        return answers[inputs["answer"]]
+
+    report = await dataset.evaluate(task, progress=False)
+    by_name = {case.name: case for case in report.cases}
+
+    for name, outcome, passed in [
+        ("exact", "exact", True),
+        ("partial", "partial", False),
+        ("abstain", "abstained", False),
+        ("hopeless-mapped", "wrong", False),  # a spec for a hopeless file
+    ]:
+        assert by_name[name].labels["outcome"].value == outcome, name
+        assert by_name[name].assertions.keys() == {"exact"}, name
+        assert by_name[name].assertions["exact"].value is passed, name
+
+
 async def _seed_log_entry(ledger: Ledger, **overrides) -> CorrectionLogEntry:
     defaults = dict(
         ledger=ledger,
