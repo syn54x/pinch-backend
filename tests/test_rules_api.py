@@ -453,3 +453,65 @@ async def test_apply_unreviewed_refreshes_the_backlog_and_leaves_reviewed_alone(
     for name in ("COSTCO #482", "COSTCO GAS"):
         assert after[name]["category"] is None
         assert after[name]["reviewed_at"] is not None
+
+
+async def test_apply_full_recategorizes_reviewed_in_place_as_one_logged_batch(
+    client, run_jobs
+) -> None:
+    """The full tier (F4 Enabler B, #67): a user-consented bulk edit —
+    reviewed matches recategorized in place, still reviewed, nothing back
+    to the Inbox; one batch of per-transaction decision entries; splits
+    and transfer members keep their structure."""
+    from test_flywheel_e2e import _transactions
+
+    await _signup(client)
+    cat_id, _txns = await _seed_costco_ledger(client, run_jobs)
+
+    r = await _create_rule(
+        client, action_category_id=cat_id, action_rename_to="Costco", apply="full"
+    )
+    assert r.status_code == 201, r.text
+    applied = r.json()["applied"]
+    assert applied["tier"] == "full"
+    assert applied["refreshed_unreviewed"] == 2
+    assert applied["recategorized_reviewed"] == 2
+    assert applied["skipped"] == 2
+    assert applied["batch_id"] is not None
+
+    after = {t["description_raw"]: t for t in await _transactions(client)}
+    for name in ("COSTCO #482", "COSTCO GAS"):
+        txn = after[name]
+        assert txn["category"]["id"] == cat_id
+        assert txn["reviewed_at"] is not None, "stays reviewed — nothing returns to the Inbox"
+        assert txn["display_name"] == "Costco"
+        assert "bulk" in {t["name"] for t in txn["tags"]}
+    assert after["COSTCO SPLIT"]["category"] is None, "split parent keeps its structure"
+    assert after["COSTCO XFER"]["category"] is None, "transfer member keeps its structure"
+
+    unreviewed_count = (await client.get("/api/v1/transactions/unreviewed-count")).json()
+    entries = (await client.get("/api/v1/correction-log")).json()["items"]
+    batch = [e for e in entries if e["batch_id"] == applied["batch_id"]]
+    assert len(batch) == 2
+    for e in batch:
+        assert e["kind"] == "decision"
+        assert e["actor"] == "user"
+        assert e["accepted_untouched"] is False
+        assert e["decision_category_id"] == cat_id
+        assert e["decision_category_name"] == "Groceries B"
+        assert e["decision_display_name"] == "Costco"
+        assert "bulk" in e["decision_tags"]
+    singles = [e for e in entries if e["batch_id"] is None and e["kind"] == "decision"]
+    assert len(singles) == 4, "the original reviews stay unbatched"
+    assert unreviewed_count["count"] == 3, "unreviewed backlog unchanged (2 costco + blue bottle)"
+
+
+async def test_transfer_marking_rules_are_forward_only(client) -> None:
+    """A rule sees one transaction and cannot re-interpret settled history
+    (F4 Enabler B, #67): no retro tiers for mark-transfer rules."""
+    await _signup(client)
+    for tier in ("unreviewed", "full"):
+        r = await _create_rule(client, action_add_tags=[], action_mark_transfer=True, apply=tier)
+        assert r.status_code == 400, r.text
+    r = await _create_rule(client, action_add_tags=[], action_mark_transfer=True, apply="forward")
+    assert r.status_code == 201, r.text
+    assert r.json()["applied"] is None

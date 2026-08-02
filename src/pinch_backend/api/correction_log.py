@@ -57,6 +57,7 @@ class CorrectionLogEntryOut(BaseModel):
     decision_splits: list[dict] | None
     decision_transfer: dict | None
     accepted_untouched: bool | None
+    batch_id: uuid.UUID | None
     voids: uuid.UUID | None
     void_reason: str | None
     created_at: datetime
@@ -87,6 +88,7 @@ def _out(e: CorrectionLogEntry) -> CorrectionLogEntryOut:
         decision_splits=e.decision_splits,
         decision_transfer=e.decision_transfer,
         accepted_untouched=e.accepted_untouched,
+        batch_id=e.batch_id,
         voids=e.voids,
         void_reason=e.void_reason,
         created_at=e.created_at,
