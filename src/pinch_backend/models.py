@@ -114,6 +114,31 @@ class ImportStatus(StrEnum):
     COMMITTED = "committed"
 
 
+class CategoryColor(StrEnum):
+    """The named palette slots a category's color may take (F4, CONTEXT.md:
+    Category identity): 15 chromatic hues plus slate, the neutral. The enum
+    is APPEND-ONLY — a name binds to "a color that reads as that name", the
+    frontend owns the actual values, and removing or repurposing a name
+    would silently re-color stored data. Grow it; never shrink it."""
+
+    RUST = "rust"
+    AMBER = "amber"
+    GOLD = "gold"
+    OLIVE = "olive"
+    GREEN = "green"
+    SAGE = "sage"
+    TEAL = "teal"
+    CYAN = "cyan"
+    SKY = "sky"
+    BLUE = "blue"
+    INDIGO = "indigo"
+    VIOLET = "violet"
+    PURPLE = "purple"
+    MAGENTA = "magenta"
+    ROSE = "rose"
+    SLATE = "slate"
+
+
 class RuleStatus(StrEnum):
     """Only ACTIVE rules are law (evaluated by the pipeline). PROPOSED and
     DISMISSED exist for CP4's promotion: a proposed rule awaits consent, a
@@ -123,6 +148,17 @@ class RuleStatus(StrEnum):
     ACTIVE = "active"
     DISABLED = "disabled"
     DISMISSED = "dismissed"
+
+
+class RuleOrigin(StrEnum):
+    """How a rule came to be (F4, CONTEXT.md: Rule origin) — authored by the
+    user, or minted by promotion from their own repeated filings. Fixed at
+    creation and permanent: without it, an accepted promoted rule would be
+    indistinguishable from a hand-authored one, and that provenance can't
+    be reconstructed later."""
+
+    USER = "user"
+    PROMOTION = "promotion"
 
 
 class ProposalProvenance(StrEnum):
@@ -576,6 +612,12 @@ class Category(TimestampMixin, Model):
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="categories", index=True)]
     name: str
+    emoji: str | None = None
+    """Chosen identity glyph (CONTEXT.md: Category identity). NULL = unset —
+    the neutral default rendering."""
+    color: CategoryColor | None = None
+    """A named palette slot, never a raw color value — the frontend owns
+    what each name renders as. NULL = unset."""
     parent: Annotated[
         Optional["Category"], ForeignKey(related_name="children", on_delete="RESTRICT")
     ] = None
@@ -728,6 +770,9 @@ class Rule(TimestampMixin, Model):
     status: RuleStatus = RuleStatus.ACTIVE
     """User-created rules are ACTIVE by authorship; PROPOSED is what CP4's
     promotion mints."""
+    origin: RuleOrigin = RuleOrigin.USER
+    """Immutable at mint (CONTEXT.md: Rule origin). The USER default is also
+    the backfill: every pre-F4 row was hand-authored."""
     condition: dict
     """A validated ConditionSpec (versioned); never queried into — loaded
     and evaluated in Python only."""
@@ -858,6 +903,12 @@ class CorrectionLogEntry(TimestampMixin, Model):
     ``{kind: linked|untracked, counterpart_transaction_id,
     counterpart_account_id}`` — a snapshot, surviving dissolution and
     counterpart deletion. Null when the decision wasn't a transfer."""
+    accepted_untouched: bool | None = None
+    """Consent without correction (F4, CONTEXT.md: Accepted untouched):
+    the applied decision equals the proposal envelope, determined at
+    decision time — the write path always sets it on DECISION entries.
+    NULL = a pre-F4 row awaiting the startup backfill, or a void entry
+    (not a decision, never applicable)."""
     # Void bookkeeping (kind=void only).
     voids: uuid.UUID | None = Field(default=None, index=True)
     """The entry this one retracts — a bare id, same reasoning as

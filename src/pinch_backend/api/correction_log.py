@@ -4,7 +4,7 @@ of this endpoint. Read-only — entries are written by consume/undo, never
 over HTTP."""
 
 import uuid
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Annotated
 
 from litestar import Router, get
@@ -25,6 +25,9 @@ from pinch_backend.models import (
     CorrectionLogEntry,
     Ledger,
     ProposalProvenance,
+    Rule,
+    RuleOrigin,
+    RuleStatus,
 )
 
 
@@ -53,6 +56,7 @@ class CorrectionLogEntryOut(BaseModel):
     decision_display_name: str | None
     decision_splits: list[dict] | None
     decision_transfer: dict | None
+    accepted_untouched: bool | None
     voids: uuid.UUID | None
     void_reason: str | None
     created_at: datetime
@@ -82,6 +86,7 @@ def _out(e: CorrectionLogEntry) -> CorrectionLogEntryOut:
         decision_display_name=e.decision_display_name,
         decision_splits=e.decision_splits,
         decision_transfer=e.decision_transfer,
+        accepted_untouched=e.accepted_untouched,
         voids=e.voids,
         void_reason=e.void_reason,
         created_at=e.created_at,
@@ -112,4 +117,99 @@ async def list_correction_log(
     return Page(items=[_out(e) for e in rows], next_cursor=next_cursor)
 
 
-correction_log_router = Router(path="/api/v1/correction-log", route_handlers=[list_correction_log])
+class CorrectionLogStatsOut(BaseModel):
+    """The Learning tab's tiles (F4 Enabler A, #66) — user-actor, non-voided
+    decisions only: auto-filed decisions aren't the user's behavior, and a
+    voided decision no longer describes reality. Percentages are null when
+    the window has no reviews (no fake zeros)."""
+
+    reviews_total: int
+    corrections_total: int
+    accepted_untouched_pct: float | None
+    current_month_pct: float | None
+    previous_month_pct: float | None
+    promoted_rules_accepted: int
+
+
+def _month_start(day: date) -> datetime:
+    return datetime(day.year, day.month, 1, tzinfo=UTC)
+
+
+def _prev_month_start(day: date) -> datetime:
+    year, month = (day.year - 1, 12) if day.month == 1 else (day.year, day.month - 1)
+    return datetime(year, month, 1, tzinfo=UTC)
+
+
+def _next_month_start(day: date) -> datetime:
+    year, month = (day.year + 1, 1) if day.month == 12 else (day.year, day.month + 1)
+    return datetime(year, month, 1, tzinfo=UTC)
+
+
+@get("/stats")
+async def correction_log_stats(
+    current_ledger: NamedDependency[Ledger],
+    as_of: Annotated[date | None, QueryParameter()] = None,
+) -> CorrectionLogStatsOut:
+    """Month windows are date-range predicates on created_at — no date_trunc
+    dependency; ``as_of`` is the clock seam (the M8 report convention)."""
+    ledger_id = current_ledger.id
+    today = as_of or datetime.now(UTC).date()
+
+    voided = [
+        v.voids
+        for v in await CorrectionLogEntry.where(
+            lambda e: (e.ledger_id == ledger_id) & (e.kind == CorrectionKind.VOID)
+        ).all()
+        if v.voids is not None
+    ]
+
+    def base(q):
+        q = q.where(
+            lambda e: (
+                (e.ledger_id == ledger_id)
+                & (e.kind == CorrectionKind.DECISION)
+                & (e.actor == CorrectionActor.USER)
+            )
+        )
+        if voided:
+            q = q.where(lambda e, ids=voided: ~e.id.in_(ids))
+        return q
+
+    async def window(start: datetime | None, end: datetime | None) -> tuple[int, int]:
+        q = base(CorrectionLogEntry.where(lambda e: e.ledger_id == ledger_id))
+        if start is not None:
+            q = q.where(lambda e, s=start: e.created_at >= s)
+        if end is not None:
+            q = q.where(lambda e, x=end: e.created_at < x)
+        total = await q.count()
+        untouched = await q.where(lambda e: e.accepted_untouched == True).count()  # noqa: E712
+        return total, untouched
+
+    def pct(total: int, untouched: int) -> float | None:
+        return untouched / total if total else None
+
+    all_total, all_untouched = await window(None, None)
+    cur_total, cur_untouched = await window(_month_start(today), _next_month_start(today))
+    prev_total, prev_untouched = await window(_prev_month_start(today), _month_start(today))
+
+    promoted = await Rule.where(
+        lambda r: (
+            (r.ledger_id == ledger_id)
+            & (r.origin == RuleOrigin.PROMOTION)
+            & (r.status == RuleStatus.ACTIVE)
+        )
+    ).count()
+
+    return CorrectionLogStatsOut(
+        reviews_total=all_total,
+        corrections_total=all_total - all_untouched,
+        accepted_untouched_pct=pct(all_total, all_untouched),
+        current_month_pct=pct(cur_total, cur_untouched),
+        previous_month_pct=pct(prev_total, prev_untouched),
+        promoted_rules_accepted=promoted,
+    )
+
+
+correction_log_router = Router(
+    path="/api/v1/correction-log", route_handlers=[list_correction_log, correction_log_stats]
+)

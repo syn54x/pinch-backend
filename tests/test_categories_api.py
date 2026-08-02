@@ -420,3 +420,63 @@ async def test_delete_with_null_disposition_empties_proposals(client) -> None:
     assert p.category_id is None
     assert p.provenance is ProposalProvenance.NONE
     assert p.provenance_detail is None
+
+
+async def test_category_identity_round_trips(client) -> None:
+    """Identity (emoji + named color slot) is born on create, editable,
+    clearable, and null when never set (F4 Enabler A, #66)."""
+    await _signup(client)
+
+    r = await client.post(
+        CATEGORIES,
+        json={"name": "Coffee", "emoji": "☕", "color": "teal"},
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 201, r.text
+    coffee = r.json()
+    assert coffee["emoji"] == "☕"
+    assert coffee["color"] == "teal"
+
+    plain = (await _create(client, "Plain")).json()
+    assert plain["emoji"] is None
+    assert plain["color"] is None
+
+    r = await client.patch(
+        f"{CATEGORIES}/{coffee['id']}",
+        json={"color": "rust"},
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["color"] == "rust"
+    assert r.json()["emoji"] == "☕"
+
+    r = await client.patch(
+        f"{CATEGORIES}/{coffee['id']}",
+        json={"emoji": None},
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["emoji"] is None
+    assert r.json()["color"] == "rust"
+
+    r = await client.get(f"{CATEGORIES}/{coffee['id']}")
+    assert r.json()["emoji"] is None
+    assert r.json()["color"] == "rust"
+
+
+async def test_category_color_outside_the_palette_is_rejected(client) -> None:
+    """Color is a named slot from the append-only palette enum — never a
+    free value (CONTEXT.md: Category identity)."""
+    await _signup(client)
+    r = await client.post(
+        CATEGORIES,
+        json={"name": "Freeform", "color": "#ff0000"},
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 400, r.text
+    r = await client.post(
+        CATEGORIES,
+        json={"name": "Freeform", "color": "chartreuse"},
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 400, r.text

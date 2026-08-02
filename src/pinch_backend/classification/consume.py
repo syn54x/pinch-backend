@@ -153,6 +153,9 @@ async def log_transfer_decision_on_reviewed(ledger: Ledger, counterpart: Transac
     is the fresh linked state its snapshot reads."""
     decision_splits, decision_transfer = await _split_transfer_state(counterpart.id)
     await CorrectionLogEntry.create(
+        # The linked state was imposed by consent on the OTHER side; this
+        # row had no proposal to accept, so it is not an untouched accept.
+        accepted_untouched=False,
         ledger=ledger,
         transaction_id=counterpart.id,
         kind=CorrectionKind.DECISION,
@@ -299,7 +302,23 @@ async def consume_proposal(
         decision_splits, decision_transfer = await _split_transfer_state(txn_id)
         if decision_splits is not None or decision_transfer is not None:
             category_id = None
+        # Accepted untouched (F4, CONTEXT.md): consent without correction —
+        # the applied decision equals the proposal envelope. A split is a
+        # deviation by construction; a transfer decision matches only a
+        # transfer-shaped proposal. Determined here, where both objects are
+        # in hand — never reconstructed at query time.
+        untouched = (
+            decision_splits is None
+            and category_id == proposal_category_id
+            and set(tags) == set(proposal_tags)
+            and (
+                display_name is None
+                or display_name == (proposal.proposed_display_name if proposal else None)
+            )
+            and bool(decision_transfer) == bool(proposal is not None and proposal.proposed_transfer)
+        )
         entry = await CorrectionLogEntry.create(
+            accepted_untouched=untouched,
             ledger=ledger,
             transaction_id=txn.id,
             kind=CorrectionKind.DECISION,

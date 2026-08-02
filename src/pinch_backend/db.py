@@ -22,6 +22,33 @@ async def connect_database() -> None:
         migrate_updates=settings.database_migrate_updates,
         migrate_destructive=settings.database_migrate_destructive,
     )
+    async with ferro.engines.session():
+        await backfill_accepted_untouched()
+
+
+async def backfill_accepted_untouched() -> None:
+    """One-shot, idempotent (F4 Enabler A, #66): pre-F4 DECISION rows carry
+    accepted_untouched=NULL; the rows are self-contained, so the flag is
+    derivable. One approximation, documented: proposed_transfer was never
+    snapshotted, so a transfer decision counts as untouched only under
+    DETECTION provenance (the only provenance whose accept path minted a
+    transfer on this row). Void rows stay NULL — not decisions."""
+    from pinch_backend.models import CorrectionKind, CorrectionLogEntry, ProposalProvenance
+
+    rows = await CorrectionLogEntry.where(
+        lambda e: (e.accepted_untouched == None) & (e.kind == CorrectionKind.DECISION)  # noqa: E711
+    ).all()
+    for e in rows:
+        e.accepted_untouched = (
+            e.decision_splits is None
+            and e.decision_category_id == e.proposal_category_id
+            and set(e.decision_tags) == set(e.proposal_tags)
+            and (e.decision_display_name in (None, e.proposal_display_name))
+            and (
+                e.decision_transfer is None or e.proposal_provenance is ProposalProvenance.DETECTION
+            )
+        )
+        await e.save()
 
 
 async def disconnect_database() -> None:

@@ -41,6 +41,7 @@ async def test_create_defaults_to_active_and_round_trips(client) -> None:
     assert r.status_code == 201, r.text
     body = r.json()
     assert body["status"] == "active"
+    assert body["origin"] == "user"
     assert body["condition"]["payee"]["value"] == "costco"
     assert body["action_category"] == {"id": cat["id"], "name": "Groceries3"}
     assert body["action_add_tags"] == ["bulk"]
@@ -321,3 +322,36 @@ async def test_preview_fills_currency_and_rejects_garbage(client) -> None:
     assert ok.status_code == 200  # currency filled from primary (USD)
     bad = await client.post(f"{RULES}/preview", json={}, headers=await _csrf(client))
     assert bad.status_code == 400
+
+
+async def test_list_annotates_each_rule_with_its_matched_count(client, run_jobs) -> None:
+    """'matched 12' (F4 Enabler A, #66): how many reviewed decisions this
+    rule contributed to — counted from the log's provenance snapshots, so
+    it survives anything but the log itself."""
+    from test_flywheel_e2e import _account, _commit_csv, _review, _transactions
+
+    await _signup(client)
+    cat = await _category(client, "Groceries9")
+    r = await _create_rule(client, action_category_id=cat["id"])
+    rule_id = r.json()["id"]
+
+    account = await _account(client)
+    await _commit_csv(
+        client,
+        account,
+        rows=[
+            ("2026-07-01", "-214.90", "COSTCO #482"),
+            ("2026-07-02", "-62.10", "COSTCO GAS"),
+            ("2026-07-03", "-4.50", "BLUE BOTTLE"),
+        ],
+    )
+    await run_jobs()
+    for txn in await _transactions(client):
+        assert (await _review(client, txn["id"])).status_code == 200
+
+    listing = (await client.get(RULES)).json()["items"]
+    by_id = {item["id"]: item for item in listing}
+    assert by_id[rule_id]["matched_count"] == 2
+
+    single = (await client.get(f"{RULES}/{rule_id}")).json()
+    assert single["matched_count"] == 2
