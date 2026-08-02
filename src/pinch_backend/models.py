@@ -114,6 +114,31 @@ class ImportStatus(StrEnum):
     COMMITTED = "committed"
 
 
+class CategoryColor(StrEnum):
+    """The named palette slots a category's color may take (F4, CONTEXT.md:
+    Category identity): 15 chromatic hues plus slate, the neutral. The enum
+    is APPEND-ONLY — a name binds to "a color that reads as that name", the
+    frontend owns the actual values, and removing or repurposing a name
+    would silently re-color stored data. Grow it; never shrink it."""
+
+    RUST = "rust"
+    AMBER = "amber"
+    GOLD = "gold"
+    OLIVE = "olive"
+    GREEN = "green"
+    SAGE = "sage"
+    TEAL = "teal"
+    CYAN = "cyan"
+    SKY = "sky"
+    BLUE = "blue"
+    INDIGO = "indigo"
+    VIOLET = "violet"
+    PURPLE = "purple"
+    MAGENTA = "magenta"
+    ROSE = "rose"
+    SLATE = "slate"
+
+
 class RuleStatus(StrEnum):
     """Only ACTIVE rules are law (evaluated by the pipeline). PROPOSED and
     DISMISSED exist for CP4's promotion: a proposed rule awaits consent, a
@@ -576,6 +601,12 @@ class Category(TimestampMixin, Model):
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="categories", index=True)]
     name: str
+    emoji: str | None = None
+    """Chosen identity glyph (CONTEXT.md: Category identity). NULL = unset —
+    the neutral default rendering."""
+    color: CategoryColor | None = None
+    """A named palette slot, never a raw color value — the frontend owns
+    what each name renders as. NULL = unset."""
     parent: Annotated[
         Optional["Category"], ForeignKey(related_name="children", on_delete="RESTRICT")
     ] = None

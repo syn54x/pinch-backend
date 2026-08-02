@@ -26,6 +26,7 @@ from pinch_backend.api.pagination import (
 )
 from pinch_backend.models import (
     Category,
+    CategoryColor,
     Ledger,
     Proposal,
     ProposalProvenance,
@@ -46,6 +47,10 @@ class CategoryCreateIn(BaseModel):
     parent_id: uuid.UUID | None = None
     """A top-level node when null; otherwise nests under the named parent
     (depth-capped, validated server-side)."""
+    emoji: str | None = Field(default=None, min_length=1, max_length=20)
+    """Identity glyph — one emoji (ZWJ sequences fit the bound); null = unset."""
+    color: CategoryColor | None = None
+    """A named palette slot (append-only enum); null = unset."""
 
 
 class CategoryUpdateIn(BaseModel):
@@ -58,6 +63,10 @@ class CategoryUpdateIn(BaseModel):
     reparent: bool = False
     """True to apply parent_id (including null → top level). Distinguishes
     "move to top level" from "don't touch the parent" without a sentinel."""
+    emoji: str | None = Field(default=None, min_length=1, max_length=20)
+    """Present-and-null clears; absent leaves unchanged (model_fields_set)."""
+    color: CategoryColor | None = None
+    """Present-and-null clears; absent leaves unchanged (model_fields_set)."""
 
     @model_validator(mode="after")
     def _parent_id_requires_reparent(self) -> "CategoryUpdateIn":
@@ -81,6 +90,8 @@ class CategoryOut(BaseModel):
     id: uuid.UUID
     name: str
     parent_id: uuid.UUID | None
+    emoji: str | None
+    color: CategoryColor | None
     created_at: datetime
 
 
@@ -88,6 +99,8 @@ def _out(c: Category) -> CategoryOut:
     return CategoryOut(
         id=c.id,
         name=c.name,
+        emoji=c.emoji,
+        color=c.color,
         parent_id=c.parent_id,  # ty: ignore[unresolved-attribute]
         created_at=c.created_at,
     )
@@ -122,7 +135,13 @@ async def create_category(
     parent = await _get(current_ledger, data.parent_id) if data.parent_id else None
     await taxonomy.validate_placement(parent)
     await _assert_sibling_name_free(current_ledger.id, data.parent_id, data.name, None)
-    category = await Category.create(ledger=current_ledger, name=data.name, parent=parent)
+    category = await Category.create(
+        ledger=current_ledger,
+        name=data.name,
+        parent=parent,
+        emoji=data.emoji,
+        color=data.color,
+    )
     log.info("category.created", category_id=str(category.id), ledger_id=str(current_ledger.id))
     return _out(category)
 
@@ -154,6 +173,8 @@ async def update_category(
     current_ledger: NamedDependency[Ledger],
 ) -> CategoryOut:
     category = await _get(current_ledger, category_id)
+    # Every query runs before any mutation: a fresh SELECT refreshes this
+    # identity-mapped instance and would clobber unsaved field changes.
     new_parent_id = category.parent_id  # ty: ignore[unresolved-attribute]
     if data.reparent:
         new_parent = await _get(current_ledger, data.parent_id) if data.parent_id else None
@@ -166,11 +187,16 @@ async def update_category(
             raise ClientException(
                 detail=f"Re-parenting would nest deeper than {taxonomy.MAX_DEPTH} levels"
             )
-        category.parent_id = new_parent.id if new_parent else None  # ty: ignore[unresolved-attribute]
-        new_parent_id = data.parent_id
-    if data.name is not None:
-        category.name = data.name
-    await _assert_sibling_name_free(current_ledger.id, new_parent_id, category.name, category.id)
+        new_parent_id = new_parent.id if new_parent else None
+    new_name = data.name if data.name is not None else category.name
+    await _assert_sibling_name_free(current_ledger.id, new_parent_id, new_name, category.id)
+    if data.reparent:
+        category.parent_id = new_parent_id  # ty: ignore[unresolved-attribute]
+    category.name = new_name
+    if "emoji" in data.model_fields_set:
+        category.emoji = data.emoji
+    if "color" in data.model_fields_set:
+        category.color = data.color
     await category.save()
     log.info("category.updated", category_id=str(category.id), ledger_id=str(current_ledger.id))
     return _out(category)
