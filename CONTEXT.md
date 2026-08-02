@@ -101,6 +101,28 @@ docs, and conversation. Implementation details do not belong in this file.
   a new rule when the user's own filings repeat consistently (**rule
   promotion**); a proposed rule is never law — a rule is only ever created
   with user consent.
+- **Rule origin** — how a rule came to be: authored by the user directly, or
+  minted by promotion from the user's own repeated filings. Fixed at
+  creation and permanent — an accepted promoted rule remains recognizably
+  promoted.
+- **Retro-apply** — extending a newly created rule to transactions that
+  already exist, chosen at creation in escalating consent tiers: *forward
+  only* (existing transactions untouched), *unreviewed* (the default —
+  matching unreviewed transactions are re-proposed under the rule and
+  reviewed as usual), and *full* (a user-consented bulk edit: matching
+  reviewed transactions are recategorized in place — they stay reviewed,
+  nothing returns to the Inbox, and every change is a logged decision,
+  grouped as one batch). Retro-apply never touches split parents or
+  transfer members, and a transfer-marking rule is forward-only. Editing a
+  rule is not an apply — retro-apply is a creation-time consent, and there
+  is no undo: recovery is editing the transactions again.
+- **Accepted untouched** — a review decision identical to its proposal:
+  consent without correction. Determined at decision time and recorded on
+  the log entry; the flywheel's accuracy measure.
+- **Category identity** — a category's chosen emoji and color. The color is
+  drawn from a fixed palette of named slots (the palette may grow, never
+  shrink — a slot name is forever); identity follows the category through
+  every surface that renders it.
 
 ## Tenancy
 
