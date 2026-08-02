@@ -36,11 +36,67 @@ class TagCreateIn(BaseModel):
 class TagOut(BaseModel):
     id: uuid.UUID
     name: str
+    transaction_count: int
+    net_minor: int
+    """Signed sum of the tagged transactions' amounts."""
+    pending_minor: int
+    """The unsettled slice of net_minor — tagged transactions the
+    institution still reports as pending."""
     created_at: datetime
 
 
-def _out(t: Tag) -> TagOut:
-    return TagOut(id=t.id, name=t.name, created_at=t.created_at)
+def _out(t: Tag, agg: "_TagAggregate | None" = None) -> TagOut:
+    agg = agg or _TagAggregate()
+    return TagOut(
+        id=t.id,
+        name=t.name,
+        transaction_count=agg.count,
+        net_minor=agg.net_minor,
+        pending_minor=agg.pending_minor,
+        created_at=t.created_at,
+    )
+
+
+class _TagAggregate(BaseModel):
+    count: int = 0
+    net_minor: int = 0
+    pending_minor: int = 0
+
+
+async def _aggregates_for(tag_ids: list[uuid.UUID]) -> dict[uuid.UUID, _TagAggregate]:
+    """Per-tag totals over the join, grouped in SQL (the M8 dict-lambda
+    idiom); two queries because the pending slice is a filtered sum."""
+    if not tag_ids:
+        return {}
+    totals = (
+        await TransactionTag.select(
+            lambda tt: {
+                "tag": tt.tag_id,
+                "n": tt.id.count(),
+                "net": tt.transaction.amount_minor.sum(),
+            }
+        )
+        .where(lambda tt, ids=tag_ids: tt.tag_id.in_(ids))
+        .all()
+    )
+    pending = (
+        await TransactionTag.select(
+            lambda tt: {"tag": tt.tag_id, "net": tt.transaction.amount_minor.sum()}
+        )
+        .where(lambda tt, ids=tag_ids: tt.tag_id.in_(ids) & (tt.transaction.pending == True))  # noqa: E712
+        .all()
+    )
+    out: dict[uuid.UUID, _TagAggregate] = {}
+    for row in totals:
+        out[row.tag] = _TagAggregate(  # ty: ignore[unresolved-attribute]
+            count=row.n,  # ty: ignore[unresolved-attribute]
+            net_minor=row.net or 0,  # ty: ignore[unresolved-attribute]
+        )
+    for row in pending:
+        out.setdefault(row.tag, _TagAggregate()).pending_minor = (  # ty: ignore[unresolved-attribute]
+            row.net or 0  # ty: ignore[unresolved-attribute]
+        )
+    return out
 
 
 @post("/")
@@ -67,7 +123,8 @@ async def list_tags(
     rows, next_cursor = await paginate(
         Tag.where(lambda t: t.ledger_id == ledger_id), cursor=cursor, limit=limit
     )
-    return Page(items=[_out(t) for t in rows], next_cursor=next_cursor)
+    aggregates = await _aggregates_for([t.id for t in rows])
+    return Page(items=[_out(t, aggregates.get(t.id)) for t in rows], next_cursor=next_cursor)
 
 
 @delete("/{tag_id:uuid}")

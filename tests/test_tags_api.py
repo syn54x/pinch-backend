@@ -48,3 +48,61 @@ async def test_delete_removes_the_tag(client) -> None:
     assert r.status_code == 204
     listing = await client.get(TAGS)
     assert tag_id not in {t["id"] for t in listing.json()["items"]}
+
+
+async def _account(client) -> str:
+    r = await client.post(
+        "/api/v1/accounts",
+        json={"kind": "depository", "label": "Checking", "currency": "USD"},
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+async def _txn(client, account_id: str, amount_minor: int, tags: list[str]) -> str:
+    r = await client.post(
+        "/api/v1/transactions",
+        json={
+            "account_id": account_id,
+            "date": "2026-07-15",
+            "amount_minor": amount_minor,
+            "description": f"seed {amount_minor}",
+            "tags": tags,
+        },
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+async def test_list_carries_per_tag_aggregates(client) -> None:
+    """Each tag totals its transactions: count, net, and the unsettled slice
+    (F4 Enabler A, #66 — the expense-report numbers)."""
+    from pinch_backend.models import Transaction
+
+    await _signup(client)
+    account = await _account(client)
+    await _txn(client, account, -21480, ["trip"])
+    pending_id = await _txn(client, account, -6210, ["trip"])
+    await _txn(client, account, 5000, ["trip"])
+    await _txn(client, account, -999, ["other"])
+    await client.post(TAGS, json={"name": "unused"}, headers=await _csrf(client))
+
+    row = await Transaction.get(pending_id)
+    row.pending = True
+    await row.save()
+
+    resp = await client.get(TAGS)
+    assert resp.status_code == 200, resp.text
+    listing = resp.json()["items"]
+    by_name = {t["name"]: t for t in listing}
+    assert by_name["trip"]["transaction_count"] == 3
+    assert by_name["trip"]["net_minor"] == -22690
+    assert by_name["trip"]["pending_minor"] == -6210
+    assert by_name["other"]["transaction_count"] == 1
+    assert by_name["other"]["net_minor"] == -999
+    assert by_name["other"]["pending_minor"] == 0
+    assert by_name["unused"]["transaction_count"] == 0
+    assert by_name["unused"]["net_minor"] == 0
+    assert by_name["unused"]["pending_minor"] == 0
