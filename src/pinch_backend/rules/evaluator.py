@@ -112,9 +112,11 @@ def narrow(spec: "ConditionSpec", query):
 
 
 async def scan_matches(
-    spec: "ConditionSpec", ledger_id: "uuid.UUID", *, cap: int
+    spec: "ConditionSpec", ledger_id: "uuid.UUID", *, cap: int | None
 ) -> tuple[list[Transaction], bool]:
-    """Up to ``cap`` matching transactions (id order) + a truncation flag.
+    """Up to ``cap`` matching transactions (id order) + a truncation flag;
+    ``cap=None`` scans to the end (retro-apply and the consent counts need
+    the full set — F4 Enabler B, #67).
 
     Narrowed SQL keyset batches, finished in Python by matches(). Worst case
     scans the ledger (a CP1-volumes seam, same class as the tag filter);
