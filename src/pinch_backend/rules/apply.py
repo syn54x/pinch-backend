@@ -8,12 +8,23 @@ before consent is given.
 """
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from pinch_backend.models import SplitLine, Transaction, Transfer
+from pinch_backend.models import Proposal, ProposalTag, SplitLine, Transaction, Transfer
 
 if TYPE_CHECKING:
     import uuid
+
+
+class RetroApplyTier(StrEnum):
+    """The escalating consent tiers, chosen at rule creation (CONTEXT.md:
+    Retro-apply). Cumulative: UNREVIEWED includes forward; FULL includes
+    both. Never re-offered on edit."""
+
+    FORWARD = "forward"
+    UNREVIEWED = "unreviewed"
+    FULL = "full"
 
 
 @dataclass
@@ -55,3 +66,24 @@ async def breakdown(matched: "list[Transaction]") -> MatchBreakdown:
         else:
             out.reviewed.append(txn)
     return out
+
+
+async def clear_proposals(txns: "list[Transaction]") -> None:
+    """Vacate the pending proposals on matching unreviewed transactions so
+    the next sweep re-proposes under the now-active rule — the rule still
+    never writes user data; the Inbox refresh IS the apply. The caller
+    defers classify_ledger after commit."""
+    if not txns:
+        return
+    ids = [t.id for t in txns]
+    proposals = await Proposal.where(lambda p, tids=ids: p.transaction_id.in_(tids)).all()
+    if not proposals:
+        return
+    proposal_ids = [p.id for p in proposals]
+    await ProposalTag.where(lambda pt, pids=proposal_ids: pt.proposal_id.in_(pids)).delete()
+    await Proposal.where(lambda p, pids=proposal_ids: p.id.in_(pids)).delete()
+
+
+async def apply_to_reviewed(ledger, rule, txns):
+    """Full tier (B3): implemented in the next cycle."""
+    raise NotImplementedError

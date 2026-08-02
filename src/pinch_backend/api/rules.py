@@ -10,6 +10,7 @@ import uuid
 from datetime import datetime
 from typing import Annotated
 
+from ferro import transaction
 from litestar import Router, delete, get, patch, post
 from litestar.di import NamedDependency
 from litestar.exceptions import ClientException, NotFoundException
@@ -25,6 +26,7 @@ from pinch_backend.api.pagination import (
     paginate,
 )
 from pinch_backend.api.transactions import CategoryRef, TransactionOut, hydrate_transactions
+from pinch_backend.jobs import classify_ledger
 from pinch_backend.models import (
     Category,
     CorrectionKind,
@@ -37,7 +39,12 @@ from pinch_backend.models import (
     User,
 )
 from pinch_backend.observability import get_logger
-from pinch_backend.rules.apply import breakdown
+from pinch_backend.rules.apply import (
+    RetroApplyTier,
+    apply_to_reviewed,
+    breakdown,
+    clear_proposals,
+)
 from pinch_backend.rules.evaluator import scan_matches
 from pinch_backend.rules.spec import ConditionSpec
 
@@ -58,6 +65,10 @@ class RuleCreateIn(BaseModel):
     action_mark_transfer: bool = False
     """Propose an untracked transfer (M6 CP4); mutually exclusive with
     action_category_id — one rule, one classification stance."""
+    apply: RetroApplyTier = RetroApplyTier.FORWARD
+    """The retro-apply consent tier (F4 Enabler B, #67; CONTEXT.md) —
+    creation-time only, never re-offered on edit. Transfer-marking rules
+    are forward-only."""
 
 
 class RulePatchIn(BaseModel):
@@ -75,6 +86,21 @@ class RulePatchIn(BaseModel):
     status: RuleStatus | None = None
 
 
+class RuleApplyReport(BaseModel):
+    """What one retro-apply consent actually did (F4 Enabler B, #67)."""
+
+    tier: RetroApplyTier
+    refreshed_unreviewed: int
+    """Unreviewed matches whose proposals were vacated for re-sweep under
+    the new rule."""
+    recategorized_reviewed: int
+    """Reviewed matches recategorized in place (full tier only)."""
+    skipped: int
+    """Split parents and transfer members — structure kept, counted."""
+    batch_id: uuid.UUID | None
+    """Groups the full tier's log entries; null below the full tier."""
+
+
 class RuleOut(BaseModel):
     """What a client may see about a rule — an allowlist, never the row."""
 
@@ -90,6 +116,8 @@ class RuleOut(BaseModel):
     action_add_tags: list[str]
     action_rename_to: str | None
     action_mark_transfer: bool
+    applied: RuleApplyReport | None = None
+    """Present only on the create response, when a retro tier ran."""
     created_at: datetime
 
 
@@ -225,7 +253,9 @@ async def create_rule(
     current_user: NamedDependency[User],
 ) -> RuleOut:
     """A user-created rule is law immediately (status=active): consent by
-    authorship. PROPOSED is what CP4's promotion mints."""
+    authorship. PROPOSED is what CP4's promotion mints. ``apply`` runs the
+    consented retro tier in the same request (F4 Enabler B, #67) —
+    creation-time by construction, so re-apply doesn't exist."""
     spec = parse_condition(data.condition, current_user.primary_currency)
     _assert_coherent_actions(
         data.action_category_id,
@@ -233,21 +263,58 @@ async def create_rule(
         data.action_rename_to,
         data.action_mark_transfer,
     )
+    if data.action_mark_transfer and data.apply is not RetroApplyTier.FORWARD:
+        raise ClientException(
+            detail="Transfer-marking rules are forward-only — a rule sees one "
+            "transaction and cannot re-interpret settled history"
+        )
     category = (
         await _resolve_category(current_ledger, data.action_category_id)
         if data.action_category_id
         else None
     )
-    rule = await Rule.create(
-        ledger=current_ledger,
-        condition=spec.model_dump(exclude_none=True),
-        action_category=category,
-        action_add_tags=data.action_add_tags,
-        action_rename_to=data.action_rename_to,
-        action_mark_transfer=data.action_mark_transfer,
+    report: RuleApplyReport | None = None
+    async with transaction():
+        rule = await Rule.create(
+            ledger=current_ledger,
+            condition=spec.model_dump(exclude_none=True),
+            action_category=category,
+            action_add_tags=data.action_add_tags,
+            action_rename_to=data.action_rename_to,
+            action_mark_transfer=data.action_mark_transfer,
+        )
+        if data.apply is not RetroApplyTier.FORWARD:
+            matched, _ = await scan_matches(spec, current_ledger.id, cap=None)
+            split = await breakdown(matched)
+            await clear_proposals(split.unreviewed)
+            batch_id: uuid.UUID | None = None
+            recategorized = 0
+            if data.apply is RetroApplyTier.FULL and split.reviewed:
+                batch_id, recategorized = await apply_to_reviewed(
+                    current_ledger, rule, split.reviewed
+                )
+            report = RuleApplyReport(
+                tier=data.apply,
+                refreshed_unreviewed=len(split.unreviewed),
+                recategorized_reviewed=recategorized,
+                skipped=len(split.skipped),
+                batch_id=batch_id,
+            )
+    if report is not None and report.refreshed_unreviewed:
+        # Defer-after-commit (jobs module contract): the sweep re-proposes
+        # the vacated backlog under the now-active rule.
+        await classify_ledger.configure(lock=f"ledger:{current_ledger.id}").defer_async(
+            ledger_id=str(current_ledger.id)
+        )
+    log.info(
+        "rule.created",
+        rule_id=str(rule.id),
+        ledger_id=str(current_ledger.id),
+        apply_tier=str(data.apply),
     )
-    log.info("rule.created", rule_id=str(rule.id), ledger_id=str(current_ledger.id))
-    return await rule_out(rule)
+    out = await rule_out(rule)
+    out.applied = report
+    return out
 
 
 @get("/")

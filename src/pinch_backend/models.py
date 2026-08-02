@@ -903,6 +903,10 @@ class CorrectionLogEntry(TimestampMixin, Model):
     ``{kind: linked|untracked, counterpart_transaction_id,
     counterpart_account_id}`` — a snapshot, surviving dissolution and
     counterpart deletion. Null when the decision wasn't a transfer."""
+    batch_id: uuid.UUID | None = Field(default=None, index=True)
+    """Groups the per-transaction entries of one full-tier retro-apply
+    (F4, CONTEXT.md: Retro-apply) — the Learning tab collapses on it.
+    NULL = an ordinary single-transaction decision."""
     accepted_untouched: bool | None = None
     """Consent without correction (F4, CONTEXT.md: Accepted untouched):
     the applied decision equals the proposal envelope, determined at
