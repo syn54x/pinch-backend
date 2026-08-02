@@ -6,7 +6,13 @@ from ferro import connect, engines, execute, reset_engine
 
 DEFAULT_TEST_DATABASE_URL = "postgres://postgres:password@localhost:5432/postgres"
 """The local-pg docker container; CI's service container answers the same
-DSN. sqlite was retired at M5 CP3 — Postgres is the only backend."""
+DSN. sqlite was retired at M5 CP3 — Postgres is the only backend.
+
+Deliberately NOT the app default's `pinch` database: tests isolate via
+throwaway schemas and only need a database that always exists — the
+`postgres` maintenance db is guaranteed on any instance, which is what
+keeps plain `uv run pytest` zero-setup. Do not "align" this with
+settings.database_url."""
 
 
 def pytest_configure() -> None:

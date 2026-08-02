@@ -9,8 +9,12 @@ This distribution (`pinch-backend`) is **not published to PyPI** (enforced via t
 ## Development
 
 Development runs against a local Postgres (`docker run -d --name local-pg
--e POSTGRES_PASSWORD=password -p 5432:5432 postgres:18`); tests isolate
-themselves in throwaway schemas.
+-e POSTGRES_PASSWORD=password -e POSTGRES_DB=pinch -p 5432:5432
+postgres:18`); the app's default DSN points at the `pinch` database.
+Tests isolate themselves in throwaway schemas (in the always-present
+`postgres` maintenance db, so plain `uv run pytest` needs no setup). On a
+container created before `POSTGRES_DB=pinch`, create the database once:
+`docker exec local-pg psql -U postgres -c 'CREATE DATABASE pinch'`.
 
 ```bash
 uv sync
