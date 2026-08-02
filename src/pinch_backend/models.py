@@ -903,6 +903,12 @@ class CorrectionLogEntry(TimestampMixin, Model):
     ``{kind: linked|untracked, counterpart_transaction_id,
     counterpart_account_id}`` — a snapshot, surviving dissolution and
     counterpart deletion. Null when the decision wasn't a transfer."""
+    accepted_untouched: bool | None = None
+    """Consent without correction (F4, CONTEXT.md: Accepted untouched):
+    the applied decision equals the proposal envelope, determined at
+    decision time — the write path always sets it on DECISION entries.
+    NULL = a pre-F4 row awaiting the startup backfill, or a void entry
+    (not a decision, never applicable)."""
     # Void bookkeeping (kind=void only).
     voids: uuid.UUID | None = Field(default=None, index=True)
     """The entry this one retracts — a bare id, same reasoning as
