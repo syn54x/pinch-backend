@@ -25,7 +25,17 @@ from pinch_backend.api.pagination import (
     paginate,
 )
 from pinch_backend.api.transactions import CategoryRef, TransactionOut, hydrate_transactions
-from pinch_backend.models import Category, Ledger, Rule, RuleOrigin, RuleStatus, User
+from pinch_backend.models import (
+    Category,
+    CorrectionKind,
+    CorrectionLogEntry,
+    Ledger,
+    ProposalProvenance,
+    Rule,
+    RuleOrigin,
+    RuleStatus,
+    User,
+)
 from pinch_backend.observability import get_logger
 from pinch_backend.rules.evaluator import scan_matches
 from pinch_backend.rules.spec import ConditionSpec
@@ -70,6 +80,10 @@ class RuleOut(BaseModel):
     id: uuid.UUID
     status: RuleStatus
     origin: RuleOrigin
+    matched_count: int
+    """Reviewed decisions this rule contributed to, counted from the log's
+    provenance snapshots (F4 Enabler A, #66) — survives anything but the
+    log itself. The wireframe's "matched 12"."""
     condition: dict
     action_category: CategoryRef | None
     action_add_tags: list[str]
@@ -140,8 +154,45 @@ async def _resolve_category(ledger: Ledger, category_id: uuid.UUID) -> Category:
     return category
 
 
-async def rule_out(rule: Rule) -> RuleOut:
+async def matched_counts(ledger_id: uuid.UUID, rule_ids: list[uuid.UUID]) -> dict[str, int]:
+    """Per-rule decision counts folded in Python from the rule-provenance
+    snapshots (detail.rule_ids names every contributor) — JSONB is never
+    queried into (M5 D11), so the set-shaped part stays SQL and the fold
+    stays here (the M8 tier law). Voided decisions no longer describe
+    reality and are excluded."""
+    if not rule_ids:
+        return {}
+    wanted = {str(rid) for rid in rule_ids}
+    entries = await CorrectionLogEntry.where(
+        lambda e: (
+            (e.ledger_id == ledger_id)
+            & (e.kind == CorrectionKind.DECISION)
+            & (e.proposal_provenance == ProposalProvenance.RULE)
+        )
+    ).all()
+    entry_ids = [e.id for e in entries]
+    voided: set[uuid.UUID] = set()
+    if entry_ids:
+        voided = {
+            v.voids
+            for v in await CorrectionLogEntry.where(lambda v, ids=entry_ids: v.voids.in_(ids)).all()
+            if v.voids is not None
+        }
+    counts: dict[str, int] = {}
+    for e in entries:
+        if e.id in voided:
+            continue
+        for rid in (e.proposal_detail or {}).get("rule_ids", []):
+            if rid in wanted:
+                counts[rid] = counts.get(rid, 0) + 1
+    return counts
+
+
+async def rule_out(rule: Rule, matched_count: int | None = None) -> RuleOut:
     """Public: review responses embed the minted rule (M5 CP4)."""
+    if matched_count is None:
+        found = await matched_counts(rule.ledger_id, [rule.id])  # ty: ignore[unresolved-attribute]
+        matched_count = found.get(str(rule.id), 0)
     category = None
     if rule.action_category_id is not None:  # ty: ignore[unresolved-attribute]
         row = await Category.get(rule.action_category_id)  # ty: ignore[unresolved-attribute]
@@ -150,6 +201,7 @@ async def rule_out(rule: Rule) -> RuleOut:
         id=rule.id,
         status=rule.status,
         origin=rule.origin,
+        matched_count=matched_count,
         condition=rule.condition,
         action_category=category,
         action_add_tags=rule.action_add_tags,
@@ -205,7 +257,11 @@ async def list_rules(
         wanted = status
         query = query.where(lambda r, s=wanted: r.status == s)
     rows, next_cursor = await paginate(query, cursor=cursor, limit=limit)
-    return Page(items=[await rule_out(r) for r in rows], next_cursor=next_cursor)
+    counts = await matched_counts(ledger_id, [r.id for r in rows])
+    return Page(
+        items=[await rule_out(r, counts.get(str(r.id), 0)) for r in rows],
+        next_cursor=next_cursor,
+    )
 
 
 @post("/preview", status_code=HTTP_200_OK)
