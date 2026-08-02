@@ -29,10 +29,12 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     environment: str = "development"
 
-    database_url: str = "postgres://postgres:password@localhost:5432/postgres"
+    database_url: str = "postgres://postgres:password@localhost:5432/pinch"
     """The one datastore (ADR-0003); default matches the local-pg dev
-    container. sqlite support was retired at M5 CP3: Procrastinate made
-    Postgres load-bearing for the product's core loop, and a backend
+    container (started with POSTGRES_DB=pinch — see the README). The app
+    gets its own named database rather than squatting in the `postgres`
+    maintenance db. sqlite support was retired at M5 CP3: Procrastinate
+    made Postgres load-bearing for the product's core loop, and a backend
     nothing deploys on isn't worth a parallel execution story."""
     database_auto_migrate: bool = True
     """Migrate the schema automatically on connect. Config, not a code fork
