@@ -86,3 +86,71 @@ async def test_backfill_derives_the_flag_for_pre_f4_rows(client, db) -> None:
     assert entries[str(accepted.id)]["accepted_untouched"] is True
     assert entries[str(corrected.id)]["accepted_untouched"] is False
     assert entries[str(void.id)]["accepted_untouched"] is None
+
+
+async def test_stats_rolls_up_the_flywheel(client, db) -> None:
+    """Reviews, corrections, untouched %, month-over-month windows, and
+    accepted promoted rules — user-actor, non-voided decisions only."""
+    import uuid as uuid_mod
+    from datetime import UTC, datetime
+
+    import pytest
+
+    from pinch_backend.models import (
+        CorrectionActor,
+        CorrectionKind,
+        CorrectionLogEntry,
+        Rule,
+        RuleOrigin,
+        RuleStatus,
+    )
+    from test_correction_log_api import _ledger_for
+
+    await _signup(client)
+    ledger = await _ledger_for()
+
+    async def entry(*, untouched: bool, when: datetime, actor=CorrectionActor.USER):
+        return await CorrectionLogEntry.create(
+            ledger=ledger,
+            transaction_id=uuid_mod.uuid7(),
+            kind=CorrectionKind.DECISION,
+            actor=actor,
+            accepted_untouched=untouched,
+            created_at=when,
+        )
+
+    july = datetime(2026, 7, 10, tzinfo=UTC)
+    june = datetime(2026, 6, 10, tzinfo=UTC)
+    await entry(untouched=True, when=july)
+    await entry(untouched=True, when=july)
+    await entry(untouched=False, when=july)
+    await entry(untouched=True, when=june)
+    await entry(untouched=False, when=june)
+    voided = await entry(untouched=True, when=july)
+    await CorrectionLogEntry.create(
+        ledger=ledger,
+        transaction_id=voided.transaction_id,
+        kind=CorrectionKind.VOID,
+        actor=CorrectionActor.AUTO,
+        voids=voided.id,
+        created_at=july,
+    )
+    await entry(untouched=True, when=july, actor=CorrectionActor.AUTO)
+
+    await Rule.create(
+        ledger=ledger, condition={}, origin=RuleOrigin.PROMOTION, status=RuleStatus.ACTIVE
+    )
+    await Rule.create(
+        ledger=ledger, condition={}, origin=RuleOrigin.PROMOTION, status=RuleStatus.PROPOSED
+    )
+    await Rule.create(ledger=ledger, condition={}, origin=RuleOrigin.USER, status=RuleStatus.ACTIVE)
+
+    r = await client.get(f"{LOG}/stats", params={"as_of": "2026-07-15"})
+    assert r.status_code == 200, r.text
+    stats = r.json()
+    assert stats["reviews_total"] == 5
+    assert stats["corrections_total"] == 2
+    assert stats["accepted_untouched_pct"] == pytest.approx(3 / 5)
+    assert stats["current_month_pct"] == pytest.approx(2 / 3)
+    assert stats["previous_month_pct"] == pytest.approx(1 / 2)
+    assert stats["promoted_rules_accepted"] == 1
