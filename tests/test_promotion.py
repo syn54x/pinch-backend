@@ -15,6 +15,7 @@ from pinch_backend.models import (
     CorrectionLogEntry,
     Ledger,
     Rule,
+    RuleOrigin,
     RuleStatus,
 )
 
@@ -53,6 +54,7 @@ async def test_three_consistent_user_decisions_mint_a_proposed_rule(db) -> None:
     rule = await maybe_propose_rule(ledger, PAYEE, coffee.id)
     assert rule is not None
     assert rule.status == RuleStatus.PROPOSED
+    assert rule.origin == RuleOrigin.PROMOTION
     assert rule.condition["payee"] == {"op": "equals", "value": PAYEE}
     assert rule.action_category_id == coffee.id  # ty: ignore[unresolved-attribute]
     assert rule.action_add_tags == []

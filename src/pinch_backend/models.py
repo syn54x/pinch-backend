@@ -150,6 +150,17 @@ class RuleStatus(StrEnum):
     DISMISSED = "dismissed"
 
 
+class RuleOrigin(StrEnum):
+    """How a rule came to be (F4, CONTEXT.md: Rule origin) — authored by the
+    user, or minted by promotion from their own repeated filings. Fixed at
+    creation and permanent: without it, an accepted promoted rule would be
+    indistinguishable from a hand-authored one, and that provenance can't
+    be reconstructed later."""
+
+    USER = "user"
+    PROMOTION = "promotion"
+
+
 class ProposalProvenance(StrEnum):
     """Who decided the proposal (PRD M5 D11/D13; M7 #31): a rule, exact
     payee history, the AI classifier (unreachable until M9's Penny — v0
@@ -759,6 +770,9 @@ class Rule(TimestampMixin, Model):
     status: RuleStatus = RuleStatus.ACTIVE
     """User-created rules are ACTIVE by authorship; PROPOSED is what CP4's
     promotion mints."""
+    origin: RuleOrigin = RuleOrigin.USER
+    """Immutable at mint (CONTEXT.md: Rule origin). The USER default is also
+    the backfill: every pre-F4 row was hand-authored."""
     condition: dict
     """A validated ConditionSpec (versioned); never queried into — loaded
     and evaluated in Python only."""

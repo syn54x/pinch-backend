@@ -25,7 +25,7 @@ from pinch_backend.api.pagination import (
     paginate,
 )
 from pinch_backend.api.transactions import CategoryRef, TransactionOut, hydrate_transactions
-from pinch_backend.models import Category, Ledger, Rule, RuleStatus, User
+from pinch_backend.models import Category, Ledger, Rule, RuleOrigin, RuleStatus, User
 from pinch_backend.observability import get_logger
 from pinch_backend.rules.evaluator import scan_matches
 from pinch_backend.rules.spec import ConditionSpec
@@ -69,6 +69,7 @@ class RuleOut(BaseModel):
 
     id: uuid.UUID
     status: RuleStatus
+    origin: RuleOrigin
     condition: dict
     action_category: CategoryRef | None
     action_add_tags: list[str]
@@ -148,6 +149,7 @@ async def rule_out(rule: Rule) -> RuleOut:
     return RuleOut(
         id=rule.id,
         status=rule.status,
+        origin=rule.origin,
         condition=rule.condition,
         action_category=category,
         action_add_tags=rule.action_add_tags,

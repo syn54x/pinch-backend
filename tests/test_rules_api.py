@@ -41,6 +41,7 @@ async def test_create_defaults_to_active_and_round_trips(client) -> None:
     assert r.status_code == 201, r.text
     body = r.json()
     assert body["status"] == "active"
+    assert body["origin"] == "user"
     assert body["condition"]["payee"]["value"] == "costco"
     assert body["action_category"] == {"id": cat["id"], "name": "Groceries3"}
     assert body["action_add_tags"] == ["bulk"]

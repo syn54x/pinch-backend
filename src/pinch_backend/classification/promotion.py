@@ -27,6 +27,7 @@ from pinch_backend.models import (
     CorrectionLogEntry,
     Ledger,
     Rule,
+    RuleOrigin,
     RuleStatus,
 )
 from pinch_backend.observability import get_logger
@@ -123,6 +124,7 @@ async def maybe_propose_rule(
     rule = await Rule.create(
         ledger=ledger,
         status=RuleStatus.PROPOSED,
+        origin=RuleOrigin.PROMOTION,
         condition=condition.model_dump(exclude_none=True),
         action_category_id=None if untracked_transfer else category_id,
         action_mark_transfer=untracked_transfer,
