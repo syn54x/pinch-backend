@@ -355,3 +355,101 @@ async def test_list_annotates_each_rule_with_its_matched_count(client, run_jobs)
 
     single = (await client.get(f"{RULES}/{rule_id}")).json()
     assert single["matched_count"] == 2
+
+
+# --- F4 Enabler B (#67): retro-apply -----------------------------------------
+
+
+async def _seed_costco_ledger(client, run_jobs):
+    """Two reviewed + two unreviewed COSTCO matches, one split parent and
+    one transfer member among them, plus a non-match. Returns (category_id,
+    txn ids by role)."""
+    from test_flywheel_e2e import _account, _commit_csv, _review, _transactions
+
+    cat = await _category(client, "Groceries B")
+    account = await _account(client)
+    await _commit_csv(
+        client,
+        account,
+        rows=[
+            ("2026-07-01", "-214.90", "COSTCO #482"),  # reviewed, plain
+            ("2026-07-02", "-62.10", "COSTCO GAS"),  # reviewed, plain
+            ("2026-07-03", "-88.00", "COSTCO SPLIT"),  # reviewed, then split
+            ("2026-07-04", "-40.00", "COSTCO XFER"),  # reviewed, transfer member
+            ("2026-07-05", "-19.75", "COSTCO RUN"),  # unreviewed
+            ("2026-07-06", "-33.50", "COSTCO TRIP"),  # unreviewed
+            ("2026-07-07", "-4.50", "BLUE BOTTLE"),  # non-match
+        ],
+    )
+    await run_jobs()
+    txns = {t["description_raw"]: t for t in await _transactions(client)}
+    for name in ("COSTCO #482", "COSTCO GAS", "COSTCO SPLIT", "COSTCO XFER"):
+        assert (await _review(client, txns[name]["id"])).status_code == 200
+    split_id = txns["COSTCO SPLIT"]["id"]
+    r = await client.put(
+        f"/api/v1/transactions/{split_id}/splits",
+        json=[
+            {"amount_minor": -4400, "category_id": None, "memo": "half"},
+            {"amount_minor": -4400, "category_id": None, "memo": "other half"},
+        ],
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 200, r.text
+    xfer_id = txns["COSTCO XFER"]["id"]
+    r = await client.post(
+        "/api/v1/transfers",
+        json={"transaction_ids": [xfer_id]},
+        headers=await _csrf(client),
+    )
+    assert r.status_code in (200, 201), r.text
+    return cat["id"], txns
+
+
+async def test_preview_breaks_matches_down_by_review_state(client, run_jobs) -> None:
+    """The consent counts (F4 Enabler B, #67): unreviewed / reviewed /
+    skipped — splits and transfer members keep their structure."""
+    await _signup(client)
+    await _seed_costco_ledger(client, run_jobs)
+
+    r = await client.post(
+        f"{RULES}/preview",
+        json={"payee": {"op": "contains", "value": "costco"}},
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["unreviewed_count"] == 2
+    assert body["reviewed_count"] == 2
+    assert body["skipped_count"] == 2
+
+
+async def test_apply_unreviewed_refreshes_the_backlog_and_leaves_reviewed_alone(
+    client, run_jobs
+) -> None:
+    """The default tier (F4 Enabler B, #67): matching unreviewed
+    transactions are re-proposed under the rule; reviewed history stays as
+    the user filed it. Rules still never write user data."""
+    from test_flywheel_e2e import _transactions
+
+    await _signup(client)
+    cat_id, _txns = await _seed_costco_ledger(client, run_jobs)
+
+    r = await _create_rule(client, action_category_id=cat_id, apply="unreviewed")
+    assert r.status_code == 201, r.text
+    applied = r.json()["applied"]
+    assert applied["tier"] == "unreviewed"
+    assert applied["refreshed_unreviewed"] == 2
+    assert applied["recategorized_reviewed"] == 0
+    assert applied["skipped"] == 2
+    assert applied["batch_id"] is None
+
+    await run_jobs()
+    after = {t["description_raw"]: t for t in await _transactions(client)}
+    for name in ("COSTCO RUN", "COSTCO TRIP"):
+        proposal = after[name]["proposal"]
+        assert proposal is not None
+        assert proposal["provenance"] == "rule"
+        assert proposal["category"]["id"] == cat_id
+    for name in ("COSTCO #482", "COSTCO GAS"):
+        assert after[name]["category"] is None
+        assert after[name]["reviewed_at"] is not None

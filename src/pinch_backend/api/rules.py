@@ -37,6 +37,7 @@ from pinch_backend.models import (
     User,
 )
 from pinch_backend.observability import get_logger
+from pinch_backend.rules.apply import breakdown
 from pinch_backend.rules.evaluator import scan_matches
 from pinch_backend.rules.spec import ConditionSpec
 
@@ -98,10 +99,16 @@ PREVIEW_CAP = 50
 
 class RulePreviewOut(BaseModel):
     """Up to PREVIEW_CAP existing transactions the condition would match.
-    ``truncated`` means at least one more match exists beyond the sample."""
+    ``truncated`` means at least one more match exists beyond the sample.
+    The counts cover the FULL match set (F4 Enabler B, #67) — the consent
+    numbers for the retro-apply tiers; skipped = split parents and transfer
+    members, whose structure retro-apply never touches."""
 
     items: list[TransactionOut]
     truncated: bool
+    unreviewed_count: int
+    reviewed_count: int
+    skipped_count: int
 
 
 def parse_condition(payload: dict, default_currency: str) -> ConditionSpec:
@@ -273,8 +280,16 @@ async def preview_rule(
     """Dry-run a bare condition against the ledger (story 9): works before
     the rule exists, so rules are built with evidence, not hope."""
     spec = parse_condition(data, current_user.primary_currency)
-    found, truncated = await scan_matches(spec, current_ledger.id, cap=PREVIEW_CAP)
-    return RulePreviewOut(items=await hydrate_transactions(found), truncated=truncated)
+    found, _ = await scan_matches(spec, current_ledger.id, cap=None)
+    split = await breakdown(found)
+    sample = found[:PREVIEW_CAP]
+    return RulePreviewOut(
+        items=await hydrate_transactions(sample),
+        truncated=len(found) > PREVIEW_CAP,
+        unreviewed_count=len(split.unreviewed),
+        reviewed_count=len(split.reviewed),
+        skipped_count=len(split.skipped),
+    )
 
 
 @get("/{rule_id:uuid}")
