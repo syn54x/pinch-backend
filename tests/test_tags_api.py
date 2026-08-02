@@ -106,3 +106,40 @@ async def test_list_carries_per_tag_aggregates(client) -> None:
     assert by_name["unused"]["transaction_count"] == 0
     assert by_name["unused"]["net_minor"] == 0
     assert by_name["unused"]["pending_minor"] == 0
+
+
+async def test_rename_updates_everywhere_and_keeps_links(client) -> None:
+    """Rename fixes the label everywhere at once: id stable, links intact,
+    casefold collisions refused (F4 Enabler A, #66)."""
+    await _signup(client)
+    account = await _account(client)
+    await _txn(client, account, -5000, ["vacaton"])
+    await client.post(TAGS, json={"name": "taken"}, headers=await _csrf(client))
+
+    listing = (await client.get(TAGS)).json()["items"]
+    tag = next(t for t in listing if t["name"] == "vacaton")
+
+    r = await client.patch(
+        f"{TAGS}/{tag['id']}", json={"name": "Vacation"}, headers=await _csrf(client)
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == "Vacation"
+    assert r.json()["id"] == tag["id"]
+    assert r.json()["transaction_count"] == 1
+
+    txns = (await client.get("/api/v1/transactions?tag=Vacation")).json()["items"]
+    assert len(txns) == 1
+
+    r = await client.patch(
+        f"{TAGS}/{tag['id']}", json={"name": "TAKEN"}, headers=await _csrf(client)
+    )
+    assert r.status_code == 409
+
+    r = await client.patch(f"{TAGS}/{tag['id']}", json={"name": "  "}, headers=await _csrf(client))
+    assert r.status_code == 400
+
+    r = await client.patch(
+        f"{TAGS}/{tag['id']}", json={"name": "VACATION"}, headers=await _csrf(client)
+    )
+    assert r.status_code == 200, "re-casing yourself is not a collision"
+    assert r.json()["name"] == "VACATION"

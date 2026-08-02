@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 
 from ferro import transaction
-from litestar import Router, delete, get, post
+from litestar import Router, delete, get, patch, post
 from litestar.di import NamedDependency
 from litestar.exceptions import ClientException, HTTPException, NotFoundException
 from litestar.params import FromPath
@@ -127,6 +127,37 @@ async def list_tags(
     return Page(items=[_out(t, aggregates.get(t.id)) for t in rows], next_cursor=next_cursor)
 
 
+@patch("/{tag_id:uuid}")
+async def rename_tag(
+    tag_id: FromPath[uuid.UUID],
+    data: TagCreateIn,
+    current_ledger: NamedDependency[Ledger],
+) -> TagOut:
+    """Rename in place — id stable, links untouched, so the fix lands
+    everywhere the tag appears (F4 Enabler A, #66). Same identity rule as
+    create: trimmed + casefolded, collisions refused (409); re-casing the
+    same tag is not a collision."""
+    if not data.name.strip():
+        raise ClientException(detail="Tag name cannot be blank")
+    ledger_id = current_ledger.id
+    tag = await Tag.where(lambda t: (t.id == tag_id) & (t.ledger_id == ledger_id)).first()
+    if tag is None:
+        raise NotFoundException(detail="No such tag")
+    name = data.name.strip()
+    fold = name.casefold()
+    taken = await Tag.where(
+        lambda t: (t.ledger_id == ledger_id) & (t.name_fold == fold) & (t.id != tag_id)
+    ).first()
+    if taken is not None:
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="A tag with that name exists")
+    tag.name = name
+    tag.name_fold = fold
+    await tag.save()
+    log.info("tag.renamed", tag_id=str(tag_id), ledger_id=str(ledger_id))
+    aggregates = await _aggregates_for([tag.id])
+    return _out(tag, aggregates.get(tag.id))
+
+
 @delete("/{tag_id:uuid}")
 async def delete_tag(tag_id: FromPath[uuid.UUID], current_ledger: NamedDependency[Ledger]) -> None:
     ledger_id = current_ledger.id
@@ -139,4 +170,6 @@ async def delete_tag(tag_id: FromPath[uuid.UUID], current_ledger: NamedDependenc
     log.info("tag.deleted", tag_id=str(tag_id), ledger_id=str(current_ledger.id))
 
 
-tags_router = Router(path="/api/v1/tags", route_handlers=[create_tag, list_tags, delete_tag])
+tags_router = Router(
+    path="/api/v1/tags", route_handlers=[create_tag, list_tags, rename_tag, delete_tag]
+)
