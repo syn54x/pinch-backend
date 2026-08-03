@@ -108,6 +108,28 @@ async def sync_connection(context: procrastinate.JobContext, connection_id: str)
         await classify_ledger.configure(lock=f"ledger:{outcome.ledger_id}").defer_async(
             ledger_id=str(outcome.ledger_id)
         )
+    if outcome.investments_due:
+        # The investments phase is its own chained job (M10, post-CI
+        # finding): inline it sat between the banking commit and the
+        # classification defer, so a fresh Item's minutes-scale holdings
+        # extraction held every inbox proposal hostage. Same lock as the
+        # banking sync — serialized behind this job, never concurrent
+        # with the next one.
+        await sync_investments.configure(lock=f"sync:{connection_id}").defer_async(
+            connection_id=connection_id
+        )
+
+
+@job_app.task(name="sync.sync_investments", queue="sync")
+async def sync_investments(connection_id: str) -> None:
+    """The investments phase (M10), chained from a completed banking pass
+    the way classify_ledger is. No retry strategy on purpose: the phase
+    records its failures on the connection (record-don't-retry, PRD #72)
+    and the guarded runner never raises."""
+    from pinch_backend.sync import run_investments_sync
+
+    async with engines.session():
+        await run_investments_sync(uuid.UUID(connection_id))
 
 
 async def run_worker() -> None:

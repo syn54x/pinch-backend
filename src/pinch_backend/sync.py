@@ -105,6 +105,11 @@ class SyncOutcome:
     counterparts) — back in the inbox, needing fresh proposals."""
     invalidated: int = 0
     """Unreviewed rows whose stale proposal died with an amount rewrite."""
+    investments_due: bool = False
+    """The caller should chain the investments job (M10): true after a
+    banking success, and after a final-attempt transient failure — the
+    bidirectional-isolation rule, once per ladder. Auth failures leave it
+    false: a dead login is dead for both products."""
 
     @property
     def needs_classification(self) -> bool:
@@ -399,13 +404,9 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
             # motivating Stash Item is exactly this shape — transactions
             # perpetually PRODUCT_NOT_READY on a healthy token — and the
             # consent flag can only rise if the holdings call actually
-            # fires. Once per ladder, at exhaustion, not per retry.
-            cid_broken = connection.id
-            broken_accounts = await Account.where(
-                lambda a, c=cid_broken: a.connection_id == c
-            ).all()
-            await _sync_investments_guarded(connection, provider, access_token, broken_accounts)
-            return SyncOutcome()
+            # fires. Once per ladder, at exhaustion, not per retry —
+            # chained by the caller off ``investments_due``.
+            return SyncOutcome(investments_due=True)
         raise  # transient with retries remaining: the runner's backoff handles it
 
     cid = connection.id
@@ -576,8 +577,6 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
             connection.institution_name = name
             await connection.save()
 
-    await _sync_investments_guarded(connection, provider, access_token, accounts)
-
     log.info(
         "sync.completed",
         connection_id=str(connection.id),
@@ -588,5 +587,26 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
         skipped_unknown=skipped_unknown,
     )
     return SyncOutcome(
-        ledger_id=ledger_id, created=created, reopened=reopened, invalidated=invalidated
+        ledger_id=ledger_id,
+        created=created,
+        reopened=reopened,
+        invalidated=invalidated,
+        investments_due=True,
     )
+
+
+async def run_investments_sync(connection_id: uuid.UUID) -> None:
+    """One investments pass (M10) — its own chained job, deferred after
+    the banking pass the way classify_ledger is. Inline it sat between
+    the banking commit and the classification defer, so a fresh Item's
+    minutes-scale holdings extraction held every inbox proposal hostage
+    (CI finding); chained, banking latency and the flywheel are
+    untouched. Never raises: the guarded phase records its own health."""
+    connection = await Connection.where(lambda c: c.id == connection_id).first()
+    if connection is None or connection.encrypted_secret is None:
+        return  # deleted between defer and run — nothing to record
+    access_token = decrypt_secret(connection.encrypted_secret)
+    provider = providers.get_provider()
+    cid = connection.id
+    accounts = await Account.where(lambda a, c=cid: a.connection_id == c).all()
+    await _sync_investments_guarded(connection, provider, access_token, accounts)

@@ -699,7 +699,7 @@ async def test_stuck_banking_still_raises_the_consent_flag(client, db, fake_prov
     perpetually PRODUCT_NOT_READY — the real Stash shape — must not hold
     investments hostage. At ladder exhaustion the holdings call still
     fires, so the consent flag can rise while banking stays stuck."""
-    from pinch_backend.sync import run_sync
+    from pinch_backend.sync import run_investments_sync, run_sync
 
     fake_provider.transactions_failure = providers.ProviderError(
         code="PRODUCT_NOT_READY", message="initial transaction pull not finished"
@@ -709,7 +709,9 @@ async def test_stuck_banking_still_raises_the_consent_flag(client, db, fake_prov
     )
     await _signup(client)
     body = await _connect(client)
-    await run_sync(uuid.UUID(body["id"]), final_attempt=True)
+    outcome = await run_sync(uuid.UUID(body["id"]), final_attempt=True)
+    assert outcome.investments_due  # the ladder's end still chains the phase
+    await run_investments_sync(uuid.UUID(body["id"]))
 
     health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
     assert health["status"] == "error"
@@ -720,7 +722,7 @@ async def test_stuck_banking_still_raises_the_consent_flag(client, db, fake_prov
 async def test_stuck_banking_still_lands_holdings(client, db, fake_provider):
     """The same shape with investments healthy: positions land even while
     the banking product never becomes ready."""
-    from pinch_backend.sync import run_sync
+    from pinch_backend.sync import run_investments_sync, run_sync
 
     fake_provider.transactions_failure = providers.ProviderError(
         code="PRODUCT_NOT_READY", message="initial transaction pull not finished"
@@ -728,7 +730,9 @@ async def test_stuck_banking_still_lands_holdings(client, db, fake_provider):
     fake_provider.investment_batches = [_default_batch()]
     await _signup(client)
     body = await _connect(client)
-    await run_sync(uuid.UUID(body["id"]), final_attempt=True)
+    outcome = await run_sync(uuid.UUID(body["id"]), final_attempt=True)
+    assert outcome.investments_due
+    await run_investments_sync(uuid.UUID(body["id"]))
 
     assert len((await client.get(HOLDINGS)).json()["items"]) == 2
     health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
@@ -762,7 +766,8 @@ async def test_auth_error_skips_investments_entirely(client, db, fake_provider):
     )
     await _signup(client)
     body = await _connect(client)
-    await run_sync(uuid.UUID(body["id"]), final_attempt=True)
+    outcome = await run_sync(uuid.UUID(body["id"]), final_attempt=True)
+    assert outcome.investments_due is False  # dead login: nothing to chain
 
     assert fake_provider.holdings_calls == 0
     health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
