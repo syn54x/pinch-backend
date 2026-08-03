@@ -121,6 +121,26 @@ async def _record_broken(connection: Connection, status: ConnectionStatus, code:
     log.warning("sync.broken", connection_id=str(connection.id), status=status.value, code=code)
 
 
+async def _sync_investments_guarded(
+    connection: Connection,
+    provider: "providers.SyncProvider",
+    access_token: str,
+    accounts: list[Account],
+) -> None:
+    """A code bug in the investments phase must record, never raise: the
+    banking pass has already committed, so a raise makes the job runner
+    replay it five times for nothing (smoke-test finding). Provider
+    errors are the phase's own contract; anything else rolls back (the
+    phase's transaction), logs with the traceback, and lands as
+    INTERNAL_ERROR in the phase's health field."""
+    try:
+        await _sync_investments(connection, provider, access_token, accounts)
+    except Exception:
+        log.exception("sync.investments_phase_crashed", connection_id=str(connection.id))
+        connection.investments_error_detail = "INTERNAL_ERROR"
+        await connection.save()
+
+
 async def _sync_investments(
     connection: Connection,
     provider: "providers.SyncProvider",
@@ -306,7 +326,10 @@ async def _sync_investments(
                     currency=pa.currency or account.currency,
                 )
             else:
-                row.security = security
+                # The FK column, never the relation: ferro exposes
+                # relation fields as class-level descriptors on fetched
+                # rows, so instance assignment raises (smoke-test finding).
+                row.security_id = None if security is None else security.id  # ty: ignore[unresolved-attribute]
                 row.date = pa.date
                 row.name = pa.name
                 row.amount_minor = pa.amount_minor
@@ -381,7 +404,7 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
             broken_accounts = await Account.where(
                 lambda a, c=cid_broken: a.connection_id == c
             ).all()
-            await _sync_investments(connection, provider, access_token, broken_accounts)
+            await _sync_investments_guarded(connection, provider, access_token, broken_accounts)
             return SyncOutcome()
         raise  # transient with retries remaining: the runner's backoff handles it
 
@@ -553,7 +576,7 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
             connection.institution_name = name
             await connection.save()
 
-    await _sync_investments(connection, provider, access_token, accounts)
+    await _sync_investments_guarded(connection, provider, access_token, accounts)
 
     log.info(
         "sync.completed",

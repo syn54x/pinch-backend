@@ -507,22 +507,57 @@ async def test_unknown_activity_type_shields_its_stored_row_from_the_sweep(
     assert items[0]["type"] == "buy"
 
 
-async def test_resyncing_an_unchanged_window_creates_no_duplicates(
-    client, db, fake_provider, run_jobs
-):
-    same = lambda: _activities(  # noqa: E731
-        _activity("act-1", "2026-07-10", -50_00, "buy"),
-        _activity("act-2", "2026-07-11", 8_72, "cash", subtype="dividend"),
-    )
-    fake_provider.activity_batches = [same()]
+async def test_resyncing_upserts_in_place_without_duplicates(client, db, fake_provider, run_jobs):
+    """The update branch must actually apply — asserting a count alone
+    survives a crashed second sync (the exact hole the smoke test found:
+    relation assignment on a fetched row raises, the job silently
+    retried, and count-stable dedupe stayed green)."""
+    fake_provider.activity_batches = [
+        _activities(
+            _activity("act-1", "2026-07-10", -50_00, "buy"),
+            _activity("act-2", "2026-07-11", 8_72, "cash", subtype="dividend"),
+        )
+    ]
     await _signup(client)
     body = await _connect(client)
     await run_jobs()
 
-    fake_provider.activity_batches = [same()]
+    fake_provider.activity_batches = [
+        _activities(
+            # Same provider ids — one amended by Plaid, still naming its
+            # security: the update branch, relation and all.
+            _activity("act-1", "2026-07-10", -55_00, "buy", name="BUY AAPL AMENDED"),
+            _activity("act-2", "2026-07-11", 8_72, "cash", subtype="dividend"),
+        )
+    ]
     await client.post(f"{CONNECTIONS}/{body['id']}/sync", headers=await _csrf(client))
     await run_jobs()
-    assert len((await client.get(ACTIVITIES)).json()["items"]) == 2
+
+    items = (await client.get(ACTIVITIES)).json()["items"]
+    assert len(items) == 2  # no duplicates...
+    amended = next(a for a in items if a["name"] == "BUY AAPL AMENDED")
+    assert amended["amount_minor"] == -55_00  # ...and the amendment landed
+    assert amended["security"]["ticker_symbol"] == "AAPL"
+
+    health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
+    assert health["investments_error_detail"] is None
+
+
+async def test_a_code_bug_in_the_phase_records_and_never_retries(
+    client, db, fake_provider, run_jobs
+):
+    """Isolation covers our own bugs too: a non-provider exception rolls
+    back the phase, lands as INTERNAL_ERROR, and the job still succeeds —
+    the committed banking pass is never replayed (smoke-test finding)."""
+    fake_provider.investments_failure = RuntimeError("boom")  # type: ignore[assignment]
+    await _signup(client)
+    body = await _connect(client)
+    await run_jobs()
+
+    health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
+    assert health["status"] == "active"  # banking untouched, job succeeded
+    assert health["investments_error_detail"] == "INTERNAL_ERROR"
+    assert (await client.get(HOLDINGS)).json()["items"] == []
 
 
 async def test_orphan_sweep_spares_securities_still_named_by_activities(
