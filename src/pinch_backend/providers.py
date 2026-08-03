@@ -29,6 +29,11 @@ BACKFILL_DAYS = 730
 """History requested at link time (PRD #31): depth is fuel for M8's
 reports and projections."""
 
+INVESTMENTS_TIMEOUT = 180
+"""Seconds. A fresh Item's synchronous investments extraction can block
+1-2 minutes on Plaid's side (PRD #72) — the 30s default that suits banking
+calls would misfire NETWORK_ERROR mid-extraction."""
+
 _PLAID_KIND = {
     "depository": AccountKind.DEPOSITORY,
     "credit": AccountKind.CREDIT,
@@ -110,6 +115,41 @@ class SyncBatch(BaseModel):
     next_cursor: str
 
 
+class ProviderSecurity(BaseModel):
+    """A security's identity as the provider describes it (M10 CP0).
+    ``type`` stays provider vocabulary — identity, never law."""
+
+    provider_security_id: str
+    name: str
+    ticker_symbol: str | None = None
+    type: str
+    is_cash_equivalent: bool = False
+
+
+class ProviderHolding(BaseModel):
+    """A position as the provider describes it, already in Pinch
+    vocabulary: money in integer minor units; ``institution_price`` kept
+    as the raw per-share quote (sub-cent precision is real for fund NAVs
+    and it is never used in money arithmetic)."""
+
+    provider_account_id: str
+    provider_security_id: str
+    quantity: float
+    institution_price: float | None = None
+    institution_price_as_of: date | None = None
+    institution_value_minor: int | None = None
+    cost_basis_minor: int | None = None
+    currency: str | None = None
+
+
+class InvestmentsBatch(BaseModel):
+    """One holdings pull: the current positions and the securities that
+    give them identity — current-state by construction (PRD #72)."""
+
+    securities: list[ProviderSecurity]
+    holdings: list[ProviderHolding]
+
+
 class ProviderError(Exception):
     """A provider-side failure, carrying the provider's error code — the
     only provider detail that may ever surface (PRD #31: request payloads
@@ -132,6 +172,8 @@ class SyncProvider(Protocol):
     async def get_institution_name(self, access_token: str) -> str | None: ...
 
     async def sync_transactions(self, access_token: str, cursor: str | None) -> SyncBatch: ...
+
+    async def get_holdings(self, access_token: str) -> InvestmentsBatch: ...
 
     async def remove_item(self, access_token: str) -> None: ...
 
@@ -156,7 +198,7 @@ class PlaidProvider:
         """httpx's documented test seam: wire-shape tests hand in a
         MockTransport; production leaves it None."""
 
-    async def _post(self, path: str, payload: dict) -> dict:
+    async def _post(self, path: str, payload: dict, *, timeout: float = 30) -> dict:
         """Every failure mode funnels into ``ProviderError`` — transport
         faults and unparseable bodies included — so the sync engine's
         error contract (retry transients, record exhaustion) can't be
@@ -164,7 +206,7 @@ class PlaidProvider:
         body = {"client_id": self._client_id, "secret": self._secret, **payload}
         try:
             async with httpx.AsyncClient(
-                base_url=self._base_url, timeout=30, transport=self._transport
+                base_url=self._base_url, timeout=timeout, transport=self._transport
             ) as client:
                 response = await client.post(path, json=body)
         except httpx.HTTPError as error:
@@ -247,6 +289,48 @@ class PlaidProvider:
             {"institution_id": institution_id, "country_codes": settings.plaid_country_codes},
         )
         return (data.get("institution") or {}).get("name")
+
+    async def get_holdings(self, access_token: str) -> InvestmentsBatch:
+        """One holdings pull (M10 CP0). Plaid's floats become minor units
+        at the seam, like every money value; the per-share price rides raw
+        (a quote, not an Amount). A synchronous call on a fresh Item may
+        block minutes-scale — hence the investments timeout."""
+        data = await self._post(
+            "/investments/holdings/get",
+            {"access_token": access_token},
+            timeout=INVESTMENTS_TIMEOUT,
+        )
+        securities = [
+            ProviderSecurity(
+                provider_security_id=s["security_id"],
+                name=s.get("name") or s.get("ticker_symbol") or "Unknown security",
+                ticker_symbol=s.get("ticker_symbol"),
+                type=s.get("type") or "other",
+                is_cash_equivalent=bool(s.get("is_cash_equivalent")),
+            )
+            for s in data["securities"]
+        ]
+        holdings = []
+        for h in data["holdings"]:
+            currency = h.get("iso_currency_code")
+            value = h.get("institution_value")
+            cost_basis = h.get("cost_basis")
+            as_of = h.get("institution_price_as_of")
+            holdings.append(
+                ProviderHolding(
+                    provider_account_id=h["account_id"],
+                    provider_security_id=h["security_id"],
+                    quantity=h["quantity"],
+                    institution_price=h.get("institution_price"),
+                    institution_price_as_of=None if as_of is None else date.fromisoformat(as_of),
+                    institution_value_minor=None if value is None else _to_minor(value, currency),
+                    cost_basis_minor=(
+                        None if cost_basis is None else _to_minor(cost_basis, currency)
+                    ),
+                    currency=currency,
+                )
+            )
+        return InvestmentsBatch(securities=securities, holdings=holdings)
 
     async def sync_transactions(self, access_token: str, cursor: str | None) -> SyncBatch:
         """Drain the cursor: every has_more page in one call. The job is

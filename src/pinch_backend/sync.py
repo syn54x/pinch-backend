@@ -47,11 +47,14 @@ from pinch_backend.crypto import decrypt_secret
 from pinch_backend.imports.fingerprint import compute_fingerprint, normalize_description
 from pinch_backend.models import (
     Account,
+    AccountKind,
     BalanceEntry,
     BalanceSource,
     Connection,
     ConnectionStatus,
     CorrectionActor,
+    Holding,
+    Security,
     SplitLine,
     Transaction,
     utcnow,
@@ -102,6 +105,140 @@ async def _record_broken(connection: Connection, status: ConnectionStatus, code:
     connection.error_detail = code
     await connection.save()
     log.warning("sync.broken", connection_id=str(connection.id), status=status.value, code=code)
+
+
+async def _sync_investments(
+    connection: Connection,
+    provider: "providers.SyncProvider",
+    access_token: str,
+    accounts: list[Account],
+) -> None:
+    """The investments phase (M10 CP0, issue #73; ADR 0007) — after the
+    banking commit, failure-isolated by construction.
+
+    Gated on investment-kind accounts: the first holdings call is what
+    starts Plaid's per-Item investments billing, so it fires only where
+    there's an investment account to serve (PRD #72). Failures land in
+    ``investments_error_detail`` and nothing else — never a raise (a
+    retry would replay the already-committed banking pass), never
+    ``status``/``error_detail``. Holdings are mirror-replaced: zero user
+    data makes replacement safe.
+    """
+    investment_accounts = {
+        a.provider_account_id: a
+        for a in accounts
+        if a.kind == AccountKind.INVESTMENT and a.provider_account_id is not None
+    }
+    if not investment_accounts:
+        return
+    ledger_id = connection.ledger_id  # ty: ignore[unresolved-attribute]
+    try:
+        batch = await provider.get_holdings(access_token)
+    except providers.ProviderError as error:
+        connection.investments_error_detail = error.code
+        await connection.save()
+        log.warning("sync.investments_broken", connection_id=str(connection.id), code=error.code)
+        return
+
+    account_ids = [a.id for a in investment_accounts.values()]
+    skipped_unknown = 0
+    async with transaction():
+        # Queries before mutations (the ferro identity-map law): fetch
+        # both existing sets first, then write.
+        securities_by_pid: dict[str, Security] = {}
+        provider_sids = [s.provider_security_id for s in batch.securities]
+        if provider_sids:
+            for row in await Security.where(
+                lambda s, lid=ledger_id, pids=provider_sids: (
+                    (s.ledger_id == lid) & s.provider_security_id.in_(pids)
+                )
+            ).all():
+                securities_by_pid[row.provider_security_id] = row
+        holdings_by_key: dict[tuple[uuid.UUID, uuid.UUID], Holding] = {}
+        for row in await Holding.where(lambda h, ids=account_ids: h.account_id.in_(ids)).all():
+            holdings_by_key[(row.account_id, row.security_id)] = row  # ty: ignore[unresolved-attribute]
+
+        for ps in batch.securities:
+            row = securities_by_pid.get(ps.provider_security_id)
+            if row is None:
+                securities_by_pid[ps.provider_security_id] = await Security.create(
+                    ledger_id=ledger_id,
+                    provider_security_id=ps.provider_security_id,
+                    name=ps.name,
+                    ticker_symbol=ps.ticker_symbol,
+                    type=ps.type,
+                    is_cash_equivalent=ps.is_cash_equivalent,
+                )
+            elif (row.name, row.ticker_symbol, row.type, row.is_cash_equivalent) != (
+                ps.name,
+                ps.ticker_symbol,
+                ps.type,
+                ps.is_cash_equivalent,
+            ):
+                row.name = ps.name
+                row.ticker_symbol = ps.ticker_symbol
+                row.type = ps.type
+                row.is_cash_equivalent = ps.is_cash_equivalent
+                await row.save()
+
+        present: set[tuple[uuid.UUID, uuid.UUID]] = set()
+        for ph in batch.holdings:
+            account = investment_accounts.get(ph.provider_account_id)
+            security = securities_by_pid.get(ph.provider_security_id)
+            if account is None or security is None:
+                # An account Pinch doesn't hold (I-1's stated boundary) or
+                # a holding naming an unsent security — skip and count.
+                skipped_unknown += 1
+                continue
+            key = (account.id, security.id)
+            present.add(key)
+            row = holdings_by_key.get(key)
+            if row is None:
+                await Holding.create(
+                    ledger_id=ledger_id,
+                    account=account,
+                    security=security,
+                    quantity=ph.quantity,
+                    institution_price=ph.institution_price,
+                    institution_price_as_of=ph.institution_price_as_of,
+                    institution_value_minor=ph.institution_value_minor,
+                    cost_basis_minor=ph.cost_basis_minor,
+                    currency=ph.currency or account.currency,
+                )
+            else:
+                row.quantity = ph.quantity
+                row.institution_price = ph.institution_price
+                row.institution_price_as_of = ph.institution_price_as_of
+                row.institution_value_minor = ph.institution_value_minor
+                row.cost_basis_minor = ph.cost_basis_minor
+                row.currency = ph.currency or account.currency
+                row.updated_at = utcnow()
+                await row.save()
+
+        doomed = [row.id for key, row in holdings_by_key.items() if key not in present]
+        if doomed:
+            # Sold out entirely: the position vanishes from holdings; the
+            # story lives on as investment activity (CP1's record).
+            await Holding.where(lambda h, ids=doomed: h.id.in_(ids)).delete()
+
+        connection.investments_error_detail = None
+        await connection.save()
+
+    if skipped_unknown:
+        # I-1's stated boundary (unknown account) or a provider anomaly
+        # (holding naming an unsent security) — either way loud, not silent.
+        log.warning(
+            "sync.investments_skipped_unknown",
+            connection_id=str(connection.id),
+            skipped=skipped_unknown,
+        )
+    log.info(
+        "sync.investments_completed",
+        connection_id=str(connection.id),
+        holdings=len(present),
+        removed=len(doomed),
+        skipped_unknown=skipped_unknown,
+    )
 
 
 async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutcome:
@@ -295,6 +432,8 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
         if name is not None:
             connection.institution_name = name
             await connection.save()
+
+    await _sync_investments(connection, provider, access_token, accounts)
 
     log.info(
         "sync.completed",

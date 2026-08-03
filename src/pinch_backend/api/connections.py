@@ -76,12 +76,17 @@ class ConnectionOut(BaseModel):
     """What a client may see about a connection — an allowlist, never the
     row, and never the access token in any form."""
 
+    model_config = ConfigDict(use_attribute_docstrings=True)
+
     id: uuid.UUID
     provider: ConnectionProvider
     institution_name: str | None
     status: ConnectionStatus
     last_synced_at: datetime | None
     error_detail: str | None
+    investments_error_detail: str | None
+    """The investments phase's independent health (M10 CP0): set while
+    holdings can't be fetched, without the connection leaving ``active``."""
     accounts: list[AccountOut]
     created_at: datetime
 
@@ -150,6 +155,7 @@ async def _connection_out(connection: Connection) -> ConnectionOut:
         status=connection.status,
         last_synced_at=connection.last_synced_at,
         error_detail=connection.error_detail,
+        investments_error_detail=connection.investments_error_detail,
         accounts=[await account_out(a) for a in accounts],
         created_at=connection.created_at,
     )

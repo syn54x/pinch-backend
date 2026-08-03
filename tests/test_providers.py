@@ -409,3 +409,115 @@ async def test_institution_name_none_for_institutionless_item() -> None:
         return httpx.Response(200, json={"item": {"institution_id": None}})
 
     assert await _provider(handler).get_institution_name("access-x") is None
+
+
+# --- Investments (M10 CP0, issue #73; PRD #72) ----------------------------------
+
+
+def _holdings_response() -> dict:
+    return {
+        "accounts": [],
+        "holdings": [
+            {
+                "account_id": "acc-brokerage",
+                "security_id": "sec-aapl",
+                "quantity": 10.5,
+                "institution_price": 190.1234,
+                "institution_price_as_of": "2026-07-18",
+                "institution_value": 1996.3,
+                "cost_basis": 1500.55,
+                "iso_currency_code": "USD",
+            },
+            {
+                "account_id": "acc-brokerage",
+                "security_id": "sec-cash",
+                "quantity": 5000,
+                "institution_price": None,
+                "institution_price_as_of": None,
+                "institution_value": 5000,
+                "cost_basis": None,
+                "iso_currency_code": "JPY",
+            },
+        ],
+        "securities": [
+            {
+                "security_id": "sec-aapl",
+                "name": "Apple Inc.",
+                "ticker_symbol": "AAPL",
+                "type": "equity",
+                "is_cash_equivalent": False,
+            },
+            {
+                "security_id": "sec-cash",
+                "name": "Yen cash",
+                "ticker_symbol": None,
+                "type": "cash",
+                "is_cash_equivalent": True,
+            },
+        ],
+    }
+
+
+async def test_holdings_convert_money_and_keep_price_precision() -> None:
+    """Money lands as exponent-aware minor units (JPY included); the
+    per-share price is a quote, not an Amount — sub-cent precision is real
+    for fund NAVs and survives untouched."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        seen["path"] = request.url.path
+        return httpx.Response(200, json=_holdings_response())
+
+    batch = await _provider(handler).get_holdings("access-x")
+    assert seen["path"] == "/investments/holdings/get"
+    assert seen["access_token"] == "access-x"
+
+    by_sid = {h.provider_security_id: h for h in batch.holdings}
+    aapl = by_sid["sec-aapl"]
+    assert aapl.provider_account_id == "acc-brokerage"
+    assert aapl.quantity == 10.5
+    assert aapl.institution_price == 190.1234
+    assert aapl.institution_value_minor == 199630  # 1996.30 USD
+    assert aapl.cost_basis_minor == 150055
+    cash = by_sid["sec-cash"]
+    assert cash.institution_value_minor == 5000  # JPY: exponent 0, never *100
+    assert cash.cost_basis_minor is None and cash.institution_price is None
+
+    securities = {s.provider_security_id: s for s in batch.securities}
+    assert securities["sec-aapl"].ticker_symbol == "AAPL"
+    assert securities["sec-aapl"].type == "equity"
+    assert securities["sec-cash"].ticker_symbol is None
+    assert securities["sec-cash"].is_cash_equivalent is True
+
+
+async def test_holdings_use_the_investments_timeout() -> None:
+    """A fresh Item's synchronous extraction can block for minutes — the
+    30s default that suits banking calls would misfire NETWORK_ERROR here
+    (PRD #72)."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["timeout"] = request.extensions["timeout"]
+        return httpx.Response(200, json={"accounts": [], "holdings": [], "securities": []})
+
+    from pinch_backend.providers import INVESTMENTS_TIMEOUT
+
+    await _provider(handler).get_holdings("access-x")
+    assert INVESTMENTS_TIMEOUT > 30
+    assert seen["timeout"]["read"] == INVESTMENTS_TIMEOUT
+
+
+async def test_holdings_error_surfaces_code_only() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "error_code": "PRODUCT_NOT_READY",
+                "error_message": "the requested product is not yet ready",
+            },
+        )
+
+    with pytest.raises(ProviderError) as excinfo:
+        await _provider(handler).get_holdings("access-x")
+    assert excinfo.value.code == "PRODUCT_NOT_READY"

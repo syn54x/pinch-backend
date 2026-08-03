@@ -26,6 +26,7 @@ CONNECTION_FIELDS = {
     "status",
     "last_synced_at",
     "error_detail",
+    "investments_error_detail",
     "accounts",
     "created_at",
 }
