@@ -36,6 +36,7 @@ from pinch_backend.models import (
     BalanceSource,
     CorrectionActor,
     Holding,
+    InvestmentActivity,
     Ledger,
     Security,
     Transaction,
@@ -298,6 +299,8 @@ class DeletionPreviewOut(BaseModel):
     balance_entries: int
     holdings: int
     """Positions that die with an investment account (M10 CP0)."""
+    investment_activities: int
+    """Activity records that die with an investment account (M10 CP1)."""
 
 
 async def _doomed_counts(account: Account) -> DeletionPreviewOut:
@@ -319,12 +322,16 @@ async def _doomed_counts(account: Account) -> DeletionPreviewOut:
         lambda b, aid=account_id: b.account_id == aid
     ).count()
     holdings = await Holding.where(lambda h, aid=account_id: h.account_id == aid).count()
+    investment_activities = await InvestmentActivity.where(
+        lambda x, aid=account_id: x.account_id == aid
+    ).count()
     return DeletionPreviewOut(
         transactions=len(txn_ids),
         reviewed=reviewed,
         transfers=transfers,
         balance_entries=balance_entries,
         holdings=holdings,
+        investment_activities=investment_activities,
     )
 
 
@@ -371,12 +378,19 @@ async def delete_account(
         # row at the database (ferro's FK default); transactions are
         # already gone above.
         await account.delete()
-        # Securities nothing holds anymore die with the account (M10 CP0):
-        # identity without a position is debris, and the next sync re-mints
-        # any security it still sees. Ledger-scoped, so tens of rows.
+        # Securities nothing references anymore die with the account (M10):
+        # identity without a position *or an activity naming it* is debris,
+        # and the next sync re-mints any security it still sees.
+        # Ledger-scoped, so tens of rows.
         held = {
             h.security_id  # ty: ignore[unresolved-attribute]
             for h in await Holding.where(lambda h, lid=ledger_id: h.ledger_id == lid).all()
+        } | {
+            a.security_id  # ty: ignore[unresolved-attribute]
+            for a in await InvestmentActivity.where(
+                lambda x, lid=ledger_id: x.ledger_id == lid
+            ).all()
+            if a.security_id is not None  # ty: ignore[unresolved-attribute]
         }
         orphaned = [
             s.id

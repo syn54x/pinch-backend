@@ -113,6 +113,8 @@ class FakeInvestmentsProvider:
             )
         self.batches: list[providers.SyncBatch] = []
         self.investment_batches: list[providers.InvestmentsBatch] = []
+        self.activity_batches: list[providers.ActivitiesBatch] = []
+        self.activity_windows: list[tuple] = []
         self.failure: providers.ProviderError | None = None
         self.investments_failure: providers.ProviderError | None = None
         self.holdings_calls = 0
@@ -148,6 +150,16 @@ class FakeInvestmentsProvider:
         if self.investment_batches:
             return self.investment_batches.pop(0)
         return providers.InvestmentsBatch(securities=[], holdings=[])
+
+    async def get_investment_activities(
+        self, access_token: str, start_date: date, end_date: date
+    ) -> providers.ActivitiesBatch:
+        if self.investments_failure is not None:
+            raise self.investments_failure
+        self.activity_windows.append((start_date, end_date))
+        if self.activity_batches:
+            return self.activity_batches.pop(0)
+        return providers.ActivitiesBatch(securities=[], activities=[])
 
     async def remove_item(self, access_token: str) -> None:
         return None
@@ -325,6 +337,9 @@ async def test_hard_delete_cascades_holdings_and_orphan_securities(
     account takes its holdings, and securities nothing holds anymore, with
     it. The deletion preview states the holdings count."""
     fake_provider.investment_batches = [_default_batch()]
+    fake_provider.activity_batches = [
+        _activities(_activity("act-buy", "2026-07-10", -77_00, "buy"))
+    ]
     await _signup(client)
     body = await _connect(client)
     await run_jobs()
@@ -335,15 +350,202 @@ async def test_hard_delete_cascades_holdings_and_orphan_securities(
 
     preview = (await client.get(f"/api/v1/accounts/{brokerage['id']}/deletion-preview")).json()
     assert preview["holdings"] == 2
+    assert preview["investment_activities"] == 1
 
     gone = await client.delete(f"/api/v1/accounts/{brokerage['id']}", headers=await _csrf(client))
     assert gone.status_code == 204, gone.text
     assert (await client.get(HOLDINGS)).json()["items"] == []
+    assert (await client.get(ACTIVITIES)).json()["items"] == []
 
-    from pinch_backend.models import Holding, Security
+    from pinch_backend.models import Holding, InvestmentActivity, Security
 
     assert await Holding.all() == []
+    assert await InvestmentActivity.all() == []
     assert await Security.all() == []
+
+
+def _activity(
+    aid: str,
+    day: str,
+    amount_minor: int,
+    activity_type: str,
+    *,
+    sid: str | None = "sec-aapl",
+    account: str = "plaid-brokerage",
+    name: str = "BUY AAPL",
+    quantity: float = 0.0,
+    subtype: str | None = None,
+) -> providers.ProviderInvestmentActivity:
+    return providers.ProviderInvestmentActivity(
+        provider_activity_id=aid,
+        provider_account_id=account,
+        provider_security_id=sid,
+        date=date.fromisoformat(day),
+        name=name,
+        amount_minor=amount_minor,
+        quantity=quantity,
+        price=None,
+        fees_minor=None,
+        type=activity_type,
+        subtype=subtype,
+        currency="USD",
+    )
+
+
+def _activities(*activities, securities=None) -> providers.ActivitiesBatch:
+    return providers.ActivitiesBatch(
+        securities=securities
+        if securities is not None
+        else [_security("sec-aapl", "Apple Inc.", "AAPL")],
+        activities=list(activities),
+    )
+
+
+ACTIVITIES = "/api/v1/investments/activities"
+
+
+async def test_sync_lands_the_activity_feed(client, db, fake_provider, run_jobs):
+    """The CP1 story: buys, dividends, and even cancel rows land as
+    activities — newest first, security identity embedded where one is
+    named, amounts signed from the account's perspective."""
+    fake_provider.activity_batches = [
+        _activities(
+            _activity("act-buy", "2026-07-10", -77_00, "buy", name="BUY AAPL", quantity=0.4),
+            _activity(
+                "act-div",
+                "2026-07-15",
+                8_72,
+                "cash",
+                name="AAPL DIVIDEND",
+                subtype="dividend",
+            ),
+            _activity("act-cancel", "2026-07-01", 0, "cancel", sid=None, name="CANCELLED TRADE"),
+        )
+    ]
+    await _signup(client)
+    await _connect(client)
+    await run_jobs()
+
+    page = (await client.get(ACTIVITIES)).json()
+    assert set(page) == {"items", "next_cursor"}
+    assert [a["name"] for a in page["items"]] == [
+        "AAPL DIVIDEND",  # newest first
+        "BUY AAPL",
+        "CANCELLED TRADE",
+    ]
+    by_id = {a["name"]: a for a in page["items"]}
+    buy = by_id["BUY AAPL"]
+    assert buy["amount_minor"] == -77_00  # money out of the account
+    assert buy["type"] == "buy"
+    assert buy["quantity"] == 0.4
+    assert buy["security"]["ticker_symbol"] == "AAPL"
+    dividend = by_id["AAPL DIVIDEND"]
+    assert dividend["amount_minor"] == 8_72  # money in
+    assert dividend["subtype"] == "dividend"
+    cancel = by_id["CANCELLED TRADE"]
+    assert cancel["type"] == "cancel"
+    assert cancel["security"] is None
+
+    # The requested window is Plaid's 24-month cap, ending today.
+    (start, end), *_ = fake_provider.activity_windows
+    assert (end - start).days == 730
+
+
+async def test_activities_mirror_with_retention_floor(client, db, fake_provider, run_jobs):
+    """Stateless mirror (ADR 0007): an in-window activity Plaid stops
+    returning disappears; one older than the window start survives every
+    sync — captured history is kept forever."""
+    fake_provider.activity_batches = [
+        _activities(
+            _activity("act-recent", "2026-07-10", -50_00, "buy"),
+            _activity("act-ancient", "2023-01-15", -25_00, "buy", name="ANCIENT BUY"),
+        )
+    ]
+    await _signup(client)
+    body = await _connect(client)
+    await run_jobs()
+    assert len((await client.get(ACTIVITIES)).json()["items"]) == 2
+
+    fake_provider.activity_batches = [_activities()]  # empty window now
+    response = await client.post(f"{CONNECTIONS}/{body['id']}/sync", headers=await _csrf(client))
+    assert response.status_code == 202
+    await run_jobs()
+
+    items = (await client.get(ACTIVITIES)).json()["items"]
+    assert [a["name"] for a in items] == ["ANCIENT BUY"]  # the floor held
+
+
+async def test_resyncing_an_unchanged_window_creates_no_duplicates(
+    client, db, fake_provider, run_jobs
+):
+    same = lambda: _activities(  # noqa: E731
+        _activity("act-1", "2026-07-10", -50_00, "buy"),
+        _activity("act-2", "2026-07-11", 8_72, "cash", subtype="dividend"),
+    )
+    fake_provider.activity_batches = [same()]
+    await _signup(client)
+    body = await _connect(client)
+    await run_jobs()
+
+    fake_provider.activity_batches = [same()]
+    await client.post(f"{CONNECTIONS}/{body['id']}/sync", headers=await _csrf(client))
+    await run_jobs()
+    assert len((await client.get(ACTIVITIES)).json()["items"]) == 2
+
+
+async def test_orphan_sweep_spares_securities_still_named_by_activities(
+    client, db, fake_provider, run_jobs
+):
+    """Hard delete's security sweep counts activities as holders too: a
+    security whose only remaining reference is another account's activity
+    survives."""
+    fake_provider.accounts.append(
+        providers.ProviderAccount(
+            provider_account_id="plaid-ira",
+            mask="9001",
+            name="Stash IRA",
+            kind="investment",
+            currency="USD",
+            balance_minor=200_000,
+        )
+    )
+    fake_provider.investment_batches = [
+        _batch(
+            [_security("sec-aapl", "Apple Inc.", "AAPL")],
+            [_holding("sec-aapl", 10.0, 1_900_00)],  # holding on plaid-brokerage only
+        )
+    ]
+    fake_provider.activity_batches = [
+        _activities(
+            _activity(
+                "act-vti-buy",
+                "2026-07-10",
+                -50_00,
+                "buy",
+                sid="sec-vti",
+                account="plaid-ira",
+                name="IRA VTI BUY",
+            ),
+            securities=[_security("sec-vti", "Vanguard Total", "VTI")],
+        )
+    ]
+    await _signup(client)
+    body = await _connect(client)
+    await run_jobs()
+
+    brokerage = next(
+        a for a in body["accounts"] if a["kind"] == "investment" and a["label"] == "Stash Brokerage"
+    )
+    delete = await client.delete(f"{CONNECTIONS}/{body['id']}", headers=await _csrf(client))
+    assert delete.status_code == 204
+    gone = await client.delete(f"/api/v1/accounts/{brokerage['id']}", headers=await _csrf(client))
+    assert gone.status_code == 204, gone.text
+
+    from pinch_backend.models import Security
+
+    survivors = {s.ticker_symbol for s in await Security.all()}
+    assert survivors == {"VTI"}  # AAPL orphaned and swept; VTI held by the IRA's activity
+    assert [a["name"] for a in (await client.get(ACTIVITIES)).json()["items"]] == ["IRA VTI BUY"]
 
 
 async def test_holdings_are_ledger_fenced(client, db, fake_provider, run_jobs):

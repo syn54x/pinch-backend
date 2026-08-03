@@ -24,8 +24,14 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-async def _sandbox_public_token() -> str:
-    """The widget shortcut Plaid sandbox provides — server-side only."""
+async def _sandbox_public_token(products: list[str] | None = None) -> str:
+    """The widget shortcut Plaid sandbox provides — server-side only.
+
+    For investments, sandbox only loads data when the product rides
+    ``initial_products`` (the documented custom-user limitation) — which
+    also sidesteps Link arrays entirely, so the production
+    ``additional_consented_products`` path stays production-verified only
+    (PRD #72)."""
     async with httpx.AsyncClient(base_url=PLAID_BASE_URLS["sandbox"], timeout=30) as client:
         response = await client.post(
             "/sandbox/public_token/create",
@@ -33,7 +39,7 @@ async def _sandbox_public_token() -> str:
                 "client_id": CLIENT_ID,
                 "secret": SECRET,
                 "institution_id": "ins_109508",  # First Platypus Bank
-                "initial_products": ["transactions"],
+                "initial_products": products or ["transactions"],
             },
         )
         response.raise_for_status()
@@ -68,5 +74,41 @@ async def test_link_exchange_accounts_and_sync_against_sandbox() -> None:
     else:
         pytest.fail("sandbox initial transaction pull never became ready (~2 min)")
     assert batch.next_cursor  # a drained cursor, ready to persist
+
+    await provider.remove_item(exchanged.access_token)
+
+
+async def test_investments_holdings_and_activities_against_sandbox() -> None:
+    """M10 CP1 smoke (issue #74): a sandbox Item minted with investments in
+    initial_products yields holdings and a 24-month activity window through
+    the owned client, tolerating the fresh-Item extraction delay."""
+    from datetime import date, timedelta
+
+    provider = PlaidProvider(client_id=CLIENT_ID, secret=SECRET, environment="sandbox")
+    exchanged = await provider.exchange_public_token(
+        await _sandbox_public_token(products=["investments"])
+    )
+
+    for _attempt in range(24):
+        try:
+            batch = await provider.get_holdings(exchanged.access_token)
+            break
+        except ProviderError as error:
+            if error.code != "PRODUCT_NOT_READY":
+                raise
+            await asyncio.sleep(5)
+    else:
+        pytest.fail("sandbox investments extraction never became ready (~2 min)")
+    assert batch.holdings, "sandbox investment item should carry holdings"
+    assert {s.provider_security_id for s in batch.securities} >= {
+        h.provider_security_id for h in batch.holdings
+    }
+
+    end = date.today()
+    activities = await provider.get_investment_activities(
+        exchanged.access_token, start_date=end - timedelta(days=730), end_date=end
+    )
+    assert activities.activities, "sandbox investment item should carry activity"
+    assert all(a.provider_activity_id for a in activities.activities)
 
     await provider.remove_item(exchanged.access_token)

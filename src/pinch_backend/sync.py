@@ -37,6 +37,7 @@ and logged; the cursor still advances. Adopting such an account later
 """
 
 import uuid  # runtime import: pydantic resolves the dataclass annotation at runtime
+from datetime import timedelta
 
 from ferro import transaction
 from pydantic import ConfigDict
@@ -54,6 +55,8 @@ from pinch_backend.models import (
     ConnectionStatus,
     CorrectionActor,
     Holding,
+    InvestmentActivity,
+    InvestmentActivityType,
     Security,
     SplitLine,
     Transaction,
@@ -132,8 +135,13 @@ async def _sync_investments(
     if not investment_accounts:
         return
     ledger_id = connection.ledger_id  # ty: ignore[unresolved-attribute]
+    window_end = utcnow().date()
+    window_start = window_end - timedelta(days=providers.INVESTMENTS_WINDOW_DAYS)
     try:
         batch = await provider.get_holdings(access_token)
+        activity_batch = await provider.get_investment_activities(
+            access_token, start_date=window_start, end_date=window_end
+        )
     except providers.ProviderError as error:
         connection.investments_error_detail = error.code
         await connection.save()
@@ -144,9 +152,11 @@ async def _sync_investments(
     skipped_unknown = 0
     async with transaction():
         # Queries before mutations (the ferro identity-map law): fetch
-        # both existing sets first, then write.
+        # every existing set first, then write.
         securities_by_pid: dict[str, Security] = {}
-        provider_sids = [s.provider_security_id for s in batch.securities]
+        provider_sids = sorted(
+            {s.provider_security_id for s in [*batch.securities, *activity_batch.securities]}
+        )
         if provider_sids:
             for row in await Security.where(
                 lambda s, lid=ledger_id, pids=provider_sids: (
@@ -157,8 +167,18 @@ async def _sync_investments(
         holdings_by_key: dict[tuple[uuid.UUID, uuid.UUID], Holding] = {}
         for row in await Holding.where(lambda h, ids=account_ids: h.account_id.in_(ids)).all():
             holdings_by_key[(row.account_id, row.security_id)] = row  # ty: ignore[unresolved-attribute]
+        activities_by_key: dict[tuple[uuid.UUID, str], InvestmentActivity] = {}
+        for activity_row in await InvestmentActivity.where(
+            lambda x, ids=account_ids: x.account_id.in_(ids)
+        ).all():
+            activities_by_key[
+                (activity_row.account_id, activity_row.provider_activity_id)  # ty: ignore[unresolved-attribute]
+            ] = activity_row
 
-        for ps in batch.securities:
+        provider_securities: dict[str, "providers.ProviderSecurity"] = {}
+        for ps in [*batch.securities, *activity_batch.securities]:
+            provider_securities.setdefault(ps.provider_security_id, ps)
+        for ps in provider_securities.values():
             row = securities_by_pid.get(ps.provider_security_id)
             if row is None:
                 securities_by_pid[ps.provider_security_id] = await Security.create(
@@ -221,6 +241,66 @@ async def _sync_investments(
             # story lives on as investment activity (CP1's record).
             await Holding.where(lambda h, ids=doomed: h.id.in_(ids)).delete()
 
+        # Activities: stateless mirror with a retention floor (ADR 0007).
+        # Exact-match within [window_start, window_end]; rows older than
+        # the window are never touched — captured history is forever.
+        activities_present: set[tuple[uuid.UUID, str]] = set()
+        for pa in activity_batch.activities:
+            account = investment_accounts.get(pa.provider_account_id)
+            if account is None:
+                skipped_unknown += 1
+                continue
+            try:
+                activity_type = InvestmentActivityType(pa.type)
+            except ValueError:
+                # Provider vocabulary this build doesn't know — loud skip,
+                # never a poisoned phase (the enum is Decision 14's law).
+                skipped_unknown += 1
+                continue
+            security = (
+                securities_by_pid.get(pa.provider_security_id)
+                if pa.provider_security_id is not None
+                else None
+            )
+            key = (account.id, pa.provider_activity_id)
+            activities_present.add(key)
+            row = activities_by_key.get(key)
+            if row is None:
+                await InvestmentActivity.create(
+                    ledger_id=ledger_id,
+                    account=account,
+                    security=security,
+                    provider_activity_id=pa.provider_activity_id,
+                    date=pa.date,
+                    name=pa.name,
+                    amount_minor=pa.amount_minor,
+                    quantity=pa.quantity,
+                    price=pa.price,
+                    fees_minor=pa.fees_minor,
+                    type=activity_type,
+                    subtype=pa.subtype,
+                    currency=pa.currency or account.currency,
+                )
+            else:
+                row.security = security
+                row.date = pa.date
+                row.name = pa.name
+                row.amount_minor = pa.amount_minor
+                row.quantity = pa.quantity
+                row.price = pa.price
+                row.fees_minor = pa.fees_minor
+                row.type = activity_type
+                row.subtype = pa.subtype
+                row.currency = pa.currency or account.currency
+                await row.save()
+        doomed_activities = [
+            row.id
+            for key, row in activities_by_key.items()
+            if key not in activities_present and row.date >= window_start
+        ]
+        if doomed_activities:
+            await InvestmentActivity.where(lambda x, ids=doomed_activities: x.id.in_(ids)).delete()
+
         connection.investments_error_detail = None
         await connection.save()
 
@@ -237,6 +317,8 @@ async def _sync_investments(
         connection_id=str(connection.id),
         holdings=len(present),
         removed=len(doomed),
+        activities=len(activities_present),
+        activities_removed=len(doomed_activities),
         skipped_unknown=skipped_unknown,
     )
 

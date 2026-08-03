@@ -54,6 +54,19 @@ class AccountKind(StrEnum):
     ASSET = "asset"
 
 
+class InvestmentActivityType(StrEnum):
+    """Plaid's six stable activity types (PRD #72, Decision 14) — the one
+    piece of provider vocabulary promoted to an enum, because rendering
+    branches on it. Subtypes stay free strings."""
+
+    BUY = "buy"
+    SELL = "sell"
+    CASH = "cash"
+    FEE = "fee"
+    TRANSFER = "transfer"
+    CANCEL = "cancel"
+
+
 class ConnectionProvider(StrEnum):
     PLAID = "plaid"
 
@@ -225,6 +238,7 @@ class Ledger(TimestampMixin, Model):
     conversations: Relation[list["Conversation"]] = BackRef()
     securities: Relation[list["Security"]] = BackRef()
     holdings: Relation[list["Holding"]] = BackRef()
+    investment_activities: Relation[list["InvestmentActivity"]] = BackRef()
 
 
 class User(TimestampMixin, Model):
@@ -349,6 +363,7 @@ class Account(TimestampMixin, Model):
     transactions: Relation[list["Transaction"]] = BackRef()
     recurring_series: Relation[list["RecurringSeries"]] = BackRef()
     holdings: Relation[list["Holding"]] = BackRef()
+    investment_activities: Relation[list["InvestmentActivity"]] = BackRef()
 
 
 class BalanceEntry(TimestampMixin, Model):
@@ -405,6 +420,7 @@ class Security(TimestampMixin, Model):
     updated_at: datetime = Field(default_factory=utcnow)
 
     holdings: Relation[list["Holding"]] = BackRef()
+    investment_activities: Relation[list["InvestmentActivity"]] = BackRef()
 
 
 class Holding(TimestampMixin, Model):
@@ -434,6 +450,48 @@ class Holding(TimestampMixin, Model):
     institution_price_as_of: CalendarDate | None = None
     institution_value_minor: int | None = None
     cost_basis_minor: int | None = None
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class InvestmentActivity(TimestampMixin, Model):
+    """A record of an event inside an investment account (CONTEXT.md;
+    M10 CP1, issue #74).
+
+    Not a Transaction, and inherits none of its laws (ADR 0007):
+    provider-owned, zero user data, never reviewed/classified/split/
+    transfer-linked. Synced by stateless mirror — exact-match within
+    Plaid's 24-month window, retained forever outside it — which is safe
+    precisely because nothing here is user-owned. ``amount_minor`` is
+    signed from the account's perspective like every amount; ``price`` is
+    a per-share quote, not an Amount.
+    """
+
+    __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
+        ("account_id", "provider_activity_id"),
+    )
+    __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (("ledger_id", "date"),)
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    ledger: Annotated[Ledger, ForeignKey(related_name="investment_activities", index=True)]
+    """The tenancy column (ADR-0002), denormalized from the account."""
+    account: Annotated[Account, ForeignKey(related_name="investment_activities", index=True)]
+    security: Annotated[
+        Security | None, ForeignKey(related_name="investment_activities", on_delete="SET NULL")
+    ] = None
+    """Absent on securityless cash events (account fees, plain deposits) —
+    and nulled, never cascaded, if its security ever goes: the record
+    outlives the identity."""
+    provider_activity_id: str
+    date: CalendarDate
+    name: str
+    amount_minor: int
+    quantity: float = 0.0
+    price: float | None = None
+    fees_minor: int | None = None
+    type: InvestmentActivityType
+    subtype: str | None = None
     currency: str = Field(pattern=r"^[A-Z]{3}$")
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)

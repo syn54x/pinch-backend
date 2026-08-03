@@ -34,6 +34,11 @@ INVESTMENTS_TIMEOUT = 180
 1-2 minutes on Plaid's side (PRD #72) — the 30s default that suits banking
 calls would misfire NETWORK_ERROR mid-extraction."""
 
+INVESTMENTS_WINDOW_DAYS = 730
+"""Plaid's flat 24-month investments-history cap (PRD #72) — the mirror
+window every activities sync re-fetches. Not configurable: the cap is
+Plaid's, and the retention floor keeps everything ever captured."""
+
 _PLAID_KIND = {
     "depository": AccountKind.DEPOSITORY,
     "credit": AccountKind.CREDIT,
@@ -150,6 +155,37 @@ class InvestmentsBatch(BaseModel):
     holdings: list[ProviderHolding]
 
 
+class ProviderInvestmentActivity(BaseModel):
+    """An investment-account event as the provider describes it, already
+    in Pinch vocabulary: ``amount_minor`` signed from the account's
+    perspective — negative is money out, so a buy is negative and a
+    dividend positive (Plaid's positive-is-cash-out is flipped here, at
+    the seam). ``type`` stays the provider's raw string; the sync phase
+    promotes it to the domain enum and skips loudly on vocabulary it
+    doesn't know."""
+
+    provider_activity_id: str
+    provider_account_id: str
+    provider_security_id: str | None = None
+    date: date
+    name: str
+    amount_minor: int
+    quantity: float = 0.0
+    price: float | None = None
+    fees_minor: int | None = None
+    type: str
+    subtype: str | None = None
+    currency: str | None = None
+
+
+class ActivitiesBatch(BaseModel):
+    """One drained activities window: every offset page, plus the
+    securities the activities name (Plaid sends them alongside)."""
+
+    securities: list[ProviderSecurity]
+    activities: list[ProviderInvestmentActivity]
+
+
 class ProviderError(Exception):
     """A provider-side failure, carrying the provider's error code — the
     only provider detail that may ever surface (PRD #31: request payloads
@@ -174,6 +210,10 @@ class SyncProvider(Protocol):
     async def sync_transactions(self, access_token: str, cursor: str | None) -> SyncBatch: ...
 
     async def get_holdings(self, access_token: str) -> InvestmentsBatch: ...
+
+    async def get_investment_activities(
+        self, access_token: str, start_date: date, end_date: date
+    ) -> ActivitiesBatch: ...
 
     async def remove_item(self, access_token: str) -> None: ...
 
@@ -331,6 +371,64 @@ class PlaidProvider:
                 )
             )
         return InvestmentsBatch(securities=securities, holdings=holdings)
+
+    async def get_investment_activities(
+        self, access_token: str, start_date: date, end_date: date
+    ) -> ActivitiesBatch:
+        """Drain the window: /investments/transactions/get is offset-
+        paginated (there is no cursor endpoint for investments — PRD #72),
+        so every page up to total_investment_transactions comes back in
+        one call. Securities dedupe across pages by id."""
+
+        def convert(t: dict) -> ProviderInvestmentActivity:
+            currency = t.get("iso_currency_code")
+            fees = t.get("fees")
+            return ProviderInvestmentActivity(
+                provider_activity_id=t["investment_transaction_id"],
+                provider_account_id=t["account_id"],
+                provider_security_id=t.get("security_id"),
+                date=date.fromisoformat(t["date"]),
+                name=t["name"],
+                # Plaid: positive is cash out; Pinch: negative is money out.
+                amount_minor=-_to_minor(t["amount"], currency),
+                quantity=t.get("quantity") or 0.0,
+                price=t.get("price"),
+                fees_minor=None if fees is None else _to_minor(fees, currency),
+                type=t["type"],
+                subtype=t.get("subtype"),
+                currency=currency,
+            )
+
+        securities: dict[str, ProviderSecurity] = {}
+        activities: list[ProviderInvestmentActivity] = []
+        offset = 0
+        while True:
+            data = await self._post(
+                "/investments/transactions/get",
+                {
+                    "access_token": access_token,
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    "options": {"count": 500, "offset": offset},
+                },
+                timeout=INVESTMENTS_TIMEOUT,
+            )
+            for s in data.get("securities", []):
+                securities.setdefault(
+                    s["security_id"],
+                    ProviderSecurity(
+                        provider_security_id=s["security_id"],
+                        name=s.get("name") or s.get("ticker_symbol") or "Unknown security",
+                        ticker_symbol=s.get("ticker_symbol"),
+                        type=s.get("type") or "other",
+                        is_cash_equivalent=bool(s.get("is_cash_equivalent")),
+                    ),
+                )
+            page = data["investment_transactions"]
+            activities.extend(convert(t) for t in page)
+            offset += len(page)
+            if offset >= data["total_investment_transactions"] or not page:
+                return ActivitiesBatch(securities=list(securities.values()), activities=activities)
 
     async def sync_transactions(self, access_token: str, cursor: str | None) -> SyncBatch:
         """Drain the cursor: every has_more page in one call. The job is
