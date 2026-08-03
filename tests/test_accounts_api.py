@@ -181,11 +181,102 @@ async def test_archive_is_an_idempotent_flag_flip(client) -> None:
     assert [item["archived"] for item in listed] == [True]
 
 
-async def test_account_delete_does_not_exist(client) -> None:
+async def _manual_txn(client, account_id: str, amount: int, description: str, date="2026-07-10"):
+    r = await client.post(
+        "/api/v1/transactions",
+        json={
+            "account_id": account_id,
+            "date": date,
+            "amount_minor": amount,
+            "description": description,
+        },
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+async def test_delete_retracts_and_removes_a_disconnected_account(client) -> None:
+    """Hard delete (story-3 reversal, post-F4): rides the retraction seam —
+    decisions voided (append-only holds), transfers dissolved with the
+    surviving counterpart kept, then rows and account removed."""
     await _signup(client)
-    account = await _create_account(client)
-    response = await client.delete(f"{ACCOUNTS}/{account['id']}", headers=await _csrf(client))
-    assert response.status_code == 405
+    doomed = await _create_account(client, label="Old Stash Duplicate")
+    keeper = await _create_account(client, label="Checking")
+
+    reviewed = await _manual_txn(client, doomed["id"], -4500, "BLUE BOTTLE")
+    r = await client.post(
+        f"/api/v1/transactions/{reviewed['id']}/review",
+        json={},
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 200, r.text
+    await _manual_txn(client, doomed["id"], -1200, "UNREVIEWED SNACK")
+    out_leg = await _manual_txn(client, doomed["id"], -30000, "TO CHECKING")
+    in_leg = await _manual_txn(client, keeper["id"], 30000, "FROM STASH")
+    link = await client.post(
+        "/api/v1/transfers",
+        json={"transaction_ids": [out_leg["id"], in_leg["id"]]},
+        headers=await _csrf(client),
+    )
+    assert link.status_code == 201, link.text
+    await _enter_balance(client, doomed["id"], 100000)
+
+    preview = await client.get(f"{ACCOUNTS}/{doomed['id']}/deletion-preview")
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert body["transactions"] == 3
+    assert body["reviewed"] == 1
+    assert body["transfers"] == 1
+    assert body["balance_entries"] == 1
+
+    response = await client.delete(f"{ACCOUNTS}/{doomed['id']}", headers=await _csrf(client))
+    assert response.status_code == 204, response.text
+
+    listing = (await client.get(ACCOUNTS)).json()["items"]
+    assert {a["label"] for a in listing} == {"Checking"}
+    txns = (await client.get("/api/v1/transactions?limit=100")).json()["items"]
+    assert {t["description_raw"] for t in txns} == {"FROM STASH"}
+    survivor = next(t for t in txns if t["description_raw"] == "FROM STASH")
+    assert survivor["transfer"] is None, "the dissolved link does not linger"
+
+    entries = (await client.get("/api/v1/correction-log?limit=100")).json()["items"]
+    voids = [e for e in entries if e["kind"] == "void"]
+    decisions = [e for e in entries if e["kind"] == "decision"]
+    assert any(e["transaction_id"] == reviewed["id"] for e in decisions), (
+        "the original decision survives — append-only"
+    )
+    assert any(v["transaction_id"] == reviewed["id"] and v["voids"] is not None for v in voids), (
+        "the decision is voided, never deleted"
+    )
+
+
+async def test_delete_refuses_a_connected_account(client) -> None:
+    """A connected account would be re-created by the next sync — disconnect
+    first; archive is the verb for connected accounts."""
+    import uuid as uuid_mod
+
+    from pinch_backend.models import Account, Connection, ConnectionProvider, Ledger, User
+
+    await _signup(client)
+    user = await User.where(lambda u: u.email == "taylor@example.com").first()
+    member = (await user.memberships.all())[0]
+    ledger = await Ledger.get(member.ledger_id)
+    connection = await Connection.create(
+        ledger=ledger,
+        provider=ConnectionProvider.PLAID,
+        provider_item_id=str(uuid_mod.uuid7()),
+    )
+    account = await Account.create(
+        ledger=ledger,
+        connection=connection,
+        kind="depository",
+        label="Live Checking",
+        currency="USD",
+    )
+    response = await client.delete(f"{ACCOUNTS}/{account.id}", headers=await _csrf(client))
+    assert response.status_code == 409, response.text
+    assert "isconnect" in response.json()["detail"]
 
 
 # --- Balance entries (story 2) ------------------------------------------------------
