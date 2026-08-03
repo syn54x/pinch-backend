@@ -104,13 +104,14 @@ def _sign(
     return f"{signing_input}.{_b64url(raw)}"
 
 
-def _doorbell(webhook_type: str, webhook_code: str, item_id: str) -> bytes:
+def _doorbell(webhook_type: str, webhook_code: str, item_id: str, **extra) -> bytes:
     return json.dumps(
         {
             "webhook_type": webhook_type,
             "webhook_code": webhook_code,
             "item_id": item_id,
             "environment": "sandbox",
+            **extra,
         }
     ).encode()
 
@@ -338,7 +339,7 @@ async def test_an_unknown_webhook_code_answers_200_and_enqueues_nothing(
     """Codes outside the doorbell table are acknowledged, not errored — a
     non-200 only makes Plaid retry something we chose to ignore."""
     private, kid, _ = keypair
-    body = _doorbell("ITEM", "PENDING_DISCONNECT", "item-public-abc")
+    body = _doorbell("TRANSACTIONS", "RECURRING_TRANSACTIONS_UPDATE", "item-public-abc")
 
     response = await _ring(client, _sign(private, kid, body), body)
 
@@ -358,6 +359,159 @@ async def test_an_unmatched_item_id_answers_200_and_enqueues_nothing(
 
     assert response.status_code == 200
     assert _queued(job_connector) == []
+
+
+# --- ITEM lifecycle (M11 CP2, issue #80): prompt health, no new states -----------
+
+
+async def _connection_view(client, connection_id: str) -> dict:
+    response = await client.get(f"{CONNECTIONS}/{connection_id}")
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+async def test_item_error_with_an_auth_code_flips_to_reauth_required(
+    client, connection, keypair, job_connector
+) -> None:
+    """The moment Plaid learns a login died, so do we (PRD #77 story 3):
+    ITEM ERROR maps through the sync engine's own auth-code partition —
+    same status, same error_detail shape a failed sync would write."""
+    private, kid, _ = keypair
+    body = _doorbell(
+        "ITEM", "ERROR", "item-public-abc", error={"error_code": "ITEM_LOGIN_REQUIRED"}
+    )
+
+    response = await _ring(client, _sign(private, kid, body), body)
+
+    assert response.status_code == 200, response.text
+    view = await _connection_view(client, connection["id"])
+    assert view["status"] == "reauth_required"
+    assert view["error_detail"] == "ITEM_LOGIN_REQUIRED"
+    assert _queued(job_connector) == []  # a dead login is repair territory, not a sync
+
+
+async def test_item_error_with_a_non_auth_code_lands_as_error(
+    client, connection, keypair, job_connector
+) -> None:
+    private, kid, _ = keypair
+    body = _doorbell(
+        "ITEM",
+        "ERROR",
+        "item-public-abc",
+        error={"error_code": "INSTITUTION_NO_LONGER_SUPPORTED"},
+    )
+
+    response = await _ring(client, _sign(private, kid, body), body)
+
+    assert response.status_code == 200, response.text
+    view = await _connection_view(client, connection["id"])
+    assert view["status"] == "error"
+    assert view["error_detail"] == "INSTITUTION_NO_LONGER_SUPPORTED"
+    assert _queued(job_connector) == []
+
+
+async def test_login_repaired_clears_reauth_and_enqueues_the_proving_sync(
+    client, connection, keypair, job_connector
+) -> None:
+    """Self-healed without update-mode (PRD #77 story 4): the broken badge
+    clears and a sync runs to prove the repair — the webhook writes only
+    the statuses; last_synced_at stays the sync's own stamp."""
+    private, kid, _ = keypair
+    broken = _doorbell(
+        "ITEM", "ERROR", "item-public-abc", error={"error_code": "ITEM_LOGIN_REQUIRED"}
+    )
+    assert (await _ring(client, _sign(private, kid, broken), broken)).status_code == 200
+    job_connector.reset()
+
+    repaired = _doorbell("ITEM", "LOGIN_REPAIRED", "item-public-abc")
+    response = await _ring(client, _sign(private, kid, repaired), repaired)
+
+    assert response.status_code == 200, response.text
+    view = await _connection_view(client, connection["id"])
+    assert view["status"] == "active"
+    assert view["error_detail"] is None
+    jobs = _queued(job_connector)
+    assert [j["task_name"] for j in jobs] == ["sync.sync_connection"]
+    assert jobs[0]["lock"] == f"sync:{connection['id']}"
+
+
+async def test_user_permission_revoked_lands_as_error_with_the_code(
+    client, connection, keypair, job_connector
+) -> None:
+    """Honestly broken beats silently stale (PRD #77 story 5)."""
+    private, kid, _ = keypair
+    body = _doorbell("ITEM", "USER_PERMISSION_REVOKED", "item-public-abc")
+
+    response = await _ring(client, _sign(private, kid, body), body)
+
+    assert response.status_code == 200, response.text
+    view = await _connection_view(client, connection["id"])
+    assert view["status"] == "error"
+    assert view["error_detail"] == "USER_PERMISSION_REVOKED"
+    assert _queued(job_connector) == []
+
+
+@pytest.mark.parametrize(
+    "webhook_code",
+    ["PENDING_DISCONNECT", "PENDING_EXPIRATION", "WEBHOOK_UPDATE_ACKNOWLEDGED"],
+)
+async def test_log_only_item_events_change_nothing(
+    client, connection, keypair, job_connector, webhook_code
+) -> None:
+    """Advance warnings and acknowledgements are logged and nothing more
+    (PRD #77 decision 5): no state, no jobs — the eventual ERROR is the
+    acting event."""
+    private, kid, _ = keypair
+    body = _doorbell("ITEM", webhook_code, "item-public-abc")
+
+    response = await _ring(client, _sign(private, kid, body), body)
+
+    assert response.status_code == 200, response.text
+    view = await _connection_view(client, connection["id"])
+    assert view["status"] == "active"
+    assert view["error_detail"] is None
+    assert _queued(job_connector) == []
+
+
+async def test_item_error_without_an_error_object_still_lands_as_error(
+    client, connection, keypair, job_connector
+) -> None:
+    """A malformed ERROR ring degrades to the generic broken state — never
+    a crash, never a silent active."""
+    private, kid, _ = keypair
+    body = _doorbell("ITEM", "ERROR", "item-public-abc")
+
+    response = await _ring(client, _sign(private, kid, body), body)
+
+    assert response.status_code == 200, response.text
+    view = await _connection_view(client, connection["id"])
+    assert view["status"] == "error"
+    assert view["error_detail"] == "ITEM_ERROR"
+    assert _queued(job_connector) == []
+
+
+async def test_an_item_event_for_an_unmatched_item_changes_nothing(
+    client, connection, keypair, job_connector
+) -> None:
+    """CP0's unmatched posture holds for the new family: log-and-200,
+    and the connection we do hold is untouched."""
+    private, kid, _ = keypair
+    body = _doorbell("ITEM", "ERROR", "item-unknown", error={"error_code": "ITEM_LOGIN_REQUIRED"})
+
+    response = await _ring(client, _sign(private, kid, body), body)
+
+    assert response.status_code == 200, response.text
+    view = await _connection_view(client, connection["id"])
+    assert view["status"] == "active"
+    assert _queued(job_connector) == []
+
+
+def test_no_new_connection_statuses_exist() -> None:
+    """The no-new-states law (PRD #77 decision 5): webhooks change when we
+    learn, never what states exist."""
+    from pinch_backend.models import ConnectionStatus
+
+    assert {s.value for s in ConnectionStatus} == {"active", "error", "reauth_required"}
 
 
 # --- The contract seam does not move ---------------------------------------------

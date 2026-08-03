@@ -56,8 +56,10 @@ One carved-out exception (ADR 0008): the webhook receiver
 user is acting, so there is no session to resolve a ledger from. Its
 authentication is the provider's signed JWT, its reach is exactly one
 `Connection` lookup by provider item id, and it may only enqueue the same
-jobs a user-triggered refresh would. Anything beyond that shape goes back
-under this invariant.
+jobs a user-triggered refresh would and write the connection-status
+transitions the sync engine already writes (ADR 0008's no-new-states
+law, via `sync.record_broken` and its heal mirror). Anything beyond that
+shape goes back under this invariant.
 
 ---
 

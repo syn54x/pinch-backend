@@ -32,9 +32,10 @@ from litestar.status_codes import HTTP_200_OK
 
 from pinch_backend import providers
 from pinch_backend.jobs import sync_connection, sync_investments
-from pinch_backend.models import Connection
+from pinch_backend.models import Connection, ConnectionStatus
 from pinch_backend.observability import get_logger
 from pinch_backend.settings import settings
+from pinch_backend.sync import AUTH_ERROR_CODES, record_broken
 
 log = get_logger(__name__)
 
@@ -53,12 +54,23 @@ signature verification."""
 _DOORBELLS = {
     # (webhook_type, webhook_code) → the job a clicked Refresh would run.
     # HOLDINGS fires DEFAULT_UPDATE only (fact sheet); anything absent
-    # here — ITEM lifecycle included, until CP2 — logs-and-200s.
+    # here and not an ITEM lifecycle code logs-and-200s.
     ("TRANSACTIONS", "SYNC_UPDATES_AVAILABLE"): sync_connection,
     ("HOLDINGS", "DEFAULT_UPDATE"): sync_investments,
     ("INVESTMENTS_TRANSACTIONS", "DEFAULT_UPDATE"): sync_investments,
     ("INVESTMENTS_TRANSACTIONS", "HISTORICAL_UPDATE"): sync_investments,
 }
+
+_ITEM_ACTING = {"ERROR", "LOGIN_REPAIRED", "USER_PERMISSION_REVOKED"}
+"""ITEM codes that touch connection health (M11 CP2, issue #80) — only
+ever through the transitions the sync engine already writes (the
+no-new-states law: webhooks change when we learn, never what states
+exist)."""
+
+_ITEM_LOG_ONLY = {"PENDING_DISCONNECT", "PENDING_EXPIRATION", "WEBHOOK_UPDATE_ACKNOWLEDGED"}
+"""Advance warnings and acknowledgements: logged and nothing more — the
+eventual ERROR is the acting event, and the pending pair has no
+user-facing surface yet (PRD #77, out of scope)."""
 
 
 class VerificationFailure(Exception):
@@ -175,8 +187,12 @@ async def receive_plaid_webhook(request: Request) -> None:
     webhook_type = payload.get("webhook_type")
     webhook_code = payload.get("webhook_code")
     item_id = payload.get("item_id")
+    if webhook_type == "ITEM" and webhook_code in _ITEM_LOG_ONLY:
+        log.info("webhook.item_acknowledged", webhook_code=webhook_code)
+        return
     job = _DOORBELLS.get((webhook_type, webhook_code))
-    if job is None:
+    acts_on_item = webhook_type == "ITEM" and webhook_code in _ITEM_ACTING
+    if job is None and not acts_on_item:
         log.info("webhook.ignored", webhook_type=webhook_type, webhook_code=webhook_code)
         return
     connection = await Connection.where(lambda c, iid=item_id: c.provider_item_id == iid).first()
@@ -185,6 +201,9 @@ async def receive_plaid_webhook(request: Request) -> None:
         # the 200 tells a prober nothing about which item ids exist.
         log.info("webhook.unmatched_item", webhook_type=webhook_type)
         return
+    if job is None:
+        await _handle_item_event(webhook_code, payload, connection)
+        return
     await job.configure(lock=f"sync:{connection.id}").defer_async(connection_id=str(connection.id))
     log.info(
         "webhook.dispatched",
@@ -192,6 +211,42 @@ async def receive_plaid_webhook(request: Request) -> None:
         webhook_code=webhook_code,
         connection_id=str(connection.id),
         job=job.name,
+    )
+
+
+async def _handle_item_event(webhook_code: str, payload: dict, connection: Connection) -> None:
+    """Connection health becomes prompt (M11 CP2, issue #80): the same
+    transitions the sync engine writes, fired the moment Plaid learns
+    instead of at the next manual sync. The one payload read beyond the
+    doorbell — ITEM ERROR's ``error.error_code`` — IS the kind of change
+    for this family, and it lands only where sync failures already land."""
+    if webhook_code == "ERROR":
+        error_code = (payload.get("error") or {}).get("error_code") or "ITEM_ERROR"
+        status = (
+            ConnectionStatus.REAUTH_REQUIRED
+            if error_code in AUTH_ERROR_CODES
+            else ConnectionStatus.ERROR
+        )
+        await record_broken(connection, status, error_code)
+    elif webhook_code == "USER_PERMISSION_REVOKED":
+        await record_broken(connection, ConnectionStatus.ERROR, "USER_PERMISSION_REVOKED")
+    elif webhook_code == "LOGIN_REPAIRED":
+        # The heal half of the sync engine's own transition: status and
+        # error_detail clear; last_synced_at stays the sync's stamp — the
+        # proving sync enqueued here writes it on success.
+        connection.status = ConnectionStatus.ACTIVE
+        connection.error_detail = None
+        await connection.save()
+        await sync_connection.configure(lock=f"sync:{connection.id}").defer_async(
+            connection_id=str(connection.id)
+        )
+    else:  # pragma: no cover — _ITEM_ACTING and this chain move together
+        raise RuntimeError(f"ITEM code {webhook_code} is listed as acting but unhandled")
+    log.info(
+        "webhook.item_lifecycle",
+        webhook_code=webhook_code,
+        connection_id=str(connection.id),
+        status=connection.status.value,
     )
 
 

@@ -116,10 +116,12 @@ class SyncOutcome:
         return self.created > 0 or self.reopened > 0 or self.invalidated > 0
 
 
-async def _record_broken(connection: Connection, status: ConnectionStatus, code: str) -> None:
+async def record_broken(connection: Connection, status: ConnectionStatus, code: str) -> None:
     """The two terminal health states share one shape: status + the
     provider's code — the only provider detail that ever lands in
-    ``error_detail`` (PRD #31)."""
+    ``error_detail`` (PRD #31). Public since M11 CP2: the webhook
+    receiver's ITEM events write broken states through this exact
+    transition — the no-new-states law made literal."""
     connection.status = status
     connection.error_detail = code
     await connection.save()
@@ -395,10 +397,10 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
         if error.code in AUTH_ERROR_CODES:
             # A dead login is dead for both products — no investments
             # attempt on a token repair can't be far behind anyway.
-            await _record_broken(connection, ConnectionStatus.REAUTH_REQUIRED, error.code)
+            await record_broken(connection, ConnectionStatus.REAUTH_REQUIRED, error.code)
             return SyncOutcome()
         if final_attempt:
-            await _record_broken(connection, ConnectionStatus.ERROR, error.code)
+            await record_broken(connection, ConnectionStatus.ERROR, error.code)
             # Isolation is bidirectional (post-QA fix on #72): a stuck
             # banking product must not hold investments hostage. The
             # motivating Stash Item is exactly this shape — transactions
