@@ -322,6 +322,24 @@ class PlaidProvider:
             )
         return accounts
 
+    async def get_item_status(self, access_token: str) -> dict:
+        """Diagnostic probe (post-Stash-QA): the Item's own account of
+        itself — products, per-product pull status, its standing error.
+        PlaidProvider-only, deliberately outside the ``SyncProvider``
+        protocol: this feeds the ``plaid-item`` developer CLI, never the
+        sync engine, so fakes owe it nothing."""
+        data = await self._post("/item/get", {"access_token": access_token, "include_status": True})
+        item = data.get("item") or {}
+        return {
+            "item_id": item.get("item_id"),
+            "institution_id": item.get("institution_id"),
+            "billed_products": item.get("billed_products"),
+            "consented_products": item.get("consented_products"),
+            "available_products": item.get("available_products"),
+            "error": item.get("error"),
+            "status": data.get("status"),
+        }
+
     async def get_institution_name(self, access_token: str) -> str | None:
         """Two documented steps: the Item names its institution id, the
         institutions endpoint names the institution. Institution-less Items

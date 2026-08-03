@@ -652,6 +652,43 @@ async def test_activities_tolerate_missing_security_and_use_timeout() -> None:
     assert fee.fees_minor is None
 
 
+async def test_item_status_probe_selects_the_diagnostic_fields() -> None:
+    """The plaid-item CLI's wire shape: /item/get with include_status,
+    answering products, per-product pull status, and the Item's error."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        seen["path"] = request.url.path
+        return httpx.Response(
+            200,
+            json={
+                "item": {
+                    "item_id": "item-1",
+                    "institution_id": "ins_1",
+                    "billed_products": ["transactions"],
+                    "consented_products": ["transactions", "investments"],
+                    "available_products": ["investments"],
+                    "error": None,
+                },
+                "status": {
+                    "transactions": {
+                        "last_successful_update": None,
+                        "last_failed_update": "2026-08-03T12:00:00Z",
+                    },
+                    "last_webhook": None,
+                },
+            },
+        )
+
+    report = await _provider(handler).get_item_status("access-x")
+    assert seen["path"] == "/item/get"
+    assert seen["include_status"] is True
+    assert report["consented_products"] == ["transactions", "investments"]
+    assert report["status"]["transactions"]["last_successful_update"] is None
+    assert report["error"] is None
+
+
 async def test_holdings_error_surfaces_code_only() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

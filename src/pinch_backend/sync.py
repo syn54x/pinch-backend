@@ -365,10 +365,23 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
         batch = await provider.sync_transactions(access_token, connection.sync_cursor)
     except providers.ProviderError as error:
         if error.code in AUTH_ERROR_CODES:
+            # A dead login is dead for both products — no investments
+            # attempt on a token repair can't be far behind anyway.
             await _record_broken(connection, ConnectionStatus.REAUTH_REQUIRED, error.code)
             return SyncOutcome()
         if final_attempt:
             await _record_broken(connection, ConnectionStatus.ERROR, error.code)
+            # Isolation is bidirectional (post-QA fix on #72): a stuck
+            # banking product must not hold investments hostage. The
+            # motivating Stash Item is exactly this shape — transactions
+            # perpetually PRODUCT_NOT_READY on a healthy token — and the
+            # consent flag can only rise if the holdings call actually
+            # fires. Once per ladder, at exhaustion, not per retry.
+            cid_broken = connection.id
+            broken_accounts = await Account.where(
+                lambda a, c=cid_broken: a.connection_id == c
+            ).all()
+            await _sync_investments(connection, provider, access_token, broken_accounts)
             return SyncOutcome()
         raise  # transient with retries remaining: the runner's backoff handles it
 

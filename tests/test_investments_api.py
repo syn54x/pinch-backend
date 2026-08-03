@@ -116,6 +116,9 @@ class FakeInvestmentsProvider:
         self.activity_batches: list[providers.ActivitiesBatch] = []
         self.activity_windows: list[tuple] = []
         self.failure: providers.ProviderError | None = None
+        self.transactions_failure: providers.ProviderError | None = None
+        """Banking-only breakage: sync_transactions raises while
+        get_accounts stays healthy — the stuck-Item shape."""
         self.investments_failure: providers.ProviderError | None = None
         self.holdings_calls = 0
         self.cursor_serial = 0
@@ -136,6 +139,8 @@ class FakeInvestmentsProvider:
     async def sync_transactions(self, access_token: str, cursor: str | None):
         if self.failure is not None:
             raise self.failure
+        if self.transactions_failure is not None:
+            raise self.transactions_failure
         if self.batches:
             return self.batches.pop(0)
         self.cursor_serial += 1
@@ -652,6 +657,82 @@ async def test_non_consent_investments_errors_still_record_as_errors(
     health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
     assert health["investments_consent_required"] is False
     assert health["investments_error_detail"] == "INTERNAL_SERVER_ERROR"
+
+
+async def test_stuck_banking_still_raises_the_consent_flag(client, db, fake_provider):
+    """Bidirectional isolation (post-QA fix): a transactions product
+    perpetually PRODUCT_NOT_READY — the real Stash shape — must not hold
+    investments hostage. At ladder exhaustion the holdings call still
+    fires, so the consent flag can rise while banking stays stuck."""
+    from pinch_backend.sync import run_sync
+
+    fake_provider.transactions_failure = providers.ProviderError(
+        code="PRODUCT_NOT_READY", message="initial transaction pull not finished"
+    )
+    fake_provider.investments_failure = providers.ProviderError(
+        code="ADDITIONAL_CONSENT_REQUIRED", message="consent needed"
+    )
+    await _signup(client)
+    body = await _connect(client)
+    await run_sync(uuid.UUID(body["id"]), final_attempt=True)
+
+    health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
+    assert health["status"] == "error"
+    assert health["error_detail"] == "PRODUCT_NOT_READY"
+    assert health["investments_consent_required"] is True
+
+
+async def test_stuck_banking_still_lands_holdings(client, db, fake_provider):
+    """The same shape with investments healthy: positions land even while
+    the banking product never becomes ready."""
+    from pinch_backend.sync import run_sync
+
+    fake_provider.transactions_failure = providers.ProviderError(
+        code="PRODUCT_NOT_READY", message="initial transaction pull not finished"
+    )
+    fake_provider.investment_batches = [_default_batch()]
+    await _signup(client)
+    body = await _connect(client)
+    await run_sync(uuid.UUID(body["id"]), final_attempt=True)
+
+    assert len((await client.get(HOLDINGS)).json()["items"]) == 2
+    health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
+    assert health["status"] == "error"  # banking honesty is untouched
+
+
+async def test_transient_banking_error_defers_investments_to_ladder_end(client, db, fake_provider):
+    """Retries with attempts remaining re-raise without touching
+    investments — one holdings call per ladder, at exhaustion, never five."""
+    import pytest as _pytest
+
+    from pinch_backend.sync import run_sync
+
+    fake_provider.transactions_failure = providers.ProviderError(
+        code="PRODUCT_NOT_READY", message="initial transaction pull not finished"
+    )
+    await _signup(client)
+    body = await _connect(client)
+    with _pytest.raises(providers.ProviderError):
+        await run_sync(uuid.UUID(body["id"]), final_attempt=False)
+    assert fake_provider.holdings_calls == 0
+
+
+async def test_auth_error_skips_investments_entirely(client, db, fake_provider):
+    """A dead login is dead for both products: reauth-required stops the
+    pass before any investments call."""
+    from pinch_backend.sync import run_sync
+
+    fake_provider.transactions_failure = providers.ProviderError(
+        code="ITEM_LOGIN_REQUIRED", message="login is dead"
+    )
+    await _signup(client)
+    body = await _connect(client)
+    await run_sync(uuid.UUID(body["id"]), final_attempt=True)
+
+    assert fake_provider.holdings_calls == 0
+    health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
+    assert health["status"] == "reauth_required"
+    assert health["investments_consent_required"] is False
 
 
 async def test_holdings_are_ledger_fenced(client, db, fake_provider, run_jobs):
