@@ -114,6 +114,12 @@ def test_plaid_configured_with_key() -> None:
     assert s.plaid_environment == "sandbox"
 
 
+def test_reconcile_interval_defaults_dev_friendly() -> None:
+    """24h default so dev machines aren't ticking hourly for no one
+    (PRD #77 story 17); production sets PINCH_RECONCILE_INTERVAL_HOURS=1."""
+    assert Settings().reconcile_interval_hours == 24
+
+
 def test_ai_model_knobs_unset_by_default() -> None:
     """One knob per agent, holding a pydantic-ai model string (PRD M9).
     Empty means that agent is disabled — keyless is a first-class state,

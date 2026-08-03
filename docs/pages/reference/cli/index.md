@@ -16,12 +16,14 @@ Pinch backend developer CLI (internal; the public CLI is pinch-cli)
     - [`run`](#pinch-dev-evals-run)
     - [`export`](#pinch-dev-evals-export)
 - [`worker`](#pinch-dev-worker)
+- [`reconcile`](#pinch-dev-reconcile)
 - [`plaid-item`](#pinch-dev-plaid-item)
 
 **Commands**:
 
 * [`evals`](#pinch-dev-evals): The evals harness (PRD M9): offline quality gate, never CI pass/fail. No prompt or model change merges without before/after numbers.
 * [`plaid-item`](#pinch-dev-plaid-item): Probe Plaid's /item/get for one connection (or all of them): products, the per-product pull status, and the Item's standing error — the diagnostic for PRODUCT_NOT_READY mysteries (queued since the Stash QA session). Read-only; costs nothing, changes nothing.
+* [`reconcile`](#pinch-dev-reconcile): Run one probe-then-decide reconcile pass immediately (M11 CP3): the deploy-day retrofit for pre-webhook Items and the dev tool for tunnel changes. Identical to the periodic task's pass — enqueued syncs still need the worker running to execute.
 * [`worker`](#pinch-dev-worker): Run the background-job worker (deployment shape: API + worker + Postgres, ADR-0006). Applies Procrastinate's schema on first run when PINCH_DATABASE_AUTO_MIGRATE is on.
 
 ## pinch-dev evals
@@ -60,6 +62,14 @@ pinch-dev worker
 ```
 
 Run the background-job worker (deployment shape: API + worker + Postgres, ADR-0006). Applies Procrastinate's schema on first run when PINCH_DATABASE_AUTO_MIGRATE is on.
+
+## pinch-dev reconcile
+
+```console
+pinch-dev reconcile
+```
+
+Run one probe-then-decide reconcile pass immediately (M11 CP3): the deploy-day retrofit for pre-webhook Items and the dev tool for tunnel changes. Identical to the periodic task's pass — enqueued syncs still need the worker running to execute.
 
 ## pinch-dev plaid-item
 

@@ -167,6 +167,39 @@ def worker() -> None:
     asyncio.run(run_worker())
 
 
+@app.command
+def reconcile() -> None:
+    """Run one probe-then-decide reconcile pass immediately (M11 CP3):
+    the deploy-day retrofit for pre-webhook Items and the dev tool for
+    tunnel changes. Identical to the periodic task's pass — enqueued
+    syncs still need the worker running to execute."""
+    import asyncio
+
+    from ferro import engines
+
+    from pinch_backend.db import connect_database, disconnect_database
+    from pinch_backend.jobs import close_job_app, ensure_job_schema, open_job_app
+    from pinch_backend.reconcile import reconcile_pass
+    from pinch_backend.settings import settings
+
+    if not settings.plaid_configured:
+        raise SystemExit("Plaid is not configured (PINCH_PLAID_CLIENT_ID / _SECRET)")
+
+    async def _run() -> None:
+        await connect_database()
+        await open_job_app()
+        await ensure_job_schema()
+        try:
+            async with engines.session():
+                count = await reconcile_pass()
+            print(f"examined {count} connection(s)")
+        finally:
+            await close_job_app()
+            await disconnect_database()
+
+    asyncio.run(_run())
+
+
 @app.command(name="plaid-item")
 def plaid_item(connection_id: str | None = None) -> None:
     """Probe Plaid's /item/get for one connection (or all of them):

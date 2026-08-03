@@ -166,6 +166,67 @@ async def test_update_mode_link_token_carries_no_webhook_url(monkeypatch) -> Non
     assert "webhook" not in seen
 
 
+async def test_update_webhook_posts_token_and_url() -> None:
+    """The reconciler's re-registration call (M11 CP3): /item/webhook/update
+    with the Item's token and the instance's receiver URL."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={"item": {}, "request_id": "req-1"})
+
+    await _provider(handler).update_webhook("access-x", "https://pinch.example/webhooks/plaid")
+    assert seen["path"] == "/item/webhook/update"
+    assert seen["access_token"] == "access-x"
+    assert seen["webhook"] == "https://pinch.example/webhooks/plaid"
+
+
+async def test_item_state_reads_webhook_and_status_timestamps() -> None:
+    """The reconciler's one free probe (M11 CP3): a plain /item/get —
+    item.webhook plus Plaid's own last-successful-update stamps (the
+    production-empirical shape: status rides top-level, no parameters)."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        seen["path"] = request.url.path
+        return httpx.Response(
+            200,
+            json={
+                "item": {"item_id": "item-x", "webhook": "https://old.example/hook"},
+                "status": {
+                    "transactions": {"last_successful_update": "2026-08-01T10:20:30Z"},
+                    "investments": {"last_successful_update": None},
+                    "last_webhook": None,
+                },
+                "request_id": "req-1",
+            },
+        )
+
+    state = await _provider(handler).get_item_state("access-x")
+    assert seen["path"] == "/item/get"
+    assert seen["access_token"] == "access-x"
+    assert state.webhook == "https://old.example/hook"
+    assert state.transactions_updated_at is not None
+    assert state.transactions_updated_at.isoformat() == "2026-08-01T10:20:30+00:00"
+    assert state.investments_updated_at is None
+
+
+async def test_item_state_reads_an_unregistered_item_as_empty_webhook() -> None:
+    """Pre-M11 Items carry webhook '' (production-empirical) — the shape
+    the retrofit verdict keys on; a missing status never crashes."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"item": {"item_id": "item-x", "webhook": ""}, "request_id": "req-1"}
+        )
+
+    state = await _provider(handler).get_item_state("access-x")
+    assert state.webhook == ""
+    assert state.transactions_updated_at is None and state.investments_updated_at is None
+
+
 async def test_webhook_verification_key_fetch_posts_the_key_id() -> None:
     """The JWT verifier resolves Plaid's signing key by kid through the
     provider seam (M11 CP0) — fakeable exactly like every provider call."""

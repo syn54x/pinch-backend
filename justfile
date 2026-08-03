@@ -54,6 +54,12 @@ tunnel:
 plaid-item connection_id="":
     uv run python -m pinch_backend.cli.app plaid-item {{connection_id}}
 
+# One reconcile pass now (ADR 0008): registers pre-webhook Items and
+# heals rotated tunnel URLs — the deploy-day retrofit. Syncs it enqueues
+# run in the worker.
+reconcile:
+    uv run python -m pinch_backend.cli.app reconcile
+
 # Export the OpenAPI document for typed-client generation (frontend repo:
 # point openapi-typescript / @hey-api/openapi-ts at the output, or at a
 # running server's /api/v1/schema/openapi.json). No database needed.

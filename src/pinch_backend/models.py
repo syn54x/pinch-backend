@@ -301,6 +301,10 @@ class Connection(TimestampMixin, Model):
     from the client."""
     status: ConnectionStatus = ConnectionStatus.ACTIVE
     last_synced_at: datetime | None = None
+    last_reconciled_at: datetime | None = None
+    """When the reconciler last examined this connection (M11 CP3) —
+    bookkeeping for the 24h probe cadence, never user-facing. M11's only
+    schema change."""
     error_detail: str | None = None
     sync_cursor: str | None = None
     """The provider's transactions-sync cursor (M7 CP2): persisted only

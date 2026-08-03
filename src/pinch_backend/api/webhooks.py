@@ -31,7 +31,7 @@ from litestar.exceptions import NotAuthorizedException
 from litestar.status_codes import HTTP_200_OK
 
 from pinch_backend import providers
-from pinch_backend.jobs import sync_connection, sync_investments
+from pinch_backend.jobs import enqueue_sync_connection, sync_connection, sync_investments
 from pinch_backend.models import Connection, ConnectionStatus
 from pinch_backend.observability import get_logger
 from pinch_backend.settings import settings
@@ -237,9 +237,7 @@ async def _handle_item_event(webhook_code: str, payload: dict, connection: Conne
         connection.status = ConnectionStatus.ACTIVE
         connection.error_detail = None
         await connection.save()
-        await sync_connection.configure(lock=f"sync:{connection.id}").defer_async(
-            connection_id=str(connection.id)
-        )
+        await enqueue_sync_connection(connection.id)
     else:  # pragma: no cover — _ITEM_ACTING and this chain move together
         raise RuntimeError(f"ITEM code {webhook_code} is listed as acting but unhandled")
     log.info(

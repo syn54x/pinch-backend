@@ -35,7 +35,7 @@ from pinch_backend.api.pagination import (
     paginate,
 )
 from pinch_backend.crypto import decrypt_secret, encrypt_secret
-from pinch_backend.jobs import sync_connection
+from pinch_backend.jobs import enqueue_sync_connection
 from pinch_backend.models import (
     Account,
     Connection,
@@ -143,9 +143,7 @@ async def _get_connection(ledger: Ledger, connection_id: uuid.UUID) -> Connectio
 
 async def _enqueue_sync(connection: Connection) -> None:
     """Defer one lock-serialized sync (ADR-0006: lock per connection)."""
-    await sync_connection.configure(lock=f"sync:{connection.id}").defer_async(
-        connection_id=str(connection.id)
-    )
+    await enqueue_sync_connection(connection.id)
 
 
 async def _connection_out(connection: Connection) -> ConnectionOut:
