@@ -126,18 +126,19 @@ async def detect_recurring(ledger_id: uuid.UUID) -> None:
     groups: dict[tuple[uuid.UUID, str, int], list[_Occurrence]] = {}
     for txn in transactions:
         direction = 1 if txn.amount_minor > 0 else -1
-        if direction > 0 and kinds.get(txn.account_id) in (  # ty: ignore[unresolved-attribute]
+        if direction > 0 and kinds.get(txn.account_id) in (
             AccountKind.LOAN,
             AccountKind.CREDIT,
         ):
             # An inflow on a debt account is a payment received — the
             # counterpart of a tracked outflow, never income to detect.
             continue
-        key = (txn.account_id, txn.description_normalized, direction)  # ty: ignore[unresolved-attribute]
+        assert txn.account_id is not None
+        key = (txn.account_id, txn.description_normalized, direction)
         groups.setdefault(key, []).append(_Occurrence(txn.date, txn.amount_minor))
 
     existing = {
-        (s.account_id, s.payee, s.direction, s.amount_minor): s  # ty: ignore[unresolved-attribute]
+        (s.account_id, s.payee, s.direction, s.amount_minor): s
         for s in await RecurringSeries.where(lambda s: s.ledger_id == ledger_id).all()
     }
 
@@ -206,7 +207,7 @@ class CycleState:
 
 async def series_members(series: RecurringSeries, as_of: date) -> list[Transaction]:
     """Match-on-read, newest first, bounded: the matcher is the query."""
-    account_id = series.account_id  # ty: ignore[unresolved-attribute]
+    account_id = series.account_id
     payee = series.payee
     amount = series.amount_minor
     query = Transaction.where(
@@ -268,7 +269,7 @@ async def series_bucket(
         counterpart_ids = [
             other
             for tr in transfers
-            for other in (tr.outflow_transaction_id, tr.inflow_transaction_id)  # ty: ignore[unresolved-attribute]
+            for other in (tr.outflow_transaction_id, tr.inflow_transaction_id)
             if other is not None and other not in member_ids
         ]
         if counterpart_ids:
@@ -280,8 +281,8 @@ async def series_bucket(
                 return "Debt"
     counts: dict[uuid.UUID, int] = {}
     for member in members:
-        if member.category_id is not None:  # ty: ignore[unresolved-attribute]
-            counts[member.category_id] = counts.get(member.category_id, 0) + 1  # ty: ignore[unresolved-attribute]
+        if member.category_id is not None:
+            counts[member.category_id] = counts.get(member.category_id, 0) + 1
     if not counts:
         return None
     modal = max(counts.items(), key=lambda item: item[1])[0]

@@ -79,9 +79,10 @@ async def _series_out(
 ) -> RecurringSeriesOut:
     members = await recurring.series_members(series, as_of)
     state = recurring.cycle_state(series, members, as_of)
+    assert series.account_id is not None
     return RecurringSeriesOut(
         id=series.id,
-        account_id=series.account_id,  # ty: ignore[unresolved-attribute]
+        account_id=series.account_id,
         payee=series.payee,
         direction=series.direction,
         amount_minor=series.amount_minor,

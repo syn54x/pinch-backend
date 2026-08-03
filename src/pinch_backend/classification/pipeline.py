@@ -90,30 +90,31 @@ async def classify_transaction(
         )
 
     category_rule = next(
-        (rule for rule, _ in matching if rule.action_category_id is not None),  # ty: ignore[unresolved-attribute]
+        (rule for rule, _ in matching if rule.action_category_id is not None),
         None,
     )
     if category_rule is not None:
         return ProposalDraft(
-            category_id=category_rule.action_category_id,  # ty: ignore[unresolved-attribute]
+            category_id=category_rule.action_category_id,
             provenance=ProposalProvenance.RULE,
             detail=detail,
             tag_names=tag_names,
             display_name=display_name,
         )
 
-    hit = await history_match(txn.ledger_id, txn.description_normalized)  # ty: ignore[unresolved-attribute]
+    assert txn.ledger_id is not None
+    hit = await history_match(txn.ledger_id, txn.description_normalized)
     # A hit with no category IS the untracked-transfer signal (see
     # history_match) — unproposable onto a zero-amount transaction.
-    if hit is not None and (hit.category_id is not None or txn.amount_minor != 0):  # ty: ignore[unresolved-attribute]
+    if hit is not None and (hit.category_id is not None or txn.amount_minor != 0):
         detail["matched_transaction_id"] = str(hit.id)
         return ProposalDraft(
-            category_id=hit.category_id,  # ty: ignore[unresolved-attribute]
+            category_id=hit.category_id,
             provenance=ProposalProvenance.HISTORY,
             detail=detail,
             tag_names=tag_names,
             display_name=display_name,
-            proposed_transfer=hit.category_id is None,  # ty: ignore[unresolved-attribute]
+            proposed_transfer=hit.category_id is None,
         )
 
     ai_category = await active_classifier.classify(txn)
@@ -164,7 +165,7 @@ async def sweep_ledger(
         last_id = batch[-1].id
         batch_ids = [t.id for t in batch]
         proposed = {
-            p.transaction_id  # ty: ignore[unresolved-attribute]
+            p.transaction_id
             for p in await Proposal.where(lambda p, ids=batch_ids: p.transaction_id.in_(ids)).all()
         }
         for txn in batch:
@@ -271,7 +272,7 @@ async def sweep_ledger(
                     await consume_proposal(
                         ledger,
                         fresh,
-                        category_id=proposal.category_id,  # ty: ignore[unresolved-attribute]
+                        category_id=proposal.category_id,
                         tags=tag_names,
                         display_name=proposal.proposed_display_name,
                         actor=CorrectionActor.AUTO,

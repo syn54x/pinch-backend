@@ -283,7 +283,7 @@ async def penny_chat(
     conversation_id = _conversation_uuid(run_input.id)
 
     row = await Conversation.where(lambda c: c.id == conversation_id).first()
-    if row is not None and row.ledger_id != current_ledger.id:  # ty: ignore[unresolved-attribute]
+    if row is not None and row.ledger_id != current_ledger.id:
         # The ownership 404 (never a cross-ledger append). A same-404 here
         # necessarily reveals the id exists somewhere — unavoidable in a
         # global id namespace, and unguessable at uuid scale.

@@ -42,9 +42,9 @@ async def apply_tag_set(ledger: Ledger, txn: "Transaction", names: list[str]) ->
     wanted_ids = {t.id for t in wanted}
     txn_id = txn.id
     existing = await TransactionTag.where(lambda tt, tid=txn_id: tt.transaction_id == tid).all()
-    existing_ids = {tt.tag_id for tt in existing}  # ty: ignore[unresolved-attribute]
+    existing_ids = {tt.tag_id for tt in existing}
     for tt in existing:
-        if tt.tag_id not in wanted_ids:  # ty: ignore[unresolved-attribute]
+        if tt.tag_id not in wanted_ids:
             await tt.delete()
     for tg in wanted:
         if tg.id not in existing_ids:

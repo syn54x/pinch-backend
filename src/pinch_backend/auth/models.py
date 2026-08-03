@@ -29,6 +29,7 @@ class Session(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     user: Annotated[User, ForeignKey(related_name="sessions", index=True)]
+    user_id: uuid.UUID | None = None
     token_hash: str = Field(unique=True, repr=False)
     client_hint: str | None = None
     """Human-readable device hint shown in the session list (e.g. a
@@ -68,6 +69,7 @@ class PersonalAccessToken(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     user: Annotated[User, ForeignKey(related_name="personal_access_tokens", index=True)]
+    user_id: uuid.UUID | None = None
     token_hash: str = Field(unique=True, repr=False)
     name: str
     """User-chosen label ("ci-script"); display-only, never unique."""
@@ -113,6 +115,7 @@ class EmailVerificationToken(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     user: Annotated[User, ForeignKey(related_name="email_verification_tokens", index=True)]
+    user_id: uuid.UUID | None = None
     token_hash: str = Field(unique=True, repr=False)
     expires_at: datetime
     consumed_at: datetime | None = None
@@ -131,6 +134,7 @@ class PasswordResetToken(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     user: Annotated[User, ForeignKey(related_name="password_reset_tokens", index=True)]
+    user_id: uuid.UUID | None = None
     token_hash: str = Field(unique=True, repr=False)
     expires_at: datetime
     consumed_at: datetime | None = None

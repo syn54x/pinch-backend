@@ -152,9 +152,10 @@ async def _import_out(batch: Import) -> ImportOut:
         transaction_count = await Transaction.where(
             lambda t: t.source_import_id == batch_id
         ).count()
+    assert batch.account_id is not None
     return ImportOut(
         id=batch.id,
-        account_id=batch.account_id,  # ty: ignore[unresolved-attribute]
+        account_id=batch.account_id,
         filename=batch.filename,
         status=batch.status,
         suggested_mapping=(
@@ -231,8 +232,9 @@ async def _materialize_preview(
     """Store the confirmed mapping and replace the batch's rows with the
     freshly parsed, duplicate-flagged preview. Runs inside the caller's
     transaction; walks the locked stages uploaded → mapped → previewed."""
+    assert batch.account_id is not None
     flagged = await _fingerprint_and_flag(
-        batch.account_id,  # ty: ignore[unresolved-attribute]
+        batch.account_id,
         parsed,
     )
     batch_id = batch.id
@@ -244,8 +246,8 @@ async def _materialize_preview(
         # Shadow-FK constructor kwargs are runtime-synthesized and
         # invisible to ty (ferro PRD 0004 / ferro-orm#290).
         ImportRow(  # ty: ignore[missing-argument]
-            ledger_id=ledger.id,  # ty: ignore[unknown-argument]
-            import_batch_id=batch.id,  # ty: ignore[unknown-argument]
+            ledger_id=ledger.id,
+            import_batch_id=batch.id,
             row_index=index,
             raw_cells=row.raw_cells,
             date=row.date,
@@ -308,7 +310,7 @@ async def create_import(
     ).first()
     if account is None:
         raise NotFoundException(detail="No such account")
-    if account.connection_id is not None:  # ty: ignore[unresolved-attribute]
+    if account.connection_id is not None:
         raise ClientException(detail="File imports are for manual accounts")
 
     content = await data.file.read()
@@ -399,7 +401,7 @@ async def confirm_mapping(
     batch = await _get_import(current_ledger, import_id)
     if batch.status is ImportStatus.COMMITTED:
         raise _conflict("This import is committed; undo it to change the mapping")
-    account = await Account.get(batch.account_id)  # ty: ignore[unresolved-attribute]
+    account = await Account.get(batch.account_id)
 
     text = batch.file_bytes.decode("utf-8-sig")
     parsed = _parse_within_caps(text, data, account)
@@ -425,7 +427,7 @@ async def list_import_rows(
     """The preview, paginated (story 6): uuid7 order is creation order is
     file order, so pages read like the file does."""
     batch = await _get_import(current_ledger, import_id)
-    account = await Account.get(batch.account_id)  # ty: ignore[unresolved-attribute]
+    account = await Account.get(batch.account_id)
     batch_id = batch.id
     rows, next_cursor = await paginate(
         ImportRow.where(lambda r: r.import_batch_id == batch_id), cursor=cursor, limit=limit
@@ -446,7 +448,7 @@ async def commit_import(
     batch = await _get_import(current_ledger, import_id)
     if batch.status is not ImportStatus.PREVIEWED:
         raise _conflict("Only a previewed import can be committed")
-    account = await Account.get(batch.account_id)  # ty: ignore[unresolved-attribute]
+    account = await Account.get(batch.account_id)
 
     batch_id = batch.id
     rows = await ImportRow.where(lambda r: r.import_batch_id == batch_id).all()
@@ -493,14 +495,14 @@ async def commit_import(
             # ignores are guarded by the valid filter: valid rows carry
             # dates, amounts, and fingerprints by construction.
             Transaction(  # ty: ignore[missing-argument]
-                ledger_id=current_ledger.id,  # ty: ignore[unknown-argument]
-                account_id=account.id,  # ty: ignore[unknown-argument]
+                ledger_id=current_ledger.id,
+                account_id=account.id,
                 date=row.date,  # ty: ignore[invalid-argument-type]
                 amount_minor=row.amount_minor,  # ty: ignore[invalid-argument-type]
                 currency=account.currency,
                 description_raw=row.description_raw or "",
                 description_normalized=normalize_description(row.description_raw or ""),
-                source_import_id=batch.id,  # ty: ignore[unknown-argument]
+                source_import_id=batch.id,
                 fingerprint=row.fingerprint,  # ty: ignore[invalid-argument-type]
             )
             for row in included

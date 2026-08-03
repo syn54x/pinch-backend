@@ -118,11 +118,7 @@ async def ledger_primary_currency(ledger: Ledger) -> str:
     owner = await LedgerMember.where(
         lambda m: (m.ledger_id == ledger.id) & (m.role == LedgerRole.OWNER)
     ).first()
-    user = (
-        await User.where(lambda u, uid=owner.user_id: u.id == uid).first()  # ty: ignore[unresolved-attribute]
-        if owner
-        else None
-    )
+    user = await User.where(lambda u, uid=owner.user_id: u.id == uid).first() if owner else None
     if user is None:
         # Every ledger is created with an owner (M1 invariant); reaching
         # here means corrupted membership, not a request problem.
@@ -240,7 +236,7 @@ async def create_connection(
     log.info(
         "connection.created",
         connection_id=str(connection.id),
-        ledger_id=str(connection.ledger_id),  # ty: ignore[unresolved-attribute]
+        ledger_id=str(connection.ledger_id),
         account_count=len(provider_accounts),
     )
     return await _connection_out(connection)

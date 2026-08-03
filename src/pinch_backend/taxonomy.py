@@ -48,7 +48,7 @@ async def seed_default_taxonomy(ledger: "Ledger") -> None:
     does. Two bulk inserts: parents (for their ids), then children."""
     parents = [
         Category(  # ty: ignore[missing-argument]
-            ledger_id=ledger.id,  # ty: ignore[unknown-argument]
+            ledger_id=ledger.id,
             name=name,
         )
         for name, _ in DEFAULT_TAXONOMY
@@ -56,9 +56,9 @@ async def seed_default_taxonomy(ledger: "Ledger") -> None:
     await Category.bulk_create(parents)
     children = [
         Category(  # ty: ignore[missing-argument]
-            ledger_id=ledger.id,  # ty: ignore[unknown-argument]
+            ledger_id=ledger.id,
             name=child_name,
-            parent_id=parent.id,  # ty: ignore[unknown-argument]
+            parent_id=parent.id,
         )
         for parent, (_, child_names) in zip(parents, DEFAULT_TAXONOMY, strict=True)
         for child_name in child_names
@@ -71,8 +71,8 @@ async def category_depth(category: Category) -> int:
     """1 for a root, 2 for its child, … — walk to the root, counting hops."""
     depth = 1
     current = category
-    while current.parent_id is not None:  # ty: ignore[unresolved-attribute]
-        parent = await Category.get(current.parent_id)  # ty: ignore[unresolved-attribute]
+    while current.parent_id is not None:
+        parent = await Category.get(current.parent_id)
         depth += 1
         current = parent
     return depth
@@ -103,11 +103,7 @@ async def check_no_cycle(category: Category, new_parent: Category | None) -> Non
     while current is not None:
         if current.id == category.id:
             raise ClientException(detail="A category cannot be its own ancestor")
-        current = (
-            await Category.get(current.parent_id)  # ty: ignore[unresolved-attribute]
-            if current.parent_id  # ty: ignore[unresolved-attribute]
-            else None
-        )
+        current = await Category.get(current.parent_id) if current.parent_id else None
 
 
 async def collect_descendant_ids(root_ids: list[uuid.UUID], ledger_id: uuid.UUID) -> set[uuid.UUID]:
@@ -116,8 +112,8 @@ async def collect_descendant_ids(root_ids: list[uuid.UUID], ledger_id: uuid.UUID
     cats = await Category.where(lambda c: c.ledger_id == ledger_id).all()
     children: dict[uuid.UUID, list[uuid.UUID]] = {}
     for c in cats:
-        if c.parent_id is not None:  # ty: ignore[unresolved-attribute]
-            children.setdefault(c.parent_id, []).append(c.id)  # ty: ignore[unresolved-attribute]
+        if c.parent_id is not None:
+            children.setdefault(c.parent_id, []).append(c.id)
     result: set[uuid.UUID] = set()
     stack = list(root_ids)
     while stack:

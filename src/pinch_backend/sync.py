@@ -176,7 +176,8 @@ async def _sync_investments(
     }
     if not investment_accounts:
         return
-    ledger_id = connection.ledger_id  # ty: ignore[unresolved-attribute]
+    assert connection.ledger_id is not None
+    ledger_id = connection.ledger_id
     window_end = utcnow().date()
     window_start = window_end - timedelta(days=providers.INVESTMENTS_WINDOW_DAYS)
     try:
@@ -227,14 +228,16 @@ async def _sync_investments(
                 securities_by_pid[row.provider_security_id] = row
         holdings_by_key: dict[tuple[uuid.UUID, uuid.UUID], Holding] = {}
         for row in await Holding.where(lambda h, ids=account_ids: h.account_id.in_(ids)).all():
-            holdings_by_key[(row.account_id, row.security_id)] = row  # ty: ignore[unresolved-attribute]
+            assert row.account_id is not None and row.security_id is not None
+            holdings_by_key[(row.account_id, row.security_id)] = row
         activities_by_key: dict[tuple[uuid.UUID, str], InvestmentActivity] = {}
         for activity_row in await InvestmentActivity.where(
             lambda x, ids=account_ids: x.account_id.in_(ids)
         ).all():
-            activities_by_key[
-                (activity_row.account_id, activity_row.provider_activity_id)  # ty: ignore[unresolved-attribute]
-            ] = activity_row
+            assert activity_row.account_id is not None
+            activities_by_key[(activity_row.account_id, activity_row.provider_activity_id)] = (
+                activity_row
+            )
 
         for ps in provider_securities.values():
             row = securities_by_pid.get(ps.provider_security_id)
@@ -346,7 +349,7 @@ async def _sync_investments(
                 # The FK column, never the relation: ferro exposes
                 # relation fields as class-level descriptors on fetched
                 # rows, so instance assignment raises (smoke-test finding).
-                row.security_id = None if security is None else security.id  # ty: ignore[unresolved-attribute]
+                row.security_id = None if security is None else security.id
                 row.date = pa.date
                 row.name = pa.name
                 row.amount_minor = pa.amount_minor
@@ -438,7 +441,8 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
         raise  # transient with retries remaining: the runner's backoff handles it
 
     cid = connection.id
-    ledger_id = connection.ledger_id  # ty: ignore[unresolved-attribute]
+    assert connection.ledger_id is not None
+    ledger_id = connection.ledger_id
     accounts = await Account.where(lambda a: a.connection_id == cid).all()
     by_provider_id = {a.provider_account_id: a for a in accounts}
     for pa in provider_accounts:
@@ -507,8 +511,9 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
         target.currency = pt.currency or target.currency
         target.description_raw = pt.description
         target.description_normalized = normalize_description(pt.description)
+        assert target.account_id is not None
         target.fingerprint = compute_fingerprint(
-            target.account_id,  # ty: ignore[unresolved-attribute]
+            target.account_id,
             pt.date,
             pt.amount_minor,
             pt.description,

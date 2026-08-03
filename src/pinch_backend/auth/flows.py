@@ -41,7 +41,7 @@ async def confirm_email_verification(secret: str) -> bool:
     async with transaction():
         row.consumed_at = utcnow()
         await row.save()
-        user = await User.get(row.user_id)  # ty: ignore[unresolved-attribute]
+        user = await User.get(row.user_id)
         if user.email_verified_at is None:
             user.email_verified_at = utcnow()
             await user.save()
@@ -79,7 +79,7 @@ async def complete_password_reset(secret: str, new_password: str) -> bool:
     if row is None or row.consumed_at is not None or row.expires_at <= utcnow():
         return False
     now = utcnow()
-    user_id = row.user_id  # ty: ignore[unresolved-attribute]
+    user_id = row.user_id
     async with transaction():
         outstanding = await PasswordResetToken.where(lambda t: t.user_id == user_id).all()
         for token_row in outstanding:

@@ -81,9 +81,10 @@ def _security_out(security: Security) -> SecurityOut:
 
 
 def _holding_out(holding: Holding, security: Security) -> HoldingOut:
+    assert holding.account_id is not None
     return HoldingOut(
         id=holding.id,
-        account_id=holding.account_id,  # ty: ignore[unresolved-attribute]
+        account_id=holding.account_id,
         security=_security_out(security),
         quantity=holding.quantity,
         institution_price=holding.institution_price,
@@ -109,18 +110,16 @@ async def list_holdings(
     if account_id is not None:
         query = query.where(lambda h, aid=account_id: h.account_id == aid)
     rows, next_cursor = await paginate(query, cursor=cursor, limit=limit)
-    security_ids = sorted({row.security_id for row in rows})  # ty: ignore[unresolved-attribute]
+    security_ids = sorted({row.security_id for row in rows})
     securities: dict[uuid.UUID, Security] = {}
     if security_ids:
         for s in await Security.where(lambda s, ids=security_ids: s.id.in_(ids)).all():
             securities[s.id] = s
-    return Page(
-        items=[
-            _holding_out(row, securities[row.security_id])  # ty: ignore[unresolved-attribute]
-            for row in rows
-        ],
-        next_cursor=next_cursor,
-    )
+    items = []
+    for row in rows:
+        assert row.security_id is not None
+        items.append(_holding_out(row, securities[row.security_id]))
+    return Page(items=items, next_cursor=next_cursor)
 
 
 class InvestmentActivityOut(BaseModel):
@@ -146,9 +145,10 @@ class InvestmentActivityOut(BaseModel):
 
 
 def _activity_out(activity: InvestmentActivity, security: Security | None) -> InvestmentActivityOut:
+    assert activity.account_id is not None
     return InvestmentActivityOut(
         id=activity.id,
-        account_id=activity.account_id,  # ty: ignore[unresolved-attribute]
+        account_id=activity.account_id,
         security=None if security is None else _security_out(security),
         date=activity.date,
         name=activity.name,
@@ -176,18 +176,13 @@ async def list_investment_activities(
     if account_id is not None:
         query = query.where(lambda x, aid=account_id: x.account_id == aid)
     rows, next_cursor = await paginate_by_date(query, cursor=cursor, limit=limit)
-    security_ids = sorted(
-        {row.security_id for row in rows if row.security_id is not None}  # ty: ignore[unresolved-attribute]
-    )
+    security_ids = sorted({row.security_id for row in rows if row.security_id is not None})
     securities: dict[uuid.UUID, Security] = {}
     if security_ids:
         for s in await Security.where(lambda s, ids=security_ids: s.id.in_(ids)).all():
             securities[s.id] = s
     return Page(
-        items=[
-            _activity_out(row, securities.get(row.security_id))  # ty: ignore[unresolved-attribute]
-            for row in rows
-        ],
+        items=[_activity_out(row, securities.get(row.security_id)) for row in rows],
         next_cursor=next_cursor,
     )
 

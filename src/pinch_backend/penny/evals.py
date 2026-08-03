@@ -213,7 +213,8 @@ async def export_correction_log(out_path: Path) -> int:
             continue
         if entry.decision_splits is not None or entry.decision_transfer is not None:
             continue  # one category per case; split/transfer decisions aren't category truth
-        ledger_id = entry.ledger_id  # ty: ignore[unresolved-attribute]
+        ledger_id = entry.ledger_id
+        assert ledger_id is not None
         if ledger_id not in paths_by_ledger:
             paths_by_ledger[ledger_id] = await taxonomy_paths(ledger_id)
         paths = paths_by_ledger[ledger_id]
