@@ -249,7 +249,8 @@ async def test_sync_paginates_and_converts() -> None:
 async def test_sync_not_ready_surfaces_transient_error() -> None:
     """A fresh Item mid-initial-pull answers empty-with-empty-cursor
     (live-sandbox finding): that cursor must never persist — it surfaces
-    as a transient PRODUCT_NOT_READY into the retry ladder instead."""
+    as a transient PRODUCT_NOT_READY into the retry ladder instead.
+    With or without Plaid saying NOT_READY explicitly."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -260,12 +261,52 @@ async def test_sync_not_ready_surfaces_transient_error() -> None:
                 "removed": [],
                 "next_cursor": "",
                 "has_more": False,
+                "transactions_update_status": "NOT_READY",
             },
         )
 
     with pytest.raises(ProviderError) as excinfo:
         await _provider(handler).sync_transactions("access-x", cursor=None)
     assert excinfo.value.code == "PRODUCT_NOT_READY"
+
+    def legacy_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"added": [], "modified": [], "removed": [], "next_cursor": "", "has_more": False},
+        )
+
+    with pytest.raises(ProviderError) as excinfo:
+        await _provider(legacy_handler).sync_transactions("access-x", cursor=None)
+    assert excinfo.value.code == "PRODUCT_NOT_READY"
+
+
+async def test_sync_accepts_a_completed_zero_transaction_item() -> None:
+    """The Stash probe finding (M10): an Item whose accounts simply have
+    no transactions answers empty-with-empty-cursor too — but with
+    transactions_update_status complete. That's a real empty ledger, not
+    a pull in progress; the batch lands and the empty cursor persists."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert "cursor" not in body  # "" replays as a fresh start, never sent
+        return httpx.Response(
+            200,
+            json={
+                "added": [],
+                "modified": [],
+                "removed": [],
+                "next_cursor": "",
+                "has_more": False,
+                "transactions_update_status": "HISTORICAL_UPDATE_COMPLETE",
+            },
+        )
+
+    provider = _provider(handler)
+    batch = await provider.sync_transactions("access-x", cursor=None)
+    assert batch.added == [] and batch.next_cursor == ""
+    # The persisted "" cursor round-trips as a fresh start next sync.
+    batch = await provider.sync_transactions("access-x", cursor="")
+    assert batch.next_cursor == ""
 
 
 async def test_sync_initial_cursor_omitted() -> None:
@@ -653,39 +694,50 @@ async def test_activities_tolerate_missing_security_and_use_timeout() -> None:
 
 
 async def test_item_status_probe_selects_the_diagnostic_fields() -> None:
-    """The plaid-item CLI's wire shape: /item/get with include_status,
-    answering products, per-product pull status, and the Item's error."""
-    seen = {}
+    """The plaid-item CLI's wire shape: a plain /item/get (production
+    rejects include_status with UNKNOWN_FIELDS) plus a one-row
+    /transactions/sync read for transactions_update_status — the field
+    that separates 'never finished' from 'heuristic misread'."""
+    calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen.update(json.loads(request.content))
-        seen["path"] = request.url.path
+        body = json.loads(request.content)
+        calls.append(request.url.path)
+        if request.url.path == "/item/get":
+            assert "include_status" not in body
+            return httpx.Response(
+                200,
+                json={
+                    "item": {
+                        "item_id": "item-1",
+                        "institution_id": "ins_1",
+                        "billed_products": ["transactions"],
+                        "consented_products": ["transactions", "investments"],
+                        "available_products": ["investments"],
+                        "error": None,
+                    }
+                },
+            )
+        assert request.url.path == "/transactions/sync"
+        assert body["count"] == 1
+        assert "cursor" not in body  # read-only probe: never resumes, never persists
         return httpx.Response(
             200,
             json={
-                "item": {
-                    "item_id": "item-1",
-                    "institution_id": "ins_1",
-                    "billed_products": ["transactions"],
-                    "consented_products": ["transactions", "investments"],
-                    "available_products": ["investments"],
-                    "error": None,
-                },
-                "status": {
-                    "transactions": {
-                        "last_successful_update": None,
-                        "last_failed_update": "2026-08-03T12:00:00Z",
-                    },
-                    "last_webhook": None,
-                },
+                "added": [],
+                "modified": [],
+                "removed": [],
+                "next_cursor": "",
+                "has_more": False,
+                "transactions_update_status": "TRANSACTIONS_UPDATE_STATUS_NOT_READY",
             },
         )
 
     report = await _provider(handler).get_item_status("access-x")
-    assert seen["path"] == "/item/get"
-    assert seen["include_status"] is True
+    assert calls == ["/item/get", "/transactions/sync"]
     assert report["consented_products"] == ["transactions", "investments"]
-    assert report["status"]["transactions"]["last_successful_update"] is None
+    assert report["transactions_update_status"] == "TRANSACTIONS_UPDATE_STATUS_NOT_READY"
+    assert report["transactions_probe"]["next_cursor_empty"] is True
     assert report["error"] is None
 
 

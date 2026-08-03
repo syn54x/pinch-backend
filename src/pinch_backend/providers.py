@@ -324,12 +324,21 @@ class PlaidProvider:
 
     async def get_item_status(self, access_token: str) -> dict:
         """Diagnostic probe (post-Stash-QA): the Item's own account of
-        itself — products, per-product pull status, its standing error.
+        itself — products, the transactions pull's real state, its
+        standing error. Two reads: /item/get for identity+products
+        (``include_status`` is gone from production — UNKNOWN_FIELDS),
+        and a one-row /transactions/sync for ``transactions_update_status``
+        (NOT_READY vs INITIAL/HISTORICAL_UPDATE_COMPLETE) — the field that
+        separates "Plaid never finished" from "our empty-cursor heuristic
+        misreads this Item". Read-only: the probe never persists a cursor.
         PlaidProvider-only, deliberately outside the ``SyncProvider``
         protocol: this feeds the ``plaid-item`` developer CLI, never the
         sync engine, so fakes owe it nothing."""
-        data = await self._post("/item/get", {"access_token": access_token, "include_status": True})
+        data = await self._post("/item/get", {"access_token": access_token})
         item = data.get("item") or {}
+        sync_probe = await self._post(
+            "/transactions/sync", {"access_token": access_token, "count": 1}
+        )
         return {
             "item_id": item.get("item_id"),
             "institution_id": item.get("institution_id"),
@@ -337,7 +346,12 @@ class PlaidProvider:
             "consented_products": item.get("consented_products"),
             "available_products": item.get("available_products"),
             "error": item.get("error"),
-            "status": data.get("status"),
+            "transactions_update_status": sync_probe.get("transactions_update_status"),
+            "transactions_probe": {
+                "has_more": sync_probe.get("has_more"),
+                "next_cursor_empty": not sync_probe.get("next_cursor"),
+                "added_in_first_page": len(sync_probe.get("added") or []),
+            },
         }
 
     async def get_institution_name(self, access_token: str) -> str | None:
@@ -477,17 +491,25 @@ class PlaidProvider:
         removed: list[str] = []
         while True:
             payload: dict = {"access_token": access_token, "count": 500}
-            if cursor is not None:
+            if cursor:  # "" is the zero-transaction Item's persisted cursor: start over
                 payload["cursor"] = cursor
             data = await self._post("/transactions/sync", payload)
             if not data["next_cursor"] and not data["has_more"]:
-                # A fresh Item whose initial transaction pull hasn't finished
-                # on Plaid's side answers an empty batch with an empty cursor
-                # — which must never be persisted (live-sandbox finding).
-                # Surfacing it as a transient error drops it into the job's
-                # retry ladder; a slow institution that outlasts the ladder
-                # parks the connection in `error`, healed by the next
-                # manual refresh.
+                # Empty batch with an empty cursor is ambiguous, and
+                # ``transactions_update_status`` is the disambiguator
+                # (post-Stash probe finding, M10): an Item whose accounts
+                # have zero transactions answers exactly like one whose
+                # initial pull hasn't finished. A completed pull is a real
+                # empty ledger — accepted, with the empty cursor persisted
+                # (each later sync re-asks from scratch; replay-safe).
+                # Anything else stays the M7 live-sandbox rule: a transient
+                # error into the retry ladder, the empty cursor never
+                # persisted.
+                status = data.get("transactions_update_status") or ""
+                if status.endswith("UPDATE_COMPLETE"):
+                    return SyncBatch(
+                        added=added, modified=modified, removed=removed, next_cursor=""
+                    )
                 raise ProviderError(
                     code="PRODUCT_NOT_READY",
                     message="initial transaction pull not finished",

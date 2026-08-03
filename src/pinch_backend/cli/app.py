@@ -177,6 +177,8 @@ def plaid_item(connection_id: str | None = None) -> None:
     import json
     import uuid as uuid_module
 
+    from ferro import engines
+
     from pinch_backend import providers
     from pinch_backend.crypto import decrypt_secret
     from pinch_backend.db import connect_database, disconnect_database
@@ -189,38 +191,42 @@ def plaid_item(connection_id: str | None = None) -> None:
     async def _probe() -> None:
         await connect_database()
         try:
-            query = Connection.where(lambda c: c.encrypted_secret != None)  # noqa: E711
-            if connection_id:  # empty string = the justfile's "all" default
-                wanted = uuid_module.UUID(connection_id)
-                query = query.where(lambda c, w=wanted: c.id == w)
-            connections = await query.all()
-            if not connections:
-                raise SystemExit("no matching connections with credentials")
-            provider = providers.PlaidProvider(
-                client_id=settings.plaid_client_id,
-                secret=settings.plaid_secret,
-                environment=settings.plaid_environment,
-            )
-            for connection in connections:
-                print(
-                    f"connection {connection.id} · "
-                    f"{connection.institution_name or 'unnamed'} · "
-                    f"status={connection.status.value} "
-                    f"error={connection.error_detail or '—'} "
-                    f"investments_error={connection.investments_error_detail or '—'} "
-                    f"consent_required={connection.investments_consent_required}"
-                )
-                assert connection.encrypted_secret is not None
-                try:
-                    report = await provider.get_item_status(
-                        decrypt_secret(connection.encrypted_secret)
-                    )
-                except providers.ProviderError as error:
-                    print(f"  probe failed: {error.code}")
-                    continue
-                print(json.dumps(report, indent=2, default=str))
+            # ferro ≥0.13 routes operations through an explicit session —
+            # in a one-shot process this is the only session there is.
+            async with engines.session():
+                await _probe_connections()
         finally:
             await disconnect_database()
+
+    async def _probe_connections() -> None:
+        query = Connection.where(lambda c: c.encrypted_secret != None)  # noqa: E711
+        if connection_id:  # empty string = the justfile's "all" default
+            wanted = uuid_module.UUID(connection_id)
+            query = query.where(lambda c, w=wanted: c.id == w)
+        connections = await query.all()
+        if not connections:
+            raise SystemExit("no matching connections with credentials")
+        provider = providers.PlaidProvider(
+            client_id=settings.plaid_client_id,
+            secret=settings.plaid_secret,
+            environment=settings.plaid_environment,
+        )
+        for connection in connections:
+            print(
+                f"connection {connection.id} · "
+                f"{connection.institution_name or 'unnamed'} · "
+                f"status={connection.status.value} "
+                f"error={connection.error_detail or '—'} "
+                f"investments_error={connection.investments_error_detail or '—'} "
+                f"consent_required={connection.investments_consent_required}"
+            )
+            assert connection.encrypted_secret is not None
+            try:
+                report = await provider.get_item_status(decrypt_secret(connection.encrypted_secret))
+            except providers.ProviderError as error:
+                print(f"  probe failed: {error.code}")
+                continue
+            print(json.dumps(report, indent=2, default=str))
 
     asyncio.run(_probe())
 
