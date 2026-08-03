@@ -250,7 +250,7 @@ async def test_investments_failure_leaves_banking_commit_standing(
     an investments error on the connection and nothing else — balances land,
     status stays active, no retry poisons the banking pass."""
     fake_provider.investments_failure = providers.ProviderError(
-        code="PRODUCT_NOT_READY", message="not yet extracted"
+        code="INSTITUTION_DOWN", message="try later"
     )
     fake_provider.batches = [
         providers.SyncBatch(
@@ -279,20 +279,37 @@ async def test_investments_failure_leaves_banking_commit_standing(
     health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
     assert health["status"] == "active"
     assert health["error_detail"] is None
-    assert health["investments_error_detail"] == "PRODUCT_NOT_READY"
+    assert health["investments_error_detail"] == "INSTITUTION_DOWN"
     assert (await client.get(HOLDINGS)).json()["items"] == []
 
 
-async def test_investments_error_heals_on_next_sync(client, db, fake_provider, run_jobs):
+async def test_pending_investments_extraction_records_no_error(client, db, fake_provider, run_jobs):
+    """Readiness retires in the investments phase too (M11 CP1): a pending
+    extraction is not a WarnChip — PRODUCT_NOT_READY logs, records nothing,
+    and waits for the HOLDINGS doorbell."""
     fake_provider.investments_failure = providers.ProviderError(
         code="PRODUCT_NOT_READY", message="not yet extracted"
     )
     await _signup(client)
     body = await _connect(client)
     await run_jobs()
+
+    health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
+    assert health["status"] == "active"
+    assert health["investments_error_detail"] is None
+    assert health["investments_consent_required"] is False
+
+
+async def test_investments_error_heals_on_next_sync(client, db, fake_provider, run_jobs):
+    fake_provider.investments_failure = providers.ProviderError(
+        code="INSTITUTION_DOWN", message="try later"
+    )
+    await _signup(client)
+    body = await _connect(client)
+    await run_jobs()
     assert (await client.get(f"{CONNECTIONS}/{body['id']}")).json()[
         "investments_error_detail"
-    ] == "PRODUCT_NOT_READY"
+    ] == "INSTITUTION_DOWN"
 
     fake_provider.investments_failure = None
     fake_provider.investment_batches = [_default_batch()]
@@ -695,10 +712,11 @@ async def test_non_consent_investments_errors_still_record_as_errors(
 
 
 async def test_stuck_banking_still_raises_the_consent_flag(client, db, fake_provider):
-    """Bidirectional isolation (post-QA fix): a transactions product
-    perpetually PRODUCT_NOT_READY — the real Stash shape — must not hold
-    investments hostage. At ladder exhaustion the holdings call still
-    fires, so the consent flag can rise while banking stays stuck."""
+    """Bidirectional isolation (post-QA fix, reshaped by M11 CP1): a
+    transactions product not yet ready — the real Stash shape — must not
+    hold investments hostage. The quiet wait chains the investments phase
+    on every pass, so the consent flag rises while banking waits, and
+    banking waits *active* now, never parked."""
     from pinch_backend.sync import run_investments_sync, run_sync
 
     fake_provider.transactions_failure = providers.ProviderError(
@@ -709,19 +727,19 @@ async def test_stuck_banking_still_raises_the_consent_flag(client, db, fake_prov
     )
     await _signup(client)
     body = await _connect(client)
-    outcome = await run_sync(uuid.UUID(body["id"]), final_attempt=True)
-    assert outcome.investments_due  # the ladder's end still chains the phase
+    outcome = await run_sync(uuid.UUID(body["id"]), final_attempt=False)
+    assert outcome.investments_due  # the quiet wait still chains the phase
     await run_investments_sync(uuid.UUID(body["id"]))
 
     health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
-    assert health["status"] == "error"
-    assert health["error_detail"] == "PRODUCT_NOT_READY"
+    assert health["status"] == "active"
+    assert health["error_detail"] is None
     assert health["investments_consent_required"] is True
 
 
 async def test_stuck_banking_still_lands_holdings(client, db, fake_provider):
     """The same shape with investments healthy: positions land even while
-    the banking product never becomes ready."""
+    the banking product isn't ready — and the connection waits active."""
     from pinch_backend.sync import run_investments_sync, run_sync
 
     fake_provider.transactions_failure = providers.ProviderError(
@@ -730,24 +748,25 @@ async def test_stuck_banking_still_lands_holdings(client, db, fake_provider):
     fake_provider.investment_batches = [_default_batch()]
     await _signup(client)
     body = await _connect(client)
-    outcome = await run_sync(uuid.UUID(body["id"]), final_attempt=True)
+    outcome = await run_sync(uuid.UUID(body["id"]), final_attempt=False)
     assert outcome.investments_due
     await run_investments_sync(uuid.UUID(body["id"]))
 
     assert len((await client.get(HOLDINGS)).json()["items"]) == 2
     health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
-    assert health["status"] == "error"  # banking honesty is untouched
+    assert health["status"] == "active"  # the quiet wait, not a parked error
 
 
 async def test_transient_banking_error_defers_investments_to_ladder_end(client, db, fake_provider):
-    """Retries with attempts remaining re-raise without touching
-    investments — one holdings call per ladder, at exhaustion, never five."""
+    """Genuine transients keep the ladder (M11 CP1): retries with attempts
+    remaining re-raise without touching investments — one holdings call
+    per ladder, at exhaustion, never five."""
     import pytest as _pytest
 
     from pinch_backend.sync import run_sync
 
     fake_provider.transactions_failure = providers.ProviderError(
-        code="PRODUCT_NOT_READY", message="initial transaction pull not finished"
+        code="INSTITUTION_DOWN", message="try later"
     )
     await _signup(client)
     body = await _connect(client)

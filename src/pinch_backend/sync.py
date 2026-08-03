@@ -8,11 +8,12 @@ classification sweep deferred by the caller after commit.
 Trigger-agnostic by design: manual refresh and the initial post-connect
 sync call this today; the future nightly sweep is just another caller.
 
-Error contract (PRD #31): auth-shaped provider errors mark the connection
-``reauth_required`` and stop (retrying can't fix a dead login); transient
-errors surface to the job runner to retry, and only exhaustion marks
-``error`` — carrying the provider's error code, never more. Any successful
-sync heals.
+Error contract (PRD #31, amended M11 CP1): auth-shaped provider errors
+mark the connection ``reauth_required`` and stop (retrying can't fix a
+dead login); a not-ready pull is a quiet wait — nothing written, the
+doorbell finishes the story (ADR 0008); genuine transients surface to
+the job runner to retry, and only exhaustion marks ``error`` — carrying
+the provider's error code, never more. Any successful sync heals.
 
 The replacement & removal contract (CP3, #35 — M6's ground-shifts):
 
@@ -107,9 +108,11 @@ class SyncOutcome:
     """Unreviewed rows whose stale proposal died with an amount rewrite."""
     investments_due: bool = False
     """The caller should chain the investments job (M10): true after a
-    banking success, and after a final-attempt transient failure — the
-    bidirectional-isolation rule, once per ladder. Auth failures leave it
-    false: a dead login is dead for both products."""
+    banking success, after a final-attempt transient failure (the
+    bidirectional-isolation rule, once per ladder), and after a readiness
+    quiet-wait (M11 CP1 — a waiting pull must not hold holdings hostage).
+    Auth failures leave it false: a dead login is dead for both
+    products."""
 
     @property
     def needs_classification(self) -> bool:
@@ -162,8 +165,9 @@ async def _sync_investments(
     there's an investment account to serve (PRD #72). Failures land in
     ``investments_error_detail`` and nothing else — never a raise (a
     retry would replay the already-committed banking pass), never
-    ``status``/``error_detail``. Holdings are mirror-replaced: zero user
-    data makes replacement safe.
+    ``status``/``error_detail`` — except a not-ready extraction, which
+    records nothing at all (M11 CP1: quiet wait for the doorbell).
+    Holdings are mirror-replaced: zero user data makes replacement safe.
     """
     investment_accounts = {
         a.provider_account_id: a
@@ -192,6 +196,12 @@ async def _sync_investments(
                 connection_id=str(connection.id),
                 code=error.code,
             )
+            return
+        if error.code == providers.READINESS_ERROR_CODE:
+            # A pending extraction is not a WarnChip (M11 CP1): the
+            # HOLDINGS doorbell rings when Plaid finishes — log, record
+            # nothing, wait quietly.
+            log.info("sync.investments_waiting_for_readiness", connection_id=str(connection.id))
             return
         connection.investments_error_detail = error.code
         await connection.save()
@@ -379,9 +389,10 @@ async def _sync_investments(
 
 
 async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutcome:
-    """One sync pass. Raises ``providers.ProviderError`` on a transient
-    failure when retries remain — the job runner's retry strategy is the
-    backoff; on the final attempt the failure is recorded instead."""
+    """One sync pass. Raises ``providers.ProviderError`` on a genuine
+    transient when retries remain — the job runner's retry strategy is
+    the backoff; on the final attempt the failure is recorded instead.
+    A not-ready pull does neither: quiet wait (M11 CP1)."""
     connection = await Connection.where(lambda c: c.id == connection_id).first()
     if connection is None or connection.encrypted_secret is None:
         # Deleted between defer and run (disconnect), or never completed
@@ -399,15 +410,30 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
             # attempt on a token repair can't be far behind anyway.
             await record_broken(connection, ConnectionStatus.REAUTH_REQUIRED, error.code)
             return SyncOutcome()
+        if error.code == providers.READINESS_ERROR_CODE:
+            # Readiness retires (M11 CP1, issue #79; ADR 0008): the pull
+            # not being finished is not a failure — the initial sync call
+            # armed SYNC_UPDATES_AVAILABLE, and that doorbell finishes the
+            # story. Quiet wait: no state written (a fresh connection stays
+            # active with a null last_synced_at — the UI's first-sync-in-
+            # progress rendering), no retry ladder. Investments still
+            # chains: bidirectional isolation (the Stash shape) must not
+            # regress into waiting banking holding holdings hostage.
+            if connection.error_detail == providers.READINESS_ERROR_CODE:
+                # A pre-M11 ladder parked this exact state as an error;
+                # under the quiet wait that verdict is a lie — heal it
+                # (the same clear a successful sync writes).
+                connection.status = ConnectionStatus.ACTIVE
+                connection.error_detail = None
+                await connection.save()
+            log.info("sync.waiting_for_readiness", connection_id=str(connection.id))
+            return SyncOutcome(investments_due=True)
         if final_attempt:
             await record_broken(connection, ConnectionStatus.ERROR, error.code)
             # Isolation is bidirectional (post-QA fix on #72): a stuck
-            # banking product must not hold investments hostage. The
-            # motivating Stash Item is exactly this shape — transactions
-            # perpetually PRODUCT_NOT_READY on a healthy token — and the
-            # consent flag can only rise if the holdings call actually
-            # fires. Once per ladder, at exhaustion, not per retry —
-            # chained by the caller off ``investments_due``.
+            # banking product must not hold investments hostage, so the
+            # ladder's end still chains the phase. Once per ladder, at
+            # exhaustion, not per retry — off ``investments_due``.
             return SyncOutcome(investments_due=True)
         raise  # transient with retries remaining: the runner's backoff handles it
 

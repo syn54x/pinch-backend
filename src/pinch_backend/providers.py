@@ -29,6 +29,12 @@ BACKFILL_DAYS = 730
 """History requested at link time (PRD #31): depth is fuel for M8's
 reports and projections."""
 
+READINESS_ERROR_CODE = "PRODUCT_NOT_READY"
+"""Plaid's the-pull-isn't-finished-yet answer. Not a failure since M11
+(ADR 0008): the initial sync call arms the doorbell that finishes the
+story, so both sync phases treat this code as a quiet wait — never the
+retry ladder, never a recorded error."""
+
 INVESTMENTS_TIMEOUT = 180
 """Seconds. A fresh Item's synchronous investments extraction can block
 1-2 minutes on Plaid's side (PRD #72) — the 30s default that suits banking
@@ -525,7 +531,7 @@ class PlaidProvider:
                         added=added, modified=modified, removed=removed, next_cursor=""
                     )
                 raise ProviderError(
-                    code="PRODUCT_NOT_READY",
+                    code=READINESS_ERROR_CODE,
                     message="initial transaction pull not finished",
                 )
             added.extend(convert(t) for t in data["added"])
