@@ -106,7 +106,9 @@ docs, and conversation. Implementation details do not belong in this file.
   creation and permanent — an accepted promoted rule remains recognizably
   promoted.
 - **Retro-apply** — extending a newly created rule to transactions that
-  already exist, chosen at creation in escalating consent tiers: *forward
+  already exist, chosen at the creation consent — authoring a rule, or
+  accepting a promoted one (acceptance is what makes a proposed rule law)
+  — in escalating consent tiers: *forward
   only* (existing transactions untouched), *unreviewed* (the default —
   matching unreviewed transactions are re-proposed under the rule and
   reviewed as usual), and *full* (a user-consented bulk edit: matching

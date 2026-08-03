@@ -515,3 +515,118 @@ async def test_transfer_marking_rules_are_forward_only(client) -> None:
     r = await _create_rule(client, action_add_tags=[], action_mark_transfer=True, apply="forward")
     assert r.status_code == 201, r.text
     assert r.json()["applied"] is None
+
+
+async def _mint_proposed_rule(client, category_id: str):
+    """Seed a promotion-minted PROPOSED rule the API way: three consistent
+    filings of one payee (promotion is synchronous with review)."""
+    from test_flywheel_e2e import _account, _review
+
+    account = await _account(client)
+    last_response = None
+    for index in range(3):
+        r = await client.post(
+            "/api/v1/transactions",
+            json={
+                "account_id": account,
+                "date": f"2026-07-0{index + 1}",
+                "amount_minor": -450 - index,
+                "description": "BLUE BOTTLE",
+            },
+            headers=await _csrf(client),
+        )
+        assert r.status_code == 201, r.text
+        last_response = await _review(client, r.json()["id"], {"category_id": category_id})
+        assert last_response.status_code == 200, last_response.text
+    proposed = last_response.json()["proposed_rule"]
+    assert proposed is not None, "third consistent filing should mint a proposed rule"
+    return account, proposed
+
+
+async def test_accepting_a_proposed_rule_may_retro_apply(client, run_jobs) -> None:
+    """Acceptance IS the creation consent (CONTEXT.md: Retro-apply): the
+    proposed->active PATCH may carry a tier; origin stays promotion."""
+    await _signup(client)
+    cat = await _category(client, "Coffee Shops")
+    account, rule = await _mint_proposed_rule(client, cat["id"])
+
+    # An unreviewed backlog of the same payee, swept under old proposals.
+    for day in ("04", "05"):
+        r = await client.post(
+            "/api/v1/transactions",
+            json={
+                "account_id": account,
+                "date": f"2026-07-{day}",
+                "amount_minor": -800,
+                "description": "BLUE BOTTLE",
+            },
+            headers=await _csrf(client),
+        )
+        assert r.status_code == 201, r.text
+    await run_jobs()
+
+    r = await client.patch(
+        f"{RULES}/{rule['id']}",
+        json={"status": "active", "apply": "unreviewed"},
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "active"
+    assert body["origin"] == "promotion"
+    assert body["applied"]["tier"] == "unreviewed"
+    assert body["applied"]["refreshed_unreviewed"] == 2
+    assert body["applied"]["recategorized_reviewed"] == 0
+    assert body["applied"]["batch_id"] is None
+
+    await run_jobs()
+    txns = (await client.get("/api/v1/transactions?reviewed=false")).json()["items"]
+    assert len(txns) == 2
+    for txn in txns:
+        assert txn["proposal"]["provenance"] == "rule"
+        assert txn["proposal"]["category"]["id"] == cat["id"]
+
+
+async def test_apply_is_refused_outside_the_acceptance_transition(client) -> None:
+    """The creation-time law holds: apply rides proposed->active only."""
+    await _signup(client)
+    cat = await _category(client, "Groceries X")
+    r = await _create_rule(client, action_category_id=cat["id"])
+    active_rule = r.json()
+
+    # An already-active rule never re-offers retro-apply…
+    r = await client.patch(
+        f"{RULES}/{active_rule['id']}",
+        json={"apply": "unreviewed"},
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 400, r.text
+
+    # …not even alongside other edits.
+    r = await client.patch(
+        f"{RULES}/{active_rule['id']}",
+        json={"status": "disabled", "apply": "full"},
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 400, r.text
+
+
+async def test_patch_with_condition_and_category_keeps_both(client) -> None:
+    """The identity-map law (queries before mutations): resolving the
+    category must not clobber the just-set condition."""
+    await _signup(client)
+    cat = await _category(client, "Groceries Y")
+    other = await _category(client, "Dining Y")
+    rule = (await _create_rule(client, action_category_id=cat["id"])).json()
+
+    r = await client.patch(
+        f"{RULES}/{rule['id']}",
+        json={
+            "condition": {"payee": {"op": "contains", "value": "wholefoods"}},
+            "action_category_id": other["id"],
+        },
+        headers=await _csrf(client),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["condition"]["payee"]["value"] == "wholefoods"
+    assert r.json()["action_category"]["id"] == other["id"]

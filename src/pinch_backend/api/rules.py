@@ -84,6 +84,11 @@ class RulePatchIn(BaseModel):
     action_rename_to: str | None = Field(default=None, min_length=1, max_length=100)
     action_mark_transfer: bool | None = None
     status: RuleStatus | None = None
+    apply: RetroApplyTier | None = None
+    """A retro-apply tier, honored ONLY when this same PATCH transitions
+    proposed -> active: accepting a promoted rule IS the creation consent
+    (CONTEXT.md: Retro-apply). Any other use is a 400 — active law never
+    re-offers the tiers."""
 
 
 class RuleApplyReport(BaseModel):
@@ -246,6 +251,27 @@ async def rule_out(rule: Rule, matched_count: int | None = None) -> RuleOut:
     )
 
 
+async def _run_retro_apply(
+    ledger: Ledger, rule: Rule, spec: ConditionSpec, tier: RetroApplyTier
+) -> RuleApplyReport:
+    """The consented tier, shared by create and the acceptance PATCH —
+    caller wraps in a transaction and defers the sweep after commit."""
+    matched, _ = await scan_matches(spec, ledger.id, cap=None)
+    split = await breakdown(matched)
+    await clear_proposals(split.unreviewed)
+    batch_id: uuid.UUID | None = None
+    recategorized = 0
+    if tier is RetroApplyTier.FULL and split.reviewed:
+        batch_id, recategorized = await apply_to_reviewed(ledger, rule, split.reviewed)
+    return RuleApplyReport(
+        tier=tier,
+        refreshed_unreviewed=len(split.unreviewed),
+        recategorized_reviewed=recategorized,
+        skipped=len(split.skipped),
+        batch_id=batch_id,
+    )
+
+
 @post("/")
 async def create_rule(
     data: RuleCreateIn,
@@ -284,22 +310,7 @@ async def create_rule(
             action_mark_transfer=data.action_mark_transfer,
         )
         if data.apply is not RetroApplyTier.FORWARD:
-            matched, _ = await scan_matches(spec, current_ledger.id, cap=None)
-            split = await breakdown(matched)
-            await clear_proposals(split.unreviewed)
-            batch_id: uuid.UUID | None = None
-            recategorized = 0
-            if data.apply is RetroApplyTier.FULL and split.reviewed:
-                batch_id, recategorized = await apply_to_reviewed(
-                    current_ledger, rule, split.reviewed
-                )
-            report = RuleApplyReport(
-                tier=data.apply,
-                refreshed_unreviewed=len(split.unreviewed),
-                recategorized_reviewed=recategorized,
-                skipped=len(split.skipped),
-                batch_id=batch_id,
-            )
+            report = await _run_retro_apply(current_ledger, rule, spec, data.apply)
     if report is not None and report.refreshed_unreviewed:
         # Defer-after-commit (jobs module contract): the sweep re-proposes
         # the vacated backlog under the now-active rule.
@@ -376,6 +387,19 @@ async def update_rule(
     rule = await _get(current_ledger, rule_id)
     fields = data.model_fields_set
 
+    apply_tier = data.apply if "apply" in fields and data.apply is not None else None
+    # Retro-apply rides exactly one PATCH shape: the acceptance of a
+    # promoted rule (proposed -> active) — that transition IS the creation
+    # consent (CONTEXT.md: Retro-apply). Everything else is law being
+    # edited, and edited law never re-offers the tiers.
+    if apply_tier is not None and (
+        rule.status is not RuleStatus.PROPOSED or data.status is not RuleStatus.ACTIVE
+    ):
+        raise ClientException(
+            detail="apply is the acceptance consent — it rides the "
+            "proposed -> active transition only"
+        )
+
     if "condition" in fields:
         if data.condition is None:
             raise ClientException(detail="A rule cannot lose its condition")
@@ -410,9 +434,31 @@ async def update_rule(
         rule.action_rename_to,
         rule.action_mark_transfer,
     )
-    await rule.save()
-    log.info("rule.updated", rule_id=str(rule.id), ledger_id=str(current_ledger.id))
-    return await rule_out(rule)
+    if apply_tier is not None and rule.action_mark_transfer:
+        raise ClientException(
+            detail="Transfer-marking rules are forward-only — a rule sees one "
+            "transaction and cannot re-interpret settled history"
+        )
+    report: RuleApplyReport | None = None
+    async with transaction():
+        await rule.save()
+        if apply_tier is not None and apply_tier is not RetroApplyTier.FORWARD:
+            spec = ConditionSpec(**rule.condition)
+            report = await _run_retro_apply(current_ledger, rule, spec, apply_tier)
+    if report is not None and report.refreshed_unreviewed:
+        # Defer-after-commit (jobs module contract), same as create.
+        await classify_ledger.configure(lock=f"ledger:{current_ledger.id}").defer_async(
+            ledger_id=str(current_ledger.id)
+        )
+    log.info(
+        "rule.updated",
+        rule_id=str(rule.id),
+        ledger_id=str(current_ledger.id),
+        apply_tier=str(apply_tier) if apply_tier else None,
+    )
+    out = await rule_out(rule)
+    out.applied = report
+    return out
 
 
 @delete("/{rule_id:uuid}")
