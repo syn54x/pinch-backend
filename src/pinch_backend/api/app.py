@@ -23,6 +23,7 @@ from pinch_backend.api.rules import rules_router
 from pinch_backend.api.tags import tags_router
 from pinch_backend.api.transactions import transactions_router
 from pinch_backend.api.transfers import transfers_router
+from pinch_backend.api.webhooks import webhooks_router
 from pinch_backend.auth.csrf import CredentialAwareCSRFMiddleware
 from pinch_backend.auth.guards import (
     provide_current_credential,
@@ -91,6 +92,10 @@ def create_app(*, manage_database: bool = True) -> Litestar:
             reports_router,
             transfers_router,
             reviews_router,
+            # Provider plumbing, not Developer API (ADR 0008): sessionless,
+            # CSRF-exempt, absent from the OpenAPI document — the contract
+            # seam does not move.
+            webhooks_router,
         ],
         # The served API contract (M3 story 7): the versioned path keeps the
         # document — like everything else public — under /api/v1.

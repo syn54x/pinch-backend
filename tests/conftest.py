@@ -28,6 +28,7 @@ def pytest_configure() -> None:
     # settings object directly.
     os.environ["PINCH_PLAID_CLIENT_ID"] = ""
     os.environ["PINCH_PLAID_SECRET"] = ""
+    os.environ["PINCH_PLAID_WEBHOOK_URL"] = ""
     os.environ["PINCH_SECRET_ENCRYPTION_KEY"] = ""
     # Keyless Penny is the tested baseline (PRD M9), same stance as Plaid:
     # a developer's .env model strings and gateway key must never leak in.

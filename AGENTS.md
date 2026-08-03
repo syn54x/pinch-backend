@@ -51,6 +51,14 @@ other path to a ledger silently bypasses policy. A handler that seems to
 need domain data without a ledger is a design smell to raise, not a case to
 work around.
 
+One carved-out exception (ADR 0008): the webhook receiver
+(`pinch_backend.api.webhooks`) is provider plumbing, not Developer API — no
+user is acting, so there is no session to resolve a ledger from. Its
+authentication is the provider's signed JWT, its reach is exactly one
+`Connection` lookup by provider item id, and it may only enqueue the same
+jobs a user-triggered refresh would. Anything beyond that shape goes back
+under this invariant.
+
 ---
 
 ## Agent skills

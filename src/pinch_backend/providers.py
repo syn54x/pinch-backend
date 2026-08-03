@@ -217,6 +217,8 @@ class SyncProvider(Protocol):
 
     async def remove_item(self, access_token: str) -> None: ...
 
+    async def get_webhook_verification_key(self, key_id: str) -> dict: ...
+
 
 class PlaidProvider:
     """The owned Plaid client. Every call is one JSON POST with instance
@@ -279,6 +281,11 @@ class PlaidProvider:
         if access_token is None:
             payload["products"] = ["transactions"]
             payload["transactions"] = {"days_requested": BACKFILL_DAYS}
+            if settings.plaid_webhook_url:
+                # New Items are born registered (M11, ADR 0008). Creation
+                # mode only: update-mode repair never touches registration —
+                # that's the reconciler's job.
+                payload["webhook"] = settings.plaid_webhook_url
         else:
             payload["access_token"] = access_token
         # Consent everywhere, billed nowhere until an endpoint is called
@@ -302,6 +309,13 @@ class PlaidProvider:
         """Revoke Plaid's side: stops Item billing and invalidates the
         token. Pinch-side severing is the caller's business."""
         await self._post("/item/remove", {"access_token": access_token})
+
+    async def get_webhook_verification_key(self, key_id: str) -> dict:
+        """The receiver's key resolution (M11 CP0): the JWK Plaid signed a
+        webhook's JWT with, named by the token header's kid. An instance
+        credential call — no access token; Items don't own signing keys."""
+        data = await self._post("/webhook_verification_key/get", {"key_id": key_id})
+        return data["key"]
 
     async def get_accounts(self, access_token: str) -> list[ProviderAccount]:
         data = await self._post("/accounts/get", {"access_token": access_token})
