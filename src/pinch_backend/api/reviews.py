@@ -159,7 +159,7 @@ async def review_transaction(
             raise NotFoundException(detail="No such category")
 
     proposal, proposal_tags = await _pending_proposal(txn.id)
-    prop_category_id = proposal.category_id if proposal else None  # ty: ignore[unresolved-attribute]
+    prop_category_id = proposal.category_id if proposal else None
     prop_display = proposal.proposed_display_name if proposal else None
 
     final_category = body.category_id if "category_id" in fields else prop_category_id
@@ -271,7 +271,7 @@ async def review_transaction(
     # transfer-shaped and the decision is the matching link: untracked for a
     # rule/history proposal (CP4), or the detector's exact counterpart (M7).
     prop_transfer = bool(proposal and proposal.proposed_transfer)
-    prop_counterpart = proposal.counterpart_transaction_id if proposal else None  # ty: ignore[unresolved-attribute]
+    prop_counterpart = proposal.counterpart_transaction_id if proposal else None
     decided_untracked = (
         entry.decision_transfer is not None and entry.decision_transfer["kind"] == "untracked"
     )
@@ -364,8 +364,8 @@ async def review_batch(
             skipped += 1
             continue
         proposal, proposal_tags = await _pending_proposal(txn.id)
-        final_category = proposal.category_id if proposal else None  # ty: ignore[unresolved-attribute]
-        batch_counterpart = proposal.counterpart_transaction_id if proposal else None  # ty: ignore[unresolved-attribute]
+        final_category = proposal.category_id if proposal else None
+        batch_counterpart = proposal.counterpart_transaction_id if proposal else None
         try:
             entry = await consume_proposal(
                 current_ledger,

@@ -59,7 +59,7 @@ async def detect_transfers(ledger_id: uuid.UUID) -> int:
         return 0
     txn_ids = [t.id for t in txns]
     split_ids = {
-        ln.transaction_id  # ty: ignore[unresolved-attribute]
+        ln.transaction_id
         for ln in await SplitLine.where(lambda ln, ids=txn_ids: ln.transaction_id.in_(ids)).all()
     }
     linked_ids: set[uuid.UUID] = set()
@@ -68,7 +68,7 @@ async def detect_transfers(ledger_id: uuid.UUID) -> int:
             (tr.outflow_transaction_id.in_(ids)) | (tr.inflow_transaction_id.in_(ids))
         )
     ).all():
-        for member in (tr.outflow_transaction_id, tr.inflow_transaction_id):  # ty: ignore[unresolved-attribute]
+        for member in (tr.outflow_transaction_id, tr.inflow_transaction_id):
             if member is not None:
                 linked_ids.add(member)
 
@@ -82,7 +82,7 @@ async def detect_transfers(ledger_id: uuid.UUID) -> int:
     def matches(a: Transaction, b: Transaction) -> bool:
         return (
             (a.amount_minor < 0) != (b.amount_minor < 0)
-            and a.account_id != b.account_id  # ty: ignore[unresolved-attribute]
+            and a.account_id != b.account_id
             and abs(a.date - b.date) <= window
         )
 
@@ -166,7 +166,7 @@ async def _propose_detection(
     if existing is not None:
         if (
             existing.provenance == ProposalProvenance.DETECTION
-            and existing.counterpart_transaction_id == counterpart.id  # ty: ignore[unresolved-attribute]
+            and existing.counterpart_transaction_id == counterpart.id
         ):
             return 0  # idempotent sweep
         existing_id = existing.id

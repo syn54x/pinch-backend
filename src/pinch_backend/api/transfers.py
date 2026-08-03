@@ -65,8 +65,7 @@ class TransferOut(BaseModel):
 
 def kind_of(transfer: Transfer) -> TransferKind:
     both = (
-        transfer.outflow_transaction_id is not None  # ty: ignore[unresolved-attribute]
-        and transfer.inflow_transaction_id is not None  # ty: ignore[unresolved-attribute]
+        transfer.outflow_transaction_id is not None and transfer.inflow_transaction_id is not None
     )
     return TransferKind.LINKED if both else TransferKind.UNTRACKED
 
@@ -75,8 +74,8 @@ def _out(transfer: Transfer) -> TransferOut:
     return TransferOut(
         id=transfer.id,
         kind=kind_of(transfer),
-        outflow_transaction_id=transfer.outflow_transaction_id,  # ty: ignore[unresolved-attribute]
-        inflow_transaction_id=transfer.inflow_transaction_id,  # ty: ignore[unresolved-attribute]
+        outflow_transaction_id=transfer.outflow_transaction_id,
+        inflow_transaction_id=transfer.inflow_transaction_id,
         created_at=transfer.created_at,
     )
 
@@ -126,7 +125,7 @@ async def establish_transfer(ledger: Ledger, txns: list[Transaction]) -> Transfe
             raise _unprocessable("Linked transfer sides must have equal magnitudes")
         if first.currency != second.currency:
             raise _unprocessable("Linked transfer sides must share a currency")
-        if first.account_id == second.account_id:  # ty: ignore[unresolved-attribute]
+        if first.account_id == second.account_id:
             raise _unprocessable("Linked transfer sides must be on different accounts")
         outflow, inflow = (first, second) if first.amount_minor < 0 else (second, first)
     else:
@@ -164,7 +163,7 @@ async def establish_transfer(ledger: Ledger, txns: list[Transaction]) -> Transfe
             )
             # In a transfer => category NULL, both sides (creation vacates).
             for txn in txns:
-                txn.category_id = None  # ty: ignore[unresolved-attribute]
+                txn.category_id = None
                 await txn.save()
     except UniqueViolationError:
         raise ClientException(detail=OCCUPIED_DETAIL, status_code=HTTP_409_CONFLICT) from None

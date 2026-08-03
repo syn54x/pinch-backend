@@ -3,7 +3,7 @@ from datetime import timedelta
 from typing import Literal
 
 from dotenv import load_dotenv
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # .env onto the process environment, not just onto Settings. Some
@@ -127,6 +127,18 @@ class Settings(BaseSettings):
     outright when the URI isn't registered in the dashboard, so setting
     this and registering it are one operator chore — empty (the default)
     omits it and keeps non-OAuth connects working (F2 enabler, #39)."""
+    plaid_webhook_url: str = ""
+    """Where Plaid rings the doorbell — the absolute URL of this instance's
+    webhook receiver (e.g. https://pinch.example/webhooks/plaid). Required
+    whenever Plaid is configured (ADR 0008): there is no webhook-less mode,
+    so a Plaid instance that can't be reached must fail at startup, not
+    silently never sync. Dev and self-host use a tunnel (ngrok)."""
+    reconcile_interval_hours: int = Field(default=24, ge=1)
+    """The reconciler's tick (M11 CP3, ADR 0008): how often the periodic
+    probe-then-decide pass runs. 24h default so dev machines aren't
+    ticking hourly for no one; production sets 1. The per-connection
+    examination cadence is a fixed 24h regardless — the tick only decides
+    how promptly a connection crosses that line."""
     secret_encryption_key: str = ""
     """Fernet key encrypting provider access tokens at rest
     (`Fernet.generate_key()`); required the moment Plaid is configured.
@@ -150,6 +162,15 @@ class Settings(BaseSettings):
         must not discover the gap when a user connects a bank (PRD #31)."""
         if self.plaid_configured and not self.secret_encryption_key:
             raise ValueError("PINCH_SECRET_ENCRYPTION_KEY is required when Plaid is configured")
+        return self
+
+    @model_validator(mode="after")
+    def _require_webhook_url_with_plaid(self) -> "Settings":
+        """Webhooks are required, not optional (ADR 0008): same loud-startup
+        stance as the encryption key — a deployment that can't be rung must
+        not discover it by never syncing."""
+        if self.plaid_configured and not self.plaid_webhook_url:
+            raise ValueError("PINCH_PLAID_WEBHOOK_URL is required when Plaid is configured")
         return self
 
 

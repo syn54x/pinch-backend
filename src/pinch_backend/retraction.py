@@ -100,7 +100,7 @@ async def dissolve_transfers_touching(
         )
     ).all()
     for link in affected:
-        members = (link.outflow_transaction_id, link.inflow_transaction_id)  # ty: ignore[unresolved-attribute]
+        members = (link.outflow_transaction_id, link.inflow_transaction_id)
         survivor_ids = [m for m in members if m is not None and m not in exclude_members]
         await link.delete()
         for survivor_id in survivor_ids:

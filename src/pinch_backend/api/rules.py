@@ -236,11 +236,12 @@ async def matched_counts(ledger_id: uuid.UUID, rule_ids: list[uuid.UUID]) -> dic
 async def rule_out(rule: Rule, matched_count: int | None = None) -> RuleOut:
     """Public: review responses embed the minted rule (M5 CP4)."""
     if matched_count is None:
-        found = await matched_counts(rule.ledger_id, [rule.id])  # ty: ignore[unresolved-attribute]
+        assert rule.ledger_id is not None
+        found = await matched_counts(rule.ledger_id, [rule.id])
         matched_count = found.get(str(rule.id), 0)
     category = None
-    if rule.action_category_id is not None:  # ty: ignore[unresolved-attribute]
-        row = await Category.get(rule.action_category_id)  # ty: ignore[unresolved-attribute]
+    if rule.action_category_id is not None:
+        row = await Category.get(rule.action_category_id)
         category = CategoryRef(id=row.id, name=row.name)
     return RuleOut(
         id=rule.id,
@@ -413,9 +414,9 @@ async def update_rule(
     if "action_category_id" in fields:
         if data.action_category_id is not None:
             category = await _resolve_category(current_ledger, data.action_category_id)
-            rule.action_category_id = category.id  # ty: ignore[unresolved-attribute]
+            rule.action_category_id = category.id
         else:
-            rule.action_category_id = None  # ty: ignore[unresolved-attribute]
+            rule.action_category_id = None
     if "action_add_tags" in fields:
         # Present-and-null clears, same tri-state as action_category_id —
         # subject to the same "some action must survive" invariant below.
@@ -434,7 +435,7 @@ async def update_rule(
         rule.status = data.status
 
     _assert_coherent_actions(
-        rule.action_category_id,  # ty: ignore[unresolved-attribute]
+        rule.action_category_id,
         rule.action_add_tags,
         rule.action_rename_to,
         rule.action_mark_transfer,

@@ -280,7 +280,9 @@ class LedgerMember(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     user: Annotated[User, ForeignKey(related_name="memberships", index=True)]
+    user_id: uuid.UUID | None = None
     ledger: Annotated[Ledger, ForeignKey(related_name="members", index=True)]
+    ledger_id: uuid.UUID | None = None
     role: LedgerRole = LedgerRole.OWNER
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
@@ -293,6 +295,7 @@ class Connection(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="connections", index=True)]
+    ledger_id: uuid.UUID | None = None
     provider: ConnectionProvider = ConnectionProvider.PLAID
     provider_item_id: str
     institution_name: str | None = None
@@ -301,6 +304,10 @@ class Connection(TimestampMixin, Model):
     from the client."""
     status: ConnectionStatus = ConnectionStatus.ACTIVE
     last_synced_at: datetime | None = None
+    last_reconciled_at: datetime | None = None
+    """When the reconciler last examined this connection (M11 CP3) —
+    bookkeeping for the 24h probe cadence, never user-facing. M11's only
+    schema change."""
     error_detail: str | None = None
     sync_cursor: str | None = None
     """The provider's transactions-sync cursor (M7 CP2): persisted only
@@ -333,12 +340,14 @@ class Account(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="accounts", index=True)]
+    ledger_id: uuid.UUID | None = None
     kind: AccountKind
     label: str
     currency: str = Field(default="USD", pattern=r"^[A-Z]{3}$")
     connection: Annotated[
         Connection | None, ForeignKey(related_name="accounts", on_delete="SET NULL")
     ] = None
+    connection_id: uuid.UUID | None = None
     """Absent on a manual account. SET NULL is disconnect's contract (M7):
     severing a connection makes its accounts manual, never deletes them —
     the alteration from the pre-M7 CASCADE migrates via ferro>=0.17.1
@@ -385,9 +394,11 @@ class BalanceEntry(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="balance_entries", index=True)]
+    ledger_id: uuid.UUID | None = None
     """The tenancy column (ADR-0002), denormalized from the account so
     row-level security has one ownership column on every domain table."""
     account: Annotated[Account, ForeignKey(related_name="balance_entries", index=True)]
+    account_id: uuid.UUID | None = None
     amount_minor: int
     """Integer minor units + ISO 4217, always (CONTEXT.md: Money)."""
     currency: str = Field(pattern=r"^[A-Z]{3}$")
@@ -414,6 +425,7 @@ class Security(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="securities", index=True)]
+    ledger_id: uuid.UUID | None = None
     provider_security_id: str
     name: str
     ticker_symbol: str | None = None
@@ -447,9 +459,12 @@ class Holding(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="holdings", index=True)]
+    ledger_id: uuid.UUID | None = None
     """The tenancy column (ADR-0002), denormalized from the account."""
     account: Annotated[Account, ForeignKey(related_name="holdings", index=True)]
+    account_id: uuid.UUID | None = None
     security: Annotated[Security, ForeignKey(related_name="holdings", index=True)]
+    security_id: uuid.UUID | None = None
     quantity: float
     institution_price: float | None = None
     institution_price_as_of: CalendarDate | None = None
@@ -480,11 +495,14 @@ class InvestmentActivity(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="investment_activities", index=True)]
+    ledger_id: uuid.UUID | None = None
     """The tenancy column (ADR-0002), denormalized from the account."""
     account: Annotated[Account, ForeignKey(related_name="investment_activities", index=True)]
+    account_id: uuid.UUID | None = None
     security: Annotated[
         Security | None, ForeignKey(related_name="investment_activities", on_delete="SET NULL")
     ] = None
+    security_id: uuid.UUID | None = None
     """Absent on securityless cash events (account fees, plain deposits) —
     and nulled, never cascaded, if its security ever goes: the record
     outlives the identity."""
@@ -514,7 +532,9 @@ class Import(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="imports", index=True)]
+    ledger_id: uuid.UUID | None = None
     account: Annotated[Account, ForeignKey(related_name="imports", index=True)]
+    account_id: uuid.UUID | None = None
     status: ImportStatus = ImportStatus.UPLOADED
     filename: str
     file_bytes: bytes = Field(repr=False)
@@ -546,7 +566,9 @@ class ImportRow(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="import_rows", index=True)]
+    ledger_id: uuid.UUID | None = None
     import_batch: Annotated[Import, ForeignKey(related_name="rows", index=True)]
+    import_batch_id: uuid.UUID | None = None
     """``import`` in the PRD's vocabulary; ``import_batch`` because Python
     reserves the keyword and CONTEXT.md defines an import as a batch."""
     row_index: int
@@ -592,6 +614,7 @@ class ImportProfile(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="import_profiles", index=True)]
+    ledger_id: uuid.UUID | None = None
     shape_key: str
     """The lookup key: delimiter + normalized headers, joined on ASCII
     unit separators (pinch_backend.imports.profiles.shape_key)."""
@@ -633,12 +656,15 @@ class Transaction(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="transactions", index=True)]
+    ledger_id: uuid.UUID | None = None
     account: Annotated[Account, ForeignKey(related_name="transactions", index=True)]
+    account_id: uuid.UUID | None = None
     date: CalendarDate
     amount_minor: int
     currency: str = Field(pattern=r"^[A-Z]{3}$")
     description_raw: str
     source_import: Annotated[Import | None, ForeignKey(related_name="transactions")] = None
+    source_import_id: uuid.UUID | None = None
     """The import that produced this row (the PRD's ``import`` FK); null on
     provider-synced or hand-entered transactions."""
     provider_transaction_id: str | None = None
@@ -663,6 +689,7 @@ class Transaction(TimestampMixin, Model):
         Optional["Category"],
         ForeignKey(related_name="transactions", on_delete="SET NULL", index=True),
     ] = None
+    category_id: uuid.UUID | None = None
     """User data (M5): the assigned category, or NULL for uncategorized.
     DB-level ON DELETE SET NULL: a guard miss on category delete uncategorizes
     the transaction rather than deleting it — the safety net behind the API's
@@ -713,7 +740,9 @@ class RecurringSeries(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="recurring_series", index=True)]
+    ledger_id: uuid.UUID | None = None
     account: Annotated[Account, ForeignKey(related_name="recurring_series", index=True)]
+    account_id: uuid.UUID | None = None
     payee: str
     """The normalized payee (description_normalized) — the deterministic
     match key, same as rules and history."""
@@ -744,6 +773,7 @@ class Category(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="categories", index=True)]
+    ledger_id: uuid.UUID | None = None
     name: str
     emoji: str | None = None
     """Chosen identity glyph (CONTEXT.md: Category identity). NULL = unset —
@@ -754,6 +784,7 @@ class Category(TimestampMixin, Model):
     parent: Annotated[
         Optional["Category"], ForeignKey(related_name="children", on_delete="RESTRICT")
     ] = None
+    parent_id: uuid.UUID | None = None
     """The verified ferro 0.16.1 self-FK spelling. NULL = a top-level node.
     DB-level ON DELETE RESTRICT: children already block deletion at the API
     (409); this makes the DB refuse it too rather than cascading silently if
@@ -781,11 +812,13 @@ class SplitLine(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="split_lines", index=True)]
+    ledger_id: uuid.UUID | None = None
     """The tenancy column (ADR-0002), denormalized so row-level security has
     one ownership column on every domain table."""
     transaction: Annotated[
         "Transaction", ForeignKey(related_name="split_lines", on_delete="CASCADE", index=True)
     ]
+    transaction_id: uuid.UUID | None = None
     """DB-level ON DELETE CASCADE (scratch-verified at CP0): lines die with
     their transaction — the import-undo path needs no line bookkeeping."""
     amount_minor: int
@@ -795,6 +828,7 @@ class SplitLine(TimestampMixin, Model):
         Optional["Category"],
         ForeignKey(related_name="split_lines", on_delete="SET NULL", index=True),
     ] = None
+    category_id: uuid.UUID | None = None
     """NULL = an uncategorized line (legal — the taxonomy may be empty).
     DB-level ON DELETE SET NULL backstop behind the API's guarded
     category-delete disposition, same stance as Transaction.category."""
@@ -820,10 +854,12 @@ class Transfer(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="transfers", index=True)]
+    ledger_id: uuid.UUID | None = None
     outflow_transaction: Annotated[
         Optional["Transaction"],
         ForeignKey(related_name="transfer_out", unique=True, on_delete="CASCADE"),
     ] = None
+    outflow_transaction_id: uuid.UUID | None = None
     """The negative side (money out). Explicit ON DELETE CASCADE (ferro's
     default, chosen deliberately at CP0): a member transaction's deletion
     dissolves the link row at the DB — the backstop behind the import-undo
@@ -832,6 +868,7 @@ class Transfer(TimestampMixin, Model):
         Optional["Transaction"],
         ForeignKey(related_name="transfer_in", unique=True, on_delete="CASCADE"),
     ] = None
+    inflow_transaction_id: uuid.UUID | None = None
     """The positive side (money in). Same stance as outflow_transaction."""
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
@@ -851,6 +888,7 @@ class Tag(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="tags", index=True)]
+    ledger_id: uuid.UUID | None = None
     name: str
     name_fold: str
     created_at: datetime = Field(default_factory=utcnow)
@@ -872,10 +910,13 @@ class TransactionTag(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="transaction_tags", index=True)]
+    ledger_id: uuid.UUID | None = None
     """The tenancy column (ADR-0002), denormalized so row-level security has
     one ownership column on every domain table."""
     transaction: Annotated["Transaction", ForeignKey(related_name="transaction_tags", index=True)]
+    transaction_id: uuid.UUID | None = None
     tag: Annotated[Tag, ForeignKey(related_name="transaction_tags", index=True)]
+    tag_id: uuid.UUID | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
@@ -900,6 +941,7 @@ class Rule(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="rules", index=True)]
+    ledger_id: uuid.UUID | None = None
     status: RuleStatus = RuleStatus.ACTIVE
     """User-created rules are ACTIVE by authorship; PROPOSED is what CP4's
     promotion mints."""
@@ -912,6 +954,7 @@ class Rule(TimestampMixin, Model):
     action_category: Annotated[
         Optional["Category"], ForeignKey(related_name="rules", on_delete="RESTRICT", index=True)
     ] = None
+    action_category_id: uuid.UUID | None = None
     """Propose this category (indexed shadow FK: the D4 delete-block query).
     DB-level ON DELETE RESTRICT: targeting rules already block category
     deletion at the API (409); this backs it at the DB in case that guard is
@@ -943,10 +986,13 @@ class Proposal(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="proposals", index=True)]
+    ledger_id: uuid.UUID | None = None
     transaction: Annotated["Transaction", ForeignKey(related_name="proposals", unique=True)]
+    transaction_id: uuid.UUID | None = None
     category: Annotated[
         Optional["Category"], ForeignKey(related_name="proposals", on_delete="SET NULL", index=True)
     ] = None
+    category_id: uuid.UUID | None = None
     """DB-level ON DELETE SET NULL: a slipped pending proposal must not be
     cascade-deleted when its category goes away — the API re-points or
     empties it in the guarded delete path; this is the backstop (PR #23
@@ -963,6 +1009,7 @@ class Proposal(TimestampMixin, Model):
         Optional["Transaction"],
         ForeignKey(related_name="mirror_proposals", on_delete="CASCADE"),
     ] = None
+    counterpart_transaction_id: uuid.UUID | None = None
     """The detector's matched counterpart (M7 CP4). CASCADE is the backstop
     — a proposal naming a deleted row is meaningless — while the retraction
     and rewrite paths invalidate mirrors explicitly so their owners get
@@ -986,7 +1033,9 @@ class ProposalTag(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="proposal_tags", index=True)]
+    ledger_id: uuid.UUID | None = None
     proposal: Annotated["Proposal", ForeignKey(related_name="tags", index=True)]
+    proposal_id: uuid.UUID | None = None
     name: str
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
@@ -1003,6 +1052,7 @@ class CorrectionLogEntry(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="correction_log_entries", index=True)]
+    ledger_id: uuid.UUID | None = None
     transaction_id: uuid.UUID = Field(index=True)
     kind: CorrectionKind = CorrectionKind.DECISION
     actor: CorrectionActor = CorrectionActor.USER
@@ -1070,6 +1120,7 @@ class Conversation(TimestampMixin, Model):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="conversations", index=True)]
+    ledger_id: uuid.UUID | None = None
     title: str | None = None
     """First user message, truncated — the conversation list's label."""
     messages: list[dict] = Field(default_factory=list)

@@ -83,14 +83,41 @@ def test_plaid_configured_requires_encryption_key() -> None:
         Settings(plaid_client_id="cid", plaid_secret="sec")
 
 
+def test_plaid_configured_requires_webhook_url() -> None:
+    """Webhooks are required, not optional (ADR 0008): a Plaid instance
+    that can't be rung must fail at startup, never silently degrade to
+    never-syncing."""
+    with pytest.raises(ValueError, match="PINCH_PLAID_WEBHOOK_URL"):
+        Settings(
+            plaid_client_id="cid",
+            plaid_secret="sec",
+            secret_encryption_key=Fernet.generate_key().decode(),
+        )
+
+
+def test_keyless_startup_needs_no_webhook_url() -> None:
+    """A keyless instance (no Plaid) is untouched by the webhook
+    requirement — manual tracking never held hostage."""
+    s = Settings()
+    assert s.plaid_configured is False
+    assert s.plaid_webhook_url == ""
+
+
 def test_plaid_configured_with_key() -> None:
     s = Settings(
         plaid_client_id="cid",
         plaid_secret="sec",
         secret_encryption_key=Fernet.generate_key().decode(),
+        plaid_webhook_url="https://pinch.example/webhooks/plaid",
     )
     assert s.plaid_configured is True
     assert s.plaid_environment == "sandbox"
+
+
+def test_reconcile_interval_defaults_dev_friendly() -> None:
+    """24h default so dev machines aren't ticking hourly for no one
+    (PRD #77 story 17); production sets PINCH_RECONCILE_INTERVAL_HOURS=1."""
+    assert Settings().reconcile_interval_hours == 24
 
 
 def test_ai_model_knobs_unset_by_default() -> None:

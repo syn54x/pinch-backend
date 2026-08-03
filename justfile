@@ -27,15 +27,38 @@ api *args:
     uv run litestar --app pinch_backend.api.app:app run {{args}}
 
 # Syncs and classification are background jobs, so a full dev stack is
-# two processes: `just api` and `just worker`.
+# two processes: `just api` and `just worker` — three with Plaid
+# configured, since webhooks need the machine reachable: `just tunnel`.
 # Run the Procrastinate worker.
 worker:
     uv run python -m pinch_backend.cli.app worker
+
+# Tunnel Plaid's doorbells to the local API (ADR 0008: webhooks are
+# required, and ngrok is the documented dev path). The domain derives
+# from PINCH_PLAID_WEBHOOK_URL so .env stays the single source of truth
+# — no second place for the tunnel name to rot.
+tunnel:
+    #!/usr/bin/env sh
+    set -eu
+    url="${PINCH_PLAID_WEBHOOK_URL:-}"
+    if [ -z "$url" ]; then
+        echo "PINCH_PLAID_WEBHOOK_URL is not set (.env) — nothing to tunnel to" >&2
+        exit 1
+    fi
+    domain="${url#*://}"
+    domain="${domain%%/*}"
+    exec ngrok http --url="$domain" 8000
 
 # Probe Plaid's /item/get for a connection (or all): products, pull
 # status, standing error — the PRODUCT_NOT_READY diagnostic.
 plaid-item connection_id="":
     uv run python -m pinch_backend.cli.app plaid-item {{connection_id}}
+
+# One reconcile pass now (ADR 0008): registers pre-webhook Items and
+# heals rotated tunnel URLs — the deploy-day retrofit. Syncs it enqueues
+# run in the worker.
+reconcile:
+    uv run python -m pinch_backend.cli.app reconcile
 
 # Export the OpenAPI document for typed-client generation (frontend repo:
 # point openapi-typescript / @hey-api/openapi-ts at the output, or at a

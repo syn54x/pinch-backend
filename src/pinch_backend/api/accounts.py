@@ -179,7 +179,7 @@ async def account_out(account: Account) -> AccountOut:
         label=account.label,
         currency=account.currency,
         mask=account.mask,
-        manual=account.connection_id is None,  # ty: ignore[unresolved-attribute]
+        manual=account.connection_id is None,
         archived=account.archived,
         balance=await _current_balance(account.id),
         terms=_terms_out(account),
@@ -356,7 +356,7 @@ async def delete_account(
     and mirrors cleared — then the rows and the account go. The log's
     self-contained snapshots keep Learning honest about the deleted past."""
     account = await _get_account(current_ledger, account_id)
-    if account.connection_id is not None:  # ty: ignore[unresolved-attribute]
+    if account.connection_id is not None:
         raise HTTPException(
             status_code=HTTP_409_CONFLICT,
             detail="Disconnect this account's bank connection first — a "
@@ -383,14 +383,14 @@ async def delete_account(
         # and the next sync re-mints any security it still sees.
         # Ledger-scoped, so tens of rows.
         held = {
-            h.security_id  # ty: ignore[unresolved-attribute]
+            h.security_id
             for h in await Holding.where(lambda h, lid=ledger_id: h.ledger_id == lid).all()
         } | {
-            a.security_id  # ty: ignore[unresolved-attribute]
+            a.security_id
             for a in await InvestmentActivity.where(
                 lambda x, lid=ledger_id: x.ledger_id == lid
             ).all()
-            if a.security_id is not None  # ty: ignore[unresolved-attribute]
+            if a.security_id is not None
         }
         orphaned = [
             s.id

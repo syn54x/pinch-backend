@@ -10,7 +10,7 @@ Tests substitute a scriptable fake at ``get_provider`` — CI never touches
 the network; the opt-in live-sandbox smoke test proves the real client.
 """
 
-from datetime import date
+from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Protocol
 
@@ -28,6 +28,12 @@ PLAID_BASE_URLS = {
 BACKFILL_DAYS = 730
 """History requested at link time (PRD #31): depth is fuel for M8's
 reports and projections."""
+
+READINESS_ERROR_CODE = "PRODUCT_NOT_READY"
+"""Plaid's the-pull-isn't-finished-yet answer. Not a failure since M11
+(ADR 0008): the initial sync call arms the doorbell that finishes the
+story, so both sync phases treat this code as a quiet wait — never the
+retry ladder, never a recorded error."""
 
 INVESTMENTS_TIMEOUT = 180
 """Seconds. A fresh Item's synchronous investments extraction can block
@@ -186,6 +192,18 @@ class ActivitiesBatch(BaseModel):
     activities: list[ProviderInvestmentActivity]
 
 
+class ItemState(BaseModel):
+    """The reconciler's probe answer (M11 CP3): one free /item/get — the
+    Item's registered webhook URL ('' when none, the pre-M11 shape) and
+    Plaid's own last-successful-update stamps, the timestamps the
+    probe-then-decide verdicts read (production-empirical: ``status``
+    rides top-level on a parameterless call)."""
+
+    webhook: str
+    transactions_updated_at: datetime | None = None
+    investments_updated_at: datetime | None = None
+
+
 class ProviderError(Exception):
     """A provider-side failure, carrying the provider's error code — the
     only provider detail that may ever surface (PRD #31: request payloads
@@ -216,6 +234,12 @@ class SyncProvider(Protocol):
     ) -> ActivitiesBatch: ...
 
     async def remove_item(self, access_token: str) -> None: ...
+
+    async def get_webhook_verification_key(self, key_id: str) -> dict: ...
+
+    async def update_webhook(self, access_token: str, url: str) -> None: ...
+
+    async def get_item_state(self, access_token: str) -> ItemState: ...
 
 
 class PlaidProvider:
@@ -279,6 +303,11 @@ class PlaidProvider:
         if access_token is None:
             payload["products"] = ["transactions"]
             payload["transactions"] = {"days_requested": BACKFILL_DAYS}
+            if settings.plaid_webhook_url:
+                # New Items are born registered (M11, ADR 0008). Creation
+                # mode only: update-mode repair never touches registration —
+                # that's the reconciler's job.
+                payload["webhook"] = settings.plaid_webhook_url
         else:
             payload["access_token"] = access_token
         # Consent everywhere, billed nowhere until an endpoint is called
@@ -302,6 +331,36 @@ class PlaidProvider:
         """Revoke Plaid's side: stops Item billing and invalidates the
         token. Pinch-side severing is the caller's business."""
         await self._post("/item/remove", {"access_token": access_token})
+
+    async def get_webhook_verification_key(self, key_id: str) -> dict:
+        """The receiver's key resolution (M11 CP0): the JWK Plaid signed a
+        webhook's JWT with, named by the token header's kid. An instance
+        credential call — no access token; Items don't own signing keys."""
+        data = await self._post("/webhook_verification_key/get", {"key_id": key_id})
+        return data["key"]
+
+    async def update_webhook(self, access_token: str, url: str) -> None:
+        """Re-register the Item's webhook URL (M11 CP3): the reconciler's
+        healer for URL drift and the pre-M11 retrofit — the only
+        registration home besides link-token creation."""
+        await self._post("/item/webhook/update", {"access_token": access_token, "webhook": url})
+
+    async def get_item_state(self, access_token: str) -> ItemState:
+        """The probe half of probe-then-decide (M11 CP3): free, read-only,
+        one call. Sibling of ``get_item_status`` (the developer CLI's
+        two-call diagnostic) — this one is load-bearing and protocol-level."""
+
+        def timestamp(product: str) -> datetime | None:
+            raw = (status.get(product) or {}).get("last_successful_update")
+            return None if raw is None else datetime.fromisoformat(raw)
+
+        data = await self._post("/item/get", {"access_token": access_token})
+        status = data.get("status") or {}
+        return ItemState(
+            webhook=(data.get("item") or {}).get("webhook") or "",
+            transactions_updated_at=timestamp("transactions"),
+            investments_updated_at=timestamp("investments"),
+        )
 
     async def get_accounts(self, access_token: str) -> list[ProviderAccount]:
         data = await self._post("/accounts/get", {"access_token": access_token})
@@ -511,7 +570,7 @@ class PlaidProvider:
                         added=added, modified=modified, removed=removed, next_cursor=""
                     )
                 raise ProviderError(
-                    code="PRODUCT_NOT_READY",
+                    code=READINESS_ERROR_CODE,
                     message="initial transaction pull not finished",
                 )
             added.extend(convert(t) for t in data["added"])

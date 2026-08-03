@@ -146,6 +146,12 @@ docs, and conversation. Implementation details do not belong in this file.
   owns credentials and sync state. Manual accounts have no connection.
   Disconnecting severs the link, never the data: the connection's accounts
   live on as manual accounts, history intact.
+- **Webhook** — the provider's doorbell: notice that something changed on
+  a connection, never a data payload. Pinch reads only which connection
+  rang and which kind of change, then runs the same sync it would have
+  run by hand — a rung doorbell and a clicked Refresh are
+  indistinguishable past the front door. Duplicate and out-of-order rings
+  are the norm, priced in by sync being replay-safe.
 - **Manual account** — an account maintained by the user without a
   connection: balances entered by hand, transactions entered manually or via
   file import.

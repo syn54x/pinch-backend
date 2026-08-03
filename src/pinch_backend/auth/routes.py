@@ -237,7 +237,7 @@ async def logout(request: Request) -> Response[None]:
             await session.delete()
             log.info(
                 "auth.logout",
-                user_id=str(session.user_id),  # ty: ignore[unresolved-attribute]
+                user_id=str(session.user_id),
                 session_id=str(session.id),
             )
     return Response(None, cookies=[clear_session_cookie()])
@@ -278,7 +278,7 @@ async def list_sessions(
     """
     now = utcnow()
     idle_cutoff = now - settings.session_idle_ttl
-    user_id = current_session.user_id  # ty: ignore[unresolved-attribute]
+    user_id = current_session.user_id
     query = Session.where(
         lambda s: (
             (s.user_id == user_id) & (s.absolute_expires_at > now) & (s.last_seen_at > idle_cutoff)
@@ -304,7 +304,7 @@ async def list_sessions(
 async def revoke_session(
     session_id: FromPath[uuid.UUID], current_session: NamedDependency[Session]
 ) -> None:
-    user_id = current_session.user_id  # ty: ignore[unresolved-attribute]
+    user_id = current_session.user_id
     row = await Session.where(lambda s: (s.id == session_id) & (s.user_id == user_id)).first()
     if row is None:
         # 404 for someone else's session too — never confirm it exists.
@@ -327,7 +327,7 @@ def _scopes_out(scope: PatScope, penny: bool) -> list[PatScope]:
 async def create_pat(data: PatCreateIn, current_session: NamedDependency[Session]) -> PatCreatedOut:
     """Cookie-session only, via ``current_session`` (story 5): a PAT can
     never mint PATs."""
-    user = await User.get(current_session.user_id)  # ty: ignore[unresolved-attribute]
+    user = await User.get(current_session.user_id)
     # Minting is bounded per user: a hostile or runaway session can't spam
     # unbounded credential rows. Same per-principal knob as the other
     # credentialed endpoints.
@@ -365,7 +365,7 @@ async def list_pats(
 ) -> Page[PatOut]:
     """Born onto the pagination convention (issue #9), and behind the same
     cookie fence as the rest of PAT management."""
-    user_id = current_session.user_id  # ty: ignore[unresolved-attribute]
+    user_id = current_session.user_id
     rows, next_cursor = await paginate(
         PersonalAccessToken.where(lambda p: p.user_id == user_id), cursor=cursor, limit=limit
     )
@@ -391,7 +391,7 @@ async def revoke_pat(
 ) -> None:
     """Revocation is row deletion (dead = gone, like sessions); the audit
     trail is the structured event."""
-    user_id = current_session.user_id  # ty: ignore[unresolved-attribute]
+    user_id = current_session.user_id
     row = await PersonalAccessToken.where(
         lambda p: (p.id == pat_id) & (p.user_id == user_id)
     ).first()

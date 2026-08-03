@@ -56,7 +56,7 @@ async def breakdown(matched: "list[Transaction]") -> MatchBreakdown:
         return out
     ids: list[uuid.UUID] = [t.id for t in matched]
     split_parents = {
-        ln.transaction_id  # ty: ignore[unresolved-attribute]
+        ln.transaction_id
         for ln in await SplitLine.where(lambda ln, tids=ids: ln.transaction_id.in_(tids)).all()
     }
     transfer_members: set[uuid.UUID] = set()
@@ -65,10 +65,10 @@ async def breakdown(matched: "list[Transaction]") -> MatchBreakdown:
             tr.outflow_transaction_id.in_(tids) | tr.inflow_transaction_id.in_(tids)
         )
     ).all():
-        if tr.outflow_transaction_id is not None:  # ty: ignore[unresolved-attribute]
-            transfer_members.add(tr.outflow_transaction_id)  # ty: ignore[unresolved-attribute]
-        if tr.inflow_transaction_id is not None:  # ty: ignore[unresolved-attribute]
-            transfer_members.add(tr.inflow_transaction_id)  # ty: ignore[unresolved-attribute]
+        if tr.outflow_transaction_id is not None:
+            transfer_members.add(tr.outflow_transaction_id)
+        if tr.inflow_transaction_id is not None:
+            transfer_members.add(tr.inflow_transaction_id)
     untouchable = split_parents | transfer_members
     for txn in matched:
         if txn.id in untouchable:
@@ -110,7 +110,7 @@ async def apply_to_reviewed(
     from pinch_backend.tags import apply_tag_set, dedupe_tag_names
 
     batch_id = uuid.uuid7()
-    rule_category_id: uuid.UUID | None = rule.action_category_id  # ty: ignore[unresolved-attribute]
+    rule_category_id: uuid.UUID | None = rule.action_category_id
     category_name: str | None = None
     if rule_category_id is not None:
         row = await Category.get(rule_category_id)
@@ -119,7 +119,7 @@ async def apply_to_reviewed(
     for txn in txns:
         txn_id = txn.id
         existing_ids = [
-            tt.tag_id  # ty: ignore[unresolved-attribute]
+            tt.tag_id
             for tt in await TransactionTag.where(
                 lambda tt, tid=txn_id: tt.transaction_id == tid
             ).all()
@@ -130,9 +130,7 @@ async def apply_to_reviewed(
             else []
         )
         final_tags = dedupe_tag_names(existing_names + list(rule.action_add_tags))
-        final_category_id = (
-            rule_category_id if rule_category_id is not None else txn.category_id  # ty: ignore[unresolved-attribute]
-        )
+        final_category_id = rule_category_id if rule_category_id is not None else txn.category_id
         final_display = rule.action_rename_to or txn.display_name
         await CorrectionLogEntry.create(
             ledger=ledger,
@@ -146,7 +144,7 @@ async def apply_to_reviewed(
             input_amount_minor=txn.amount_minor,
             input_currency=txn.currency,
             input_date=txn.date,
-            input_account_id=txn.account_id,  # ty: ignore[unresolved-attribute]
+            input_account_id=txn.account_id,
             proposal_provenance=ProposalProvenance.NONE,
             decision_category_id=final_category_id,
             decision_category_name=(
@@ -156,7 +154,7 @@ async def apply_to_reviewed(
             decision_display_name=final_display,
         )
         await apply_tag_set(ledger, txn, final_tags)
-        txn.category_id = final_category_id  # ty: ignore[unresolved-attribute]
+        txn.category_id = final_category_id
         if final_display is not None:
             txn.display_name = final_display
         await txn.save()

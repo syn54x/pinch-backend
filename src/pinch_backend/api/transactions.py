@@ -191,7 +191,7 @@ async def _get(ledger: Ledger, txn_id: uuid.UUID) -> Transaction:
 async def _current_tag_names(txn: Transaction) -> list[str]:
     txn_id = txn.id
     links = await TransactionTag.where(lambda tt, tid=txn_id: tt.transaction_id == tid).all()
-    tag_ids = sorted({link.tag_id for link in links})  # ty: ignore[unresolved-attribute]
+    tag_ids = sorted({link.tag_id for link in links})
     if not tag_ids:
         return []
     rows = await Tag.where(lambda t, ids=tag_ids: t.id.in_(ids)).all()
@@ -208,14 +208,13 @@ async def hydrate_transactions(txns: list[Transaction]) -> list[TransactionOut]:
         if txn_ids
         else []
     )
-    tag_ids = sorted({link.tag_id for link in links})  # ty: ignore[unresolved-attribute]
+    tag_ids = sorted({link.tag_id for link in links})
     tags = {t.id: t for t in await Tag.where(lambda t: t.id.in_(tag_ids)).all()} if tag_ids else {}
     by_txn: dict[uuid.UUID, list[TagRef]] = {}
     for link in links:
-        tag = tags[link.tag_id]  # ty: ignore[unresolved-attribute]
-        by_txn.setdefault(link.transaction_id, []).append(  # ty: ignore[unresolved-attribute]
-            TagRef(id=tag.id, name=tag.name)
-        )
+        assert link.tag_id is not None and link.transaction_id is not None
+        tag = tags[link.tag_id]
+        by_txn.setdefault(link.transaction_id, []).append(TagRef(id=tag.id, name=tag.name))
     for refs in by_txn.values():
         refs.sort(key=lambda ref: ref.name.casefold())
 
@@ -224,7 +223,7 @@ async def hydrate_transactions(txns: list[Transaction]) -> list[TransactionOut]:
         if txn_ids
         else []
     )
-    by_txn_proposal = {p.transaction_id: p for p in proposals}  # ty: ignore[unresolved-attribute]
+    by_txn_proposal = {p.transaction_id: p for p in proposals}
     proposal_ids = [p.id for p in proposals]
     proposal_tag_rows = (
         await ProposalTag.where(lambda pt, ids=proposal_ids: pt.proposal_id.in_(ids)).all()
@@ -233,14 +232,16 @@ async def hydrate_transactions(txns: list[Transaction]) -> list[TransactionOut]:
     )
     tags_by_proposal: dict[uuid.UUID, list[str]] = {}
     for pt in sorted(proposal_tag_rows, key=lambda pt: pt.name.casefold()):
-        tags_by_proposal.setdefault(pt.proposal_id, []).append(pt.name)  # ty: ignore[unresolved-attribute]
+        assert pt.proposal_id is not None
+        tags_by_proposal.setdefault(pt.proposal_id, []).append(pt.name)
 
     lines = (
         await SplitLine.where(lambda ln: ln.transaction_id.in_(txn_ids)).all() if txn_ids else []
     )
     lines_by_txn: dict[uuid.UUID, list[SplitLine]] = {}
     for ln in sorted(lines, key=lambda ln: ln.id):  # uuid7: creation = document order
-        lines_by_txn.setdefault(ln.transaction_id, []).append(ln)  # ty: ignore[unresolved-attribute]
+        assert ln.transaction_id is not None
+        lines_by_txn.setdefault(ln.transaction_id, []).append(ln)
 
     transfers = (
         await Transfer.where(
@@ -253,20 +254,20 @@ async def hydrate_transactions(txns: list[Transaction]) -> list[TransactionOut]:
     )
     transfer_by_txn: dict[uuid.UUID, Transfer] = {}
     for tr in transfers:
-        for member in (tr.outflow_transaction_id, tr.inflow_transaction_id):  # ty: ignore[unresolved-attribute]
+        for member in (tr.outflow_transaction_id, tr.inflow_transaction_id):
             if member is not None:
                 transfer_by_txn[member] = tr
     # Counterpart account ids: the other side may not be on this page.
     counterpart_ids = sorted(set(transfer_by_txn) - set(txn_ids))
-    account_by_txn = {t.id: t.account_id for t in txns}  # ty: ignore[unresolved-attribute]
+    account_by_txn = {t.id: t.account_id for t in txns}
     if counterpart_ids:
         others = await Transaction.where(lambda t, ids=counterpart_ids: t.id.in_(ids)).all()
-        account_by_txn |= {t.id: t.account_id for t in others}  # ty: ignore[unresolved-attribute]
+        account_by_txn |= {t.id: t.account_id for t in others}
 
     cat_ids = sorted(
-        {t.category_id for t in txns if t.category_id is not None}  # ty: ignore[unresolved-attribute]
-        | {p.category_id for p in proposals if p.category_id is not None}  # ty: ignore[unresolved-attribute]
-        | {ln.category_id for ln in lines if ln.category_id is not None}  # ty: ignore[unresolved-attribute]
+        {t.category_id for t in txns if t.category_id is not None}
+        | {p.category_id for p in proposals if p.category_id is not None}
+        | {ln.category_id for ln in lines if ln.category_id is not None}
     )
     cats = (
         {c.id: c for c in await Category.where(lambda c: c.id.in_(cat_ids)).all()}
@@ -276,7 +277,7 @@ async def hydrate_transactions(txns: list[Transaction]) -> list[TransactionOut]:
 
     result = []
     for t in txns:
-        cat = cats.get(t.category_id) if t.category_id else None  # ty: ignore[unresolved-attribute]
+        cat = cats.get(t.category_id) if t.category_id else None
         txn_lines = lines_by_txn.get(t.id)
         splits_out = (
             [
@@ -284,7 +285,7 @@ async def hydrate_transactions(txns: list[Transaction]) -> list[TransactionOut]:
                     amount_minor=ln.amount_minor,
                     category=(
                         CategoryRef(id=lcat.id, name=lcat.name)
-                        if ln.category_id and (lcat := cats.get(ln.category_id))  # ty: ignore[unresolved-attribute]
+                        if ln.category_id and (lcat := cats.get(ln.category_id))
                         else None
                     ),
                     memo=ln.memo,
@@ -298,9 +299,9 @@ async def hydrate_transactions(txns: list[Transaction]) -> list[TransactionOut]:
         transfer_ref = None
         if transfer is not None:
             counterpart = (
-                transfer.inflow_transaction_id  # ty: ignore[unresolved-attribute]
-                if transfer.outflow_transaction_id == t.id  # ty: ignore[unresolved-attribute]
-                else transfer.outflow_transaction_id  # ty: ignore[unresolved-attribute]
+                transfer.inflow_transaction_id
+                if transfer.outflow_transaction_id == t.id
+                else transfer.outflow_transaction_id
             )
             transfer_ref = TransferRef(
                 id=transfer.id,
@@ -311,19 +312,20 @@ async def hydrate_transactions(txns: list[Transaction]) -> list[TransactionOut]:
         proposal = by_txn_proposal.get(t.id)
         proposal_out = None
         if proposal is not None:
-            pcat = cats.get(proposal.category_id) if proposal.category_id else None  # ty: ignore[unresolved-attribute]
+            pcat = cats.get(proposal.category_id) if proposal.category_id else None
             proposal_out = ProposalOut(
                 category=CategoryRef(id=pcat.id, name=pcat.name) if pcat else None,
                 tags=tags_by_proposal.get(proposal.id, []),
                 display_name=proposal.proposed_display_name,
                 proposed_transfer=proposal.proposed_transfer,
-                counterpart_transaction_id=proposal.counterpart_transaction_id,  # ty: ignore[unresolved-attribute]
+                counterpart_transaction_id=proposal.counterpart_transaction_id,
                 provenance=proposal.provenance,
             )
+        assert t.account_id is not None
         result.append(
             TransactionOut(
                 id=t.id,
-                account_id=t.account_id,  # ty: ignore[unresolved-attribute]
+                account_id=t.account_id,
                 date=t.date,
                 amount_minor=t.amount_minor,
                 currency=t.currency,
@@ -417,7 +419,7 @@ async def list_transactions(
         for tg in matched_tags:
             tid = tg.id
             links = await TransactionTag.where(lambda tt, tid=tid: tt.tag_id == tid).all()
-            ids_for_tag = {link.transaction_id for link in links}  # ty: ignore[unresolved-attribute]
+            ids_for_tag = {link.transaction_id for link in links if link.transaction_id is not None}
             keep = ids_for_tag if keep is None else (keep & ids_for_tag)
         # Scaling seam: this materializes every matching transaction id before
         # the keyset page, partly defeating keyset pagination at large scale.
@@ -502,7 +504,7 @@ async def patch_transaction(
         # the decision — the final state IS the decision. consume_proposal
         # saves the row, so in-memory mutations ride its transaction.
         if "category_id" in fields:
-            txn.category_id = category_id  # ty: ignore[unresolved-attribute]
+            txn.category_id = category_id
         if "display_name" in fields:
             txn.display_name = data.display_name
         if "notes" in fields:
@@ -520,7 +522,7 @@ async def patch_transaction(
             await consume_proposal(
                 current_ledger,
                 txn,
-                category_id=txn.category_id,  # ty: ignore[unresolved-attribute]
+                category_id=txn.category_id,
                 tags=final_tags,
                 display_name=txn.display_name,
                 actor=CorrectionActor.USER,
@@ -542,12 +544,12 @@ async def patch_transaction(
         await maybe_propose_rule(
             current_ledger,
             txn.description_normalized,
-            txn.category_id,  # ty: ignore[unresolved-attribute]
+            txn.category_id,
         )
     else:
         async with transaction():
             if "category_id" in fields:
-                txn.category_id = category_id  # ty: ignore[unresolved-attribute]
+                txn.category_id = category_id
             if "display_name" in fields:
                 txn.display_name = data.display_name
             if "notes" in fields:
@@ -647,7 +649,7 @@ async def replace_split_lines(ledger: Ledger, txn: Transaction, data: list[Split
             category_id=line.category_id,
             memo=line.memo,
         )
-    txn.category_id = None  # ty: ignore[unresolved-attribute]
+    txn.category_id = None
 
 
 @put("/{txn_id:uuid}/splits")
@@ -729,7 +731,7 @@ async def create_transaction(
     ).first()
     if account is None:
         raise NotFoundException(detail="No such account")
-    if account.connection_id is not None:  # ty: ignore[unresolved-attribute]
+    if account.connection_id is not None:
         raise HTTPException(
             status_code=HTTP_409_CONFLICT, detail="Manual entry is for manual accounts"
         )

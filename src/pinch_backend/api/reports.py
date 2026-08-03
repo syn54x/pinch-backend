@@ -225,7 +225,8 @@ async def net_worth_report(
             .all()
         )
         for row in rows:
-            entries_by_account[row.account_id].append((row.as_of, row.amount_minor))  # ty: ignore[unresolved-attribute]
+            assert row.account_id is not None
+            entries_by_account[row.account_id].append((row.as_of, row.amount_minor))
 
     all_entries = [e for per_account in entries_by_account.values() for e in per_account]
     first_observation = min((e[0].date() for e in all_entries), default=None)
@@ -467,7 +468,7 @@ def _rollup(
     """Rolled-up magnitudes: each category's direct plus its descendants',
     by walking the parent chain of every spent category. The uncategorized
     bucket has no ancestry — it rolls up to itself."""
-    parents = {c.id: c.parent_id for c in categories}  # ty: ignore[unresolved-attribute]
+    parents = {c.id: c.parent_id for c in categories}
     rolled: dict[uuid.UUID | None, int] = {}
     for category_id, amount in direct.items():
         if category_id is None:
@@ -501,7 +502,7 @@ async def spending_report(
 
     categories = await Category.where(lambda c: c.ledger_id == ledger_id).all()
     names = {c.id: c.name for c in categories}
-    parent_ids = {c.id: c.parent_id for c in categories}  # ty: ignore[unresolved-attribute]
+    parent_ids = {c.id: c.parent_id for c in categories}
     rolled = _rollup(direct, categories)
     previous_rolled = _rollup(previous_direct, categories)
 

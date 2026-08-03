@@ -80,11 +80,11 @@ async def taxonomy_paths(ledger_id: "uuid.UUID") -> dict[str, uuid.UUID]:
     paths: dict[str, uuid.UUID] = {}
     for category in categories:
         parts = [category.name]
-        parent_id = category.parent_id  # ty: ignore[unresolved-attribute]
+        parent_id = category.parent_id
         while parent_id is not None:
             parent = by_id[parent_id]
             parts.append(parent.name)
-            parent_id = parent.parent_id  # ty: ignore[unresolved-attribute]
+            parent_id = parent.parent_id
         paths[PATH_SEPARATOR.join(reversed(parts))] = category.id
     return paths
 
@@ -122,10 +122,11 @@ class PennyClassifier:
     async def classify(self, txn: "Transaction") -> "uuid.UUID | None":
         if not categorization_availability().available:
             return None
-        paths = await taxonomy_paths(txn.ledger_id)  # ty: ignore[unresolved-attribute]
+        assert txn.ledger_id is not None
+        paths = await taxonomy_paths(txn.ledger_id)
         if not paths:
             return None
-        account = await Account.get(txn.account_id)  # ty: ignore[unresolved-attribute]
+        account = await Account.get(txn.account_id)
         prompt = format_prompt(
             payee=txn.description_normalized,
             description=txn.description_raw,

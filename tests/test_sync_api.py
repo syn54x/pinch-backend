@@ -84,6 +84,9 @@ class FakeSyncProvider:
         self.sync_cursors: list[str | None] = []
         self.link_tokens_created: list[dict] = []
         self.failure: providers.ProviderError | None = None
+        self.transactions_failure: providers.ProviderError | None = None
+        """Raises from sync_transactions only, accounts stay healthy —
+        the fresh-Item PRODUCT_NOT_READY shape."""
         self.cursor_serial = 0
 
         self.institution_lookups = 0
@@ -107,6 +110,8 @@ class FakeSyncProvider:
     async def sync_transactions(self, access_token: str, cursor: str | None):
         if self.failure is not None:
             raise self.failure
+        if self.transactions_failure is not None:
+            raise self.transactions_failure
         self.sync_cursors.append(cursor)
         if self.batches:
             return self.batches.pop(0)
@@ -324,6 +329,56 @@ async def test_transient_failure_retries_then_exhaustion_errors(
 
     fake_provider.failure = None
     await run_sync(connection_id, final_attempt=False)
+    health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
+    assert health["status"] == "active"
+    assert health["error_detail"] is None
+
+
+async def test_product_not_ready_waits_quietly_for_the_doorbell(
+    client, db, fake_provider, run_jobs, job_connector
+) -> None:
+    """Readiness retires (M11 CP1, issue #79): a fresh Item whose pull
+    isn't finished is not a failure — the initial sync call armed the
+    doorbell, so the connection waits active with a null last_synced_at
+    (the UI's first-sync-in-progress rendering), never parked in error,
+    never retried for readiness."""
+    fake_provider.transactions_failure = providers.ProviderError(
+        code="PRODUCT_NOT_READY", message="initial transaction pull not finished"
+    )
+    await _signup(client)
+    body = await _connect(client, fake_provider)
+    await run_jobs()
+
+    health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
+    assert health["status"] == "active"
+    assert health["error_detail"] is None
+    assert health["last_synced_at"] is None
+    # No retry ladder for readiness: every job ran to completion — nothing
+    # parked as a scheduled retry, nothing failed.
+    assert {j["status"] for j in job_connector.jobs.values()} == {"succeeded"}
+
+
+async def test_a_pre_m11_parked_readiness_error_heals_into_the_quiet_wait(
+    client, db, fake_provider, run_jobs
+) -> None:
+    """A connection the old ladder parked as error: PRODUCT_NOT_READY (the
+    Stash Item's own history) must not stay a lie under the quiet wait —
+    the next not-ready answer clears it to active. A genuinely parked
+    error (any other code) stays until a successful sync heals it."""
+    from pinch_backend.models import Connection, ConnectionStatus
+    from pinch_backend.sync import record_broken, run_sync
+
+    await _signup(client)
+    body = await _connect(client, fake_provider)
+    await run_jobs()
+    connection = await Connection.where(lambda c, cid=body["id"]: c.id == cid).first()
+    await record_broken(connection, ConnectionStatus.ERROR, "PRODUCT_NOT_READY")
+
+    fake_provider.transactions_failure = providers.ProviderError(
+        code="PRODUCT_NOT_READY", message="initial transaction pull not finished"
+    )
+    await run_sync(uuid.UUID(body["id"]), final_attempt=False)
+
     health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
     assert health["status"] == "active"
     assert health["error_detail"] is None

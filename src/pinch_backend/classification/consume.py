@@ -66,9 +66,7 @@ async def _split_transfer_state(
     )
     decision_splits = None
     if lines:
-        line_cat_ids = sorted(
-            {ln.category_id for ln in lines if ln.category_id is not None}  # ty: ignore[unresolved-attribute]
-        )
+        line_cat_ids = sorted({ln.category_id for ln in lines if ln.category_id is not None})
         line_names = (
             {
                 c.id: c.name
@@ -80,8 +78,8 @@ async def _split_transfer_state(
         decision_splits = [
             {
                 "amount_minor": ln.amount_minor,
-                "category_id": str(ln.category_id) if ln.category_id else None,  # ty: ignore[unresolved-attribute]
-                "category_name": line_names.get(ln.category_id),  # ty: ignore[unresolved-attribute]
+                "category_id": str(ln.category_id) if ln.category_id else None,
+                "category_name": line_names.get(ln.category_id),
                 "memo": ln.memo,
             }
             for ln in lines
@@ -95,15 +93,15 @@ async def _split_transfer_state(
     decision_transfer = None
     if transfer is not None:
         counterpart_id = (
-            transfer.inflow_transaction_id  # ty: ignore[unresolved-attribute]
-            if transfer.outflow_transaction_id == txn_id  # ty: ignore[unresolved-attribute]
-            else transfer.outflow_transaction_id  # ty: ignore[unresolved-attribute]
+            transfer.inflow_transaction_id
+            if transfer.outflow_transaction_id == txn_id
+            else transfer.outflow_transaction_id
         )
         counterpart_account_id = None
         if counterpart_id is not None:
             counterpart = await Transaction.where(lambda t, cid=counterpart_id: t.id == cid).first()
             if counterpart is not None:
-                counterpart_account_id = counterpart.account_id  # ty: ignore[unresolved-attribute]
+                counterpart_account_id = counterpart.account_id
         decision_transfer = {
             "kind": "linked" if counterpart_id is not None else "untracked",
             "counterpart_transaction_id": str(counterpart_id) if counterpart_id else None,
@@ -132,7 +130,7 @@ async def _eligible_counterpart(
         (txn.amount_minor < 0) == (counterpart.amount_minor < 0)
         or abs(txn.amount_minor) != abs(counterpart.amount_minor)
         or txn.currency != counterpart.currency
-        or txn.account_id == counterpart.account_id  # ty: ignore[unresolved-attribute]
+        or txn.account_id == counterpart.account_id
     ):
         return None
     cid = counterpart.id
@@ -165,7 +163,7 @@ async def log_transfer_decision_on_reviewed(ledger: Ledger, counterpart: Transac
         input_amount_minor=counterpart.amount_minor,
         input_currency=counterpart.currency,
         input_date=counterpart.date,
-        input_account_id=counterpart.account_id,  # ty: ignore[unresolved-attribute]
+        input_account_id=counterpart.account_id,
         proposal_provenance=ProposalProvenance.NONE,
         decision_category_id=None,
         decision_tags=[],
@@ -217,7 +215,7 @@ async def consume_proposal(
             .all()
         ]
 
-    proposal_category_id = proposal.category_id if proposal else None  # ty: ignore[unresolved-attribute]
+    proposal_category_id = proposal.category_id if proposal else None
     name_ids = sorted({cid for cid in (category_id, proposal_category_id) if cid is not None})
     names = (
         {c.id: c.name for c in await Category.where(lambda c, ids=name_ids: c.id.in_(ids)).all()}
@@ -263,7 +261,7 @@ async def consume_proposal(
                 ).first()
                 is not None
             )
-            counterpart_wanted: uuid.UUID | None = proposal.counterpart_transaction_id  # ty: ignore[unresolved-attribute]
+            counterpart_wanted: uuid.UUID | None = proposal.counterpart_transaction_id
             if not already_split and not already_linked and counterpart_wanted is None:
                 negative = txn.amount_minor < 0
                 await Transfer.create(
@@ -293,7 +291,7 @@ async def consume_proposal(
                     # counterpart — possibly already reviewed — vacates here
                     # (the relaxed M6 semantics: link created, category
                     # vacated, reviewed state untouched).
-                    linked_counterpart.category_id = None  # ty: ignore[unresolved-attribute]
+                    linked_counterpart.category_id = None
                     await linked_counterpart.save()
         # Split/transfer awareness (M6 CP3): when the transaction ends up
         # split or in a transfer, the category layer is not this row's to
@@ -328,7 +326,7 @@ async def consume_proposal(
             input_amount_minor=txn.amount_minor,
             input_currency=txn.currency,
             input_date=txn.date,
-            input_account_id=txn.account_id,  # ty: ignore[unresolved-attribute]
+            input_account_id=txn.account_id,
             proposal_category_id=proposal_category_id,
             proposal_category_name=names.get(proposal_category_id),
             proposal_tags=proposal_tags,
@@ -342,7 +340,7 @@ async def consume_proposal(
             decision_splits=decision_splits,
             decision_transfer=decision_transfer,
         )
-        txn.category_id = category_id  # ty: ignore[unresolved-attribute]
+        txn.category_id = category_id
         if display_name is not None:
             txn.display_name = display_name
         # The claim already stamped the row; the full-row save below must
@@ -376,14 +374,14 @@ async def consume_proposal(
                 )
             else:
                 await log_transfer_decision_on_reviewed(ledger, linked_counterpart)
-        elif proposal is not None and proposal.counterpart_transaction_id is not None:  # ty: ignore[unresolved-attribute]
+        elif proposal is not None and proposal.counterpart_transaction_id is not None:
             # The linked interpretation did not happen — the user decided
             # otherwise, or the counterpart turned ineligible. The mirror on
             # the other side is now a trap (accepting it would vacate a
             # category the user just chose) and dies here; the caller
             # re-classifies its owner.
             await _invalidate_mirror(
-                counterpart_id=proposal.counterpart_transaction_id,  # ty: ignore[unresolved-attribute]
+                counterpart_id=proposal.counterpart_transaction_id,
                 txn_id=txn_id,
             )
     log.info(

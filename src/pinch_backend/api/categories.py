@@ -101,7 +101,7 @@ def _out(c: Category) -> CategoryOut:
         name=c.name,
         emoji=c.emoji,
         color=c.color,
-        parent_id=c.parent_id,  # ty: ignore[unresolved-attribute]
+        parent_id=c.parent_id,
         created_at=c.created_at,
     )
 
@@ -175,7 +175,7 @@ async def update_category(
     category = await _get(current_ledger, category_id)
     # Every query runs before any mutation: a fresh SELECT refreshes this
     # identity-mapped instance and would clobber unsaved field changes.
-    new_parent_id = category.parent_id  # ty: ignore[unresolved-attribute]
+    new_parent_id = category.parent_id
     if data.reparent:
         new_parent = await _get(current_ledger, data.parent_id) if data.parent_id else None
         await taxonomy.check_no_cycle(category, new_parent)
@@ -191,7 +191,7 @@ async def update_category(
     new_name = data.name if data.name is not None else category.name
     await _assert_sibling_name_free(current_ledger.id, new_parent_id, new_name, category.id)
     if data.reparent:
-        category.parent_id = new_parent_id  # ty: ignore[unresolved-attribute]
+        category.parent_id = new_parent_id
     category.name = new_name
     if "emoji" in data.model_fields_set:
         category.emoji = data.emoji

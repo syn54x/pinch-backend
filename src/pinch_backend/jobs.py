@@ -132,6 +132,41 @@ async def sync_investments(connection_id: str) -> None:
         await run_investments_sync(uuid.UUID(connection_id))
 
 
+async def enqueue_sync_connection(connection_id) -> None:
+    """One lock-serialized banking sync (ADR-0006: lock per connection) —
+    the single spelling of the lock invariant every trigger shares:
+    connect, manual refresh, doorbell, reconciler."""
+    await sync_connection.configure(lock=f"sync:{connection_id}").defer_async(
+        connection_id=str(connection_id)
+    )
+
+
+def reconcile_cron(hours: int) -> str:
+    """PINCH_RECONCILE_INTERVAL_HOURS → cron: 24+ collapses to daily at
+    midnight (cron's hour field can't express */24); anything smaller
+    ticks on the hour every N hours."""
+    if hours >= 24:
+        return "0 0 * * *"
+    if hours == 1:
+        return "0 * * * *"
+    return f"0 */{hours} * * *"
+
+
+@job_app.periodic(cron=reconcile_cron(settings.reconcile_interval_hours), periodic_id="reconcile")
+@job_app.task(name="sync.reconcile_connections", queue="sync")
+async def reconcile_connections(timestamp: int) -> None:
+    """The repo's first periodic task (M11 CP3): probe-then-decide over
+    every due connection. Procrastinate's deferrer runs in the worker and
+    hands the tick timestamp; keyless instances no-op — nothing to probe,
+    and get_provider must never materialize without credentials."""
+    from pinch_backend.reconcile import reconcile_pass
+
+    if not settings.plaid_configured:
+        return
+    async with engines.session():
+        await reconcile_pass()
+
+
 async def run_worker() -> None:
     """The worker process: ferro + the queue, then work until signalled."""
     from pinch_backend.db import connect_database

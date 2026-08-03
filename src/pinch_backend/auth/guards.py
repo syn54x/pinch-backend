@@ -85,8 +85,9 @@ async def provide_current_credential(request: Request) -> Credential:
             )
             log.info("auth.bearer.failed", ip=ip)
             raise NotAuthorizedException(detail="Not authenticated")
+        assert pat.user_id is not None
         credential = Credential(
-            user_id=pat.user_id,  # ty: ignore[unresolved-attribute]
+            user_id=pat.user_id,
             scope=pat.scope,
             penny=pat.penny_scope,
             pat=pat,
@@ -96,8 +97,9 @@ async def provide_current_credential(request: Request) -> Credential:
         session = await resolve_session(cookie_secret) if cookie_secret else None
         if session is None:
             raise NotAuthorizedException(detail="Not authenticated")
+        assert session.user_id is not None
         credential = Credential(
-            user_id=session.user_id,  # ty: ignore[unresolved-attribute]
+            user_id=session.user_id,
             scope=PatScope.WRITE,
             penny=True,
             session=session,
@@ -149,4 +151,4 @@ async def provide_current_ledger(current_user: NamedDependency[User]) -> Ledger:
     membership = await LedgerMember.where(lambda m: m.user_id == current_user.id).first()
     if membership is None:
         raise RuntimeError(f"User {current_user.id} has no ledger membership")
-    return await Ledger.get(membership.ledger_id)  # ty: ignore[unresolved-attribute]
+    return await Ledger.get(membership.ledger_id)
