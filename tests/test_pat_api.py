@@ -380,3 +380,20 @@ async def test_read_pat_may_not_edit_the_profile(client) -> None:
 
     response = await client.patch(ME, json={"display_name": "sneaky"}, headers=_bearer(token))
     assert response.status_code == 403
+
+
+async def test_a_pat_can_never_change_the_password(client) -> None:
+    """The credential fence extends to rotation (F7 enabler #84): a stolen
+    PAT must not be able to take over the account it rides on."""
+    await _signup(client)
+    _, token = await _mint(client)  # full write scope
+
+    client.cookies.clear()
+    response = await client.post(
+        "/api/v1/auth/password/change",
+        json={"current_password": PASSWORD, "new_password": "a whole new credential"},
+        headers=_bearer(token),
+    )
+    assert response.status_code == 401
+    # The fence didn't kill the token's legitimate powers.
+    assert (await client.get(ME, headers=_bearer(token))).status_code == 200

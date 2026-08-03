@@ -5,6 +5,8 @@ the effect). Confirms return False for every invalid-token cause — unknown,
 expired, already used — so the HTTP layer can answer them identically.
 """
 
+from typing import TYPE_CHECKING
+
 from ferro import transaction
 
 from pinch_backend.auth.models import EmailVerificationToken, PasswordResetToken, Session
@@ -14,6 +16,10 @@ from pinch_backend.mailer import get_mailer
 from pinch_backend.models import User, utcnow
 from pinch_backend.observability import get_logger
 from pinch_backend.settings import settings
+
+if TYPE_CHECKING:
+    import uuid
+    from datetime import datetime
 
 log = get_logger(__name__)
 
@@ -71,6 +77,17 @@ async def start_password_reset(email: str) -> None:
     log.info("auth.reset.requested", user_id=str(user.id))
 
 
+async def consume_outstanding_reset_tokens(user_id: uuid.UUID, now: datetime) -> None:
+    """Every unused reset token dies — an attacker's older unread link must
+    not survive a credential rotation, whichever door the rotation used
+    (mailed reset here, or the in-session change on the routes side)."""
+    outstanding = await PasswordResetToken.where(lambda t: t.user_id == user_id).all()
+    for token_row in outstanding:
+        if token_row.consumed_at is None:
+            token_row.consumed_at = now
+            await token_row.save()
+
+
 async def complete_password_reset(secret: str, new_password: str) -> bool:
     """Set the new password, consume every outstanding reset token (an
     attacker's older unused link dies too), and revoke all sessions —
@@ -80,12 +97,9 @@ async def complete_password_reset(secret: str, new_password: str) -> bool:
         return False
     now = utcnow()
     user_id = row.user_id
+    assert user_id is not None  # shadow FK: always set on a fetched row
     async with transaction():
-        outstanding = await PasswordResetToken.where(lambda t: t.user_id == user_id).all()
-        for token_row in outstanding:
-            if token_row.consumed_at is None:
-                token_row.consumed_at = now
-                await token_row.save()
+        await consume_outstanding_reset_tokens(user_id, now)
         user = await User.get(user_id)
         user.password_hash = hash_password(new_password)
         await user.save()

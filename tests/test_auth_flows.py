@@ -405,3 +405,66 @@ def test_an_unknown_mailer_backend_fails_loudly(monkeypatch) -> None:
     monkeypatch.setattr(settings, "mailer_backend", "smtp")
     with pytest.raises(LookupError, match="smtp"):
         get_mailer()
+
+
+# --- POST /password/change breach + reset-token interplay (F7 enabler #84) ----
+
+CHANGE_PASSWORD = "/api/v1/auth/password/change"
+
+
+async def test_a_breached_password_is_rejected_at_change(client, monkeypatch) -> None:
+    """Same corpus, same copy as signup and reset — rotation is not a
+    side door around the breach gate."""
+    monkeypatch.setattr(settings, "breach_check_enabled", True)
+    monkeypatch.setattr(breach, "_transport", _hibp_transport(breached_password="pwned horse 1"))
+    await _signup(client)
+    response = await client.post(
+        CHANGE_PASSWORD,
+        json={"current_password": PASSWORD, "new_password": "pwned horse 1"},
+        headers=await _csrf(client),
+    )
+    assert response.status_code == 400
+    assert (
+        response.json()["detail"]
+        == "This password appears in known data breaches; choose a different one"
+    )  # byte-identical to signup/reset — one copy, one gate
+
+
+async def test_a_passwordless_account_cannot_change_a_password_it_does_not_have(
+    client,
+) -> None:
+    """A user from a non-password login method has nothing to rotate: the
+    answer is the login-shaped 401, priced like any wrong password."""
+    user = await provision_user(email="sso@example.com", display_name="SSO", password_hash=None)
+    _, secret = await issue_session(user)
+    client.cookies.set(settings.session_cookie_name, secret, domain="testserver.local")
+    response = await client.post(
+        CHANGE_PASSWORD,
+        json={"current_password": "anything at all", "new_password": "an entirely different horse"},
+        headers=await _csrf(client),
+    )
+    assert response.status_code == 401
+
+
+async def test_change_password_consumes_outstanding_reset_links(client, capsys) -> None:
+    """The reset flow's stance, mirrored: after an in-session rotation, an
+    attacker sitting on an earlier mailed reset link holds a dead token."""
+    await _signup(client)
+    await client.post(
+        RESET_REQUEST, json={"email": "taylor@example.com"}, headers=await _csrf(client)
+    )
+    token = _mailed_token(capsys)
+
+    response = await client.post(
+        CHANGE_PASSWORD,
+        json={"current_password": PASSWORD, "new_password": "an entirely different horse"},
+        headers=await _csrf(client),
+    )
+    assert response.status_code == 204
+
+    confirm = await client.post(
+        RESET_CONFIRM,
+        json={"token": token, "password": "yet a third horse entirely"},
+        headers=await _csrf(client),
+    )
+    assert confirm.status_code == 400

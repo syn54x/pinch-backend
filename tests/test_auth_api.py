@@ -186,6 +186,86 @@ async def test_patch_me_without_a_session_is_401(client) -> None:
     assert response.status_code == 401
 
 
+# --- POST /password/change: in-session rotation (F7 enabler #84) --------------
+
+CHANGE_PASSWORD = "/api/v1/auth/password/change"
+NEW_PASSWORD = "an entirely different horse"
+
+
+async def test_change_password_rotates_the_credential(client) -> None:
+    await _signup(client)
+    response = await client.post(
+        CHANGE_PASSWORD,
+        json={"current_password": PASSWORD, "new_password": NEW_PASSWORD},
+        headers=await _csrf(client),
+    )
+    assert response.status_code == 204
+    await client.post(LOGOUT, headers=await _csrf(client))
+    assert (await _login(client)).status_code == 401
+    assert (await _login(client, password=NEW_PASSWORD)).status_code == 200
+
+
+async def test_change_password_evicts_every_prior_cookie_yet_keeps_the_user_signed_in(
+    client,
+) -> None:
+    """Rotation evicts anyone holding a stolen cookie — including a copy of
+    the acting one. The user never notices: the response carries a freshly
+    minted session cookie, so unlike reset, no re-login is demanded."""
+    await _signup(client)
+    other = client.cookies[settings.session_cookie_name]
+    assert (await _login(client)).status_code == 200  # a second session takes the jar
+    acting = client.cookies[settings.session_cookie_name]
+
+    response = await client.post(
+        CHANGE_PASSWORD,
+        json={"current_password": PASSWORD, "new_password": NEW_PASSWORD},
+        headers=await _csrf(client),
+    )
+    assert response.status_code == 204
+    fresh = client.cookies[settings.session_cookie_name]
+    assert fresh != acting  # the jar rides the rotation seamlessly...
+    assert (await client.get(ME)).status_code == 200
+
+    for stolen in (other, acting):  # ...and every pre-change secret is dead
+        client.cookies.set(settings.session_cookie_name, stolen, domain="testserver.local")
+        assert (await client.get(ME)).status_code == 401
+
+
+async def test_change_password_with_wrong_current_password_is_401_and_inert(client) -> None:
+    """The login convention: a wrong password is a 401 after the verify runs,
+    never a distinguishable 400 — and nothing about the account moves."""
+    await _signup(client)
+    response = await client.post(
+        CHANGE_PASSWORD,
+        json={"current_password": "not it, sorry", "new_password": NEW_PASSWORD},
+        headers=await _csrf(client),
+    )
+    assert response.status_code == 401
+    assert (await client.get(ME)).status_code == 200  # this session untouched
+    await client.post(LOGOUT, headers=await _csrf(client))
+    assert (await _login(client)).status_code == 200  # old password still stands
+
+
+async def test_change_password_holds_the_signup_length_floor(client) -> None:
+    await _signup(client)
+    response = await client.post(
+        CHANGE_PASSWORD,
+        json={"current_password": PASSWORD, "new_password": "hunter2"},
+        headers=await _csrf(client),
+    )
+    assert response.status_code == 400
+    assert "hunter2" not in response.text
+
+
+async def test_change_password_without_a_session_is_401(client) -> None:
+    response = await client.post(
+        CHANGE_PASSWORD,
+        json={"current_password": PASSWORD, "new_password": NEW_PASSWORD},
+        headers=await _csrf(client),
+    )
+    assert response.status_code == 401
+
+
 # --- Signup edges ------------------------------------------------------------
 
 
