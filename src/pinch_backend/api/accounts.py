@@ -12,11 +12,12 @@ from datetime import UTC, datetime, timedelta
 from datetime import date as CalendarDate
 from typing import Annotated
 
-from litestar import Router, get, patch, post
+from ferro import transaction as db_transaction
+from litestar import Router, delete, get, patch, post
 from litestar.di import NamedDependency
-from litestar.exceptions import ClientException, NotFoundException
+from litestar.exceptions import ClientException, HTTPException, NotFoundException
 from litestar.params import FromPath, QueryParameter
-from litestar.status_codes import HTTP_200_OK
+from litestar.status_codes import HTTP_200_OK, HTTP_409_CONFLICT
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from pinch_backend import loans
@@ -27,15 +28,20 @@ from pinch_backend.api.pagination import (
     Page,
     paginate,
 )
+from pinch_backend.jobs import classify_ledger
 from pinch_backend.models import (
     Account,
     AccountKind,
     BalanceEntry,
     BalanceSource,
+    CorrectionActor,
     Ledger,
+    Transaction,
+    Transfer,
     utcnow,
 )
 from pinch_backend.observability import get_logger
+from pinch_backend.retraction import retract_transactions
 
 log = get_logger(__name__)
 
@@ -265,7 +271,8 @@ async def archive_account(
     account_id: FromPath[uuid.UUID], current_ledger: NamedDependency[Ledger]
 ) -> AccountOut:
     """A flag flip, idempotently: "archived" is the outcome, so repeating
-    the request repeats the answer. Delete does not exist (story 3)."""
+    the request repeats the answer. Archive is the verb for accounts you
+    once used; hard delete (below) exists only for disconnected debris."""
     account = await _get_account(current_ledger, account_id)
     if not account.archived:
         account.archived = True
@@ -276,6 +283,97 @@ async def archive_account(
             ledger_id=str(current_ledger.id),
         )
     return await account_out(account)
+
+
+class DeletionPreviewOut(BaseModel):
+    """What a hard delete would take with it — the consent counts."""
+
+    transactions: int
+    reviewed: int
+    transfers: int
+    balance_entries: int
+
+
+async def _doomed_counts(account: Account) -> DeletionPreviewOut:
+    account_id = account.id
+    txn_ids = [
+        t.id for t in await Transaction.where(lambda t, aid=account_id: t.account_id == aid).all()
+    ]
+    reviewed = await Transaction.where(
+        lambda t, aid=account_id: (t.account_id == aid) & (t.reviewed_at != None)  # noqa: E711
+    ).count()
+    transfers = 0
+    if txn_ids:
+        transfers = await Transfer.where(
+            lambda tr, ids=txn_ids: (
+                tr.outflow_transaction_id.in_(ids) | tr.inflow_transaction_id.in_(ids)
+            )
+        ).count()
+    balance_entries = await BalanceEntry.where(
+        lambda b, aid=account_id: b.account_id == aid
+    ).count()
+    return DeletionPreviewOut(
+        transactions=len(txn_ids),
+        reviewed=reviewed,
+        transfers=transfers,
+        balance_entries=balance_entries,
+    )
+
+
+@get("/{account_id:uuid}/deletion-preview")
+async def deletion_preview(
+    account_id: FromPath[uuid.UUID], current_ledger: NamedDependency[Ledger]
+) -> DeletionPreviewOut:
+    """The consent counts, before the irreversible verb (story-3 reversal,
+    post-F4): the dialog states exactly what dies."""
+    return await _doomed_counts(await _get_account(current_ledger, account_id))
+
+
+@delete("/{account_id:uuid}")
+async def delete_account(
+    account_id: FromPath[uuid.UUID], current_ledger: NamedDependency[Ledger]
+) -> None:
+    """Hard delete — the story-3 reversal (post-F4), for disconnected debris
+    only: a connected account would be re-created by the next sync, so it
+    must disconnect first (409). Rides the retraction seam, never raw
+    cascade: decisions voided (append-only holds), transfers dissolved with
+    surviving counterparts kept and their linked decisions voided, proposals
+    and mirrors cleared — then the rows and the account go. The log's
+    self-contained snapshots keep Learning honest about the deleted past."""
+    account = await _get_account(current_ledger, account_id)
+    if account.connection_id is not None:  # ty: ignore[unresolved-attribute]
+        raise HTTPException(
+            status_code=HTTP_409_CONFLICT,
+            detail="Disconnect this account's bank connection first — a "
+            "connected account would be re-created by the next sync",
+        )
+    ledger_id = current_ledger.id
+    txn_ids = [
+        t.id for t in await Transaction.where(lambda t, aid=account_id: t.account_id == aid).all()
+    ]
+    async with db_transaction():
+        reopened, mirrors = await retract_transactions(
+            ledger_id,
+            txn_ids,
+            actor=CorrectionActor.USER,
+            decision_reason="account deleted",
+            counterpart_reason="transfer counterpart removed with deleted account",
+        )
+        # BalanceEntry, Import, RecurringSeries cascade with the row at the
+        # database (ferro's FK default); transactions are already gone above.
+        await account.delete()
+    if reopened or mirrors:
+        # Someone needs re-classification (the import-undo precedent).
+        await classify_ledger.configure(lock=f"ledger:{ledger_id}").defer_async(
+            ledger_id=str(ledger_id)
+        )
+    log.info(
+        "account.deleted",
+        account_id=str(account_id),
+        ledger_id=str(ledger_id),
+        transactions=len(txn_ids),
+        reopened_counterparts=reopened,
+    )
 
 
 @post("/{account_id:uuid}/balance-entries")
@@ -508,6 +606,8 @@ accounts_router = Router(
         get_account,
         update_account_label,
         archive_account,
+        deletion_preview,
+        delete_account,
         create_balance_entry,
         list_balance_entries,
         get_payoff,
