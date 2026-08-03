@@ -66,9 +66,14 @@ class RuleCreateIn(BaseModel):
     """Propose an untracked transfer (M6 CP4); mutually exclusive with
     action_category_id — one rule, one classification stance."""
     apply: RetroApplyTier = RetroApplyTier.FORWARD
-    """The retro-apply consent tier (F4 Enabler B, #67; CONTEXT.md) —
-    creation-time only, never re-offered on edit. Transfer-marking rules
-    are forward-only."""
+    """The escalating consent tiers, chosen at rule creation (CONTEXT.md:
+    Retro-apply). Cumulative: UNREVIEWED includes forward; FULL includes
+    both. Never re-offered on edit."""
+    # ^ Verbatim copy of RetroApplyTier's class docstring, deliberately:
+    # the OpenAPI generator nondeterministically crowns either the enum's
+    # docstring or this field's as the shared component's description
+    # (~1 in 4 runs differed), which made the frontend's check-drift a
+    # coin flip. Identical texts make the race unobservable.
 
 
 class RulePatchIn(BaseModel):

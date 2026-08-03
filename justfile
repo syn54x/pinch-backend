@@ -32,6 +32,11 @@ api *args:
 worker:
     uv run python -m pinch_backend.cli.app worker
 
+# Probe Plaid's /item/get for a connection (or all): products, pull
+# status, standing error — the PRODUCT_NOT_READY diagnostic.
+plaid-item connection_id="":
+    uv run python -m pinch_backend.cli.app plaid-item {{connection_id}}
+
 # Export the OpenAPI document for typed-client generation (frontend repo:
 # point openapi-typescript / @hey-api/openapi-ts at the output, or at a
 # running server's /api/v1/schema/openapi.json). No database needed.

@@ -164,6 +164,16 @@ docs, and conversation. Implementation details do not belong in this file.
   a market price/value (cost basis where available). Investment accounts
   support holdings early on; depth (lots, performance analytics) grows over
   time.
+- **Investment activity** — a record of an event inside an investment
+  account: a buy, sell, dividend, fee, or securities transfer, sourced from
+  a provider sync. Not a Transaction, and inherits none of its laws:
+  activities are never reviewed, classified, split, or transfer-linked —
+  they are the explanatory record behind holdings and balance changes.
+- **Security** — the identity of an instrument that can be held or traded:
+  name, ticker, type, and its last observed price. Ledger-owned like all
+  financial data — each ledger keeps its own copy of the securities it has
+  encountered. Securities give holdings and activities their identity; they
+  are not a market-data feed.
 - **Loan terms** — the contractual parameters of a loan account: APR,
   minimum/expected payment, origination date and amount, maturity. Sourced
   from Plaid liabilities when available, otherwise supplied by the user
@@ -259,8 +269,10 @@ docs, and conversation. Implementation details do not belong in this file.
 - **Transfer** — a link marking money movement between accounts, not income
   or expense: either exactly two transactions of the same ledger (opposite
   signs, equal amounts, same currency, different accounts), or one
-  transaction whose counterparty is **untracked** (the other account isn't
-  in Pinch). A transaction belongs to at most one transfer, carries no
+  transaction whose counterparty is **untracked** — the counterpart movement
+  is not a Transaction in Pinch, either because the other account isn't in
+  Pinch or because it is an investment account, whose movements are
+  investment activities. A transaction belongs to at most one transfer, carries no
   category while in one — being a transfer *is* its classification — and
   cannot be both split and in a transfer. Reports exclude transfers by
   default.

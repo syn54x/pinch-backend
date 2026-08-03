@@ -13,6 +13,7 @@ from pinch_backend.api.categories import categories_router
 from pinch_backend.api.connections import connections_router
 from pinch_backend.api.correction_log import correction_log_router
 from pinch_backend.api.imports import import_profiles_router, imports_router
+from pinch_backend.api.investments import investments_router
 from pinch_backend.api.ledgers import ledgers_router
 from pinch_backend.api.penny import penny_router
 from pinch_backend.api.recurring import recurring_router
@@ -80,6 +81,7 @@ def create_app(*, manage_database: bool = True) -> Litestar:
             correction_log_router,
             imports_router,
             import_profiles_router,
+            investments_router,
             ledgers_router,
             penny_router,
             rules_router,

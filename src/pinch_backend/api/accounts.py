@@ -35,7 +35,10 @@ from pinch_backend.models import (
     BalanceEntry,
     BalanceSource,
     CorrectionActor,
+    Holding,
+    InvestmentActivity,
     Ledger,
+    Security,
     Transaction,
     Transfer,
     utcnow,
@@ -288,10 +291,16 @@ async def archive_account(
 class DeletionPreviewOut(BaseModel):
     """What a hard delete would take with it — the consent counts."""
 
+    model_config = ConfigDict(use_attribute_docstrings=True)
+
     transactions: int
     reviewed: int
     transfers: int
     balance_entries: int
+    holdings: int
+    """Positions that die with an investment account (M10 CP0)."""
+    investment_activities: int
+    """Activity records that die with an investment account (M10 CP1)."""
 
 
 async def _doomed_counts(account: Account) -> DeletionPreviewOut:
@@ -312,11 +321,17 @@ async def _doomed_counts(account: Account) -> DeletionPreviewOut:
     balance_entries = await BalanceEntry.where(
         lambda b, aid=account_id: b.account_id == aid
     ).count()
+    holdings = await Holding.where(lambda h, aid=account_id: h.account_id == aid).count()
+    investment_activities = await InvestmentActivity.where(
+        lambda x, aid=account_id: x.account_id == aid
+    ).count()
     return DeletionPreviewOut(
         transactions=len(txn_ids),
         reviewed=reviewed,
         transfers=transfers,
         balance_entries=balance_entries,
+        holdings=holdings,
+        investment_activities=investment_activities,
     )
 
 
@@ -359,9 +374,31 @@ async def delete_account(
             decision_reason="account deleted",
             counterpart_reason="transfer counterpart removed with deleted account",
         )
-        # BalanceEntry, Import, RecurringSeries cascade with the row at the
-        # database (ferro's FK default); transactions are already gone above.
+        # BalanceEntry, Import, RecurringSeries, Holding cascade with the
+        # row at the database (ferro's FK default); transactions are
+        # already gone above.
         await account.delete()
+        # Securities nothing references anymore die with the account (M10):
+        # identity without a position *or an activity naming it* is debris,
+        # and the next sync re-mints any security it still sees.
+        # Ledger-scoped, so tens of rows.
+        held = {
+            h.security_id  # ty: ignore[unresolved-attribute]
+            for h in await Holding.where(lambda h, lid=ledger_id: h.ledger_id == lid).all()
+        } | {
+            a.security_id  # ty: ignore[unresolved-attribute]
+            for a in await InvestmentActivity.where(
+                lambda x, lid=ledger_id: x.ledger_id == lid
+            ).all()
+            if a.security_id is not None  # ty: ignore[unresolved-attribute]
+        }
+        orphaned = [
+            s.id
+            for s in await Security.where(lambda s, lid=ledger_id: s.ledger_id == lid).all()
+            if s.id not in held
+        ]
+        if orphaned:
+            await Security.where(lambda s, ids=orphaned: s.id.in_(ids)).delete()
     if reopened or mirrors:
         # Someone needs re-classification (the import-undo precedent).
         await classify_ledger.configure(lock=f"ledger:{ledger_id}").defer_async(

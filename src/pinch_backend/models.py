@@ -54,6 +54,19 @@ class AccountKind(StrEnum):
     ASSET = "asset"
 
 
+class InvestmentActivityType(StrEnum):
+    """Plaid's six stable activity types (PRD #72, Decision 14) — the one
+    piece of provider vocabulary promoted to an enum, because rendering
+    branches on it. Subtypes stay free strings."""
+
+    BUY = "buy"
+    SELL = "sell"
+    CASH = "cash"
+    FEE = "fee"
+    TRANSFER = "transfer"
+    CANCEL = "cancel"
+
+
 class ConnectionProvider(StrEnum):
     PLAID = "plaid"
 
@@ -223,6 +236,9 @@ class Ledger(TimestampMixin, Model):
     transfers: Relation[list["Transfer"]] = BackRef()
     recurring_series: Relation[list["RecurringSeries"]] = BackRef()
     conversations: Relation[list["Conversation"]] = BackRef()
+    securities: Relation[list["Security"]] = BackRef()
+    holdings: Relation[list["Holding"]] = BackRef()
+    investment_activities: Relation[list["InvestmentActivity"]] = BackRef()
 
 
 class User(TimestampMixin, Model):
@@ -290,6 +306,16 @@ class Connection(TimestampMixin, Model):
     """The provider's transactions-sync cursor (M7 CP2): persisted only
     after a batch fully applies, so a replayed page is the crash-recovery
     norm, not an anomaly — ingestion is replay-safe by construction."""
+    investments_error_detail: str | None = None
+    """The investments phase's own health field (M10 CP0): its failures
+    never touch ``status``/``error_detail`` — banking sync and investments
+    break independently, and only a provider error code ever lands here.
+    Cleared by the next successful investments pass."""
+    investments_consent_required: bool = False
+    """The retrofit posture (M10 CP2): the Item predates investments
+    consent, so holdings calls refuse until update-mode Link collects it.
+    A sibling of ``reauth_required``, not an error — banking sync
+    continues, and the next successful investments pass clears it."""
     encrypted_secret: bytes | None = None
     """Opaque to M1 — the encryption utility lands with its first consumer (M7)."""
     created_at: datetime = Field(default_factory=utcnow)
@@ -341,6 +367,8 @@ class Account(TimestampMixin, Model):
     imports: Relation[list["Import"]] = BackRef()
     transactions: Relation[list["Transaction"]] = BackRef()
     recurring_series: Relation[list["RecurringSeries"]] = BackRef()
+    holdings: Relation[list["Holding"]] = BackRef()
+    investment_activities: Relation[list["InvestmentActivity"]] = BackRef()
 
 
 class BalanceEntry(TimestampMixin, Model):
@@ -365,6 +393,111 @@ class BalanceEntry(TimestampMixin, Model):
     currency: str = Field(pattern=r"^[A-Z]{3}$")
     as_of: datetime
     source: BalanceSource = BalanceSource.MANUAL
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class Security(TimestampMixin, Model):
+    """The identity of an instrument that can be held or traded
+    (CONTEXT.md; M10 CP0, issue #73).
+
+    Ledger-owned like all financial data — each ledger keeps its own copy
+    of the securities it has encountered, so the tenancy fence stays one
+    uniform rule and deletion cascades never cross tenants (PRD #72; the
+    global-reference-table alternative was rejected). ``type`` is the
+    provider's vocabulary, stored verbatim: nothing branches on it.
+    """
+
+    __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
+        ("ledger_id", "provider_security_id"),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    ledger: Annotated[Ledger, ForeignKey(related_name="securities", index=True)]
+    provider_security_id: str
+    name: str
+    ticker_symbol: str | None = None
+    type: str
+    """Provider vocabulary (equity, etf, mutual fund, cash, ...) — a free
+    string, not an enum: securities are identity, never law."""
+    is_cash_equivalent: bool = False
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    holdings: Relation[list["Holding"]] = BackRef()
+    investment_activities: Relation[list["InvestmentActivity"]] = BackRef()
+
+
+class Holding(TimestampMixin, Model):
+    """A position in an investment account (CONTEXT.md; M10 CP0).
+
+    Current-state only, replaced by every investments sync pass — no
+    snapshots (PRD #72: with manual-only sync they'd be irregular; per-
+    position history is a market-data-vendor feature). Provider-owned with
+    zero user data, which is exactly what makes mirror replacement safe
+    (ADR 0007). Money follows the Money law (integer minor units);
+    ``institution_price`` is deliberately not an Amount — a per-share
+    quote whose sub-cent precision is real for fund NAVs, never used in
+    money arithmetic.
+    """
+
+    __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
+        ("account_id", "security_id"),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    ledger: Annotated[Ledger, ForeignKey(related_name="holdings", index=True)]
+    """The tenancy column (ADR-0002), denormalized from the account."""
+    account: Annotated[Account, ForeignKey(related_name="holdings", index=True)]
+    security: Annotated[Security, ForeignKey(related_name="holdings", index=True)]
+    quantity: float
+    institution_price: float | None = None
+    institution_price_as_of: CalendarDate | None = None
+    institution_value_minor: int | None = None
+    cost_basis_minor: int | None = None
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class InvestmentActivity(TimestampMixin, Model):
+    """A record of an event inside an investment account (CONTEXT.md;
+    M10 CP1, issue #74).
+
+    Not a Transaction, and inherits none of its laws (ADR 0007):
+    provider-owned, zero user data, never reviewed/classified/split/
+    transfer-linked. Synced by stateless mirror — exact-match within
+    Plaid's 24-month window, retained forever outside it — which is safe
+    precisely because nothing here is user-owned. ``amount_minor`` is
+    signed from the account's perspective like every amount; ``price`` is
+    a per-share quote, not an Amount.
+    """
+
+    __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
+        ("account_id", "provider_activity_id"),
+    )
+    __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (("ledger_id", "date"),)
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    ledger: Annotated[Ledger, ForeignKey(related_name="investment_activities", index=True)]
+    """The tenancy column (ADR-0002), denormalized from the account."""
+    account: Annotated[Account, ForeignKey(related_name="investment_activities", index=True)]
+    security: Annotated[
+        Security | None, ForeignKey(related_name="investment_activities", on_delete="SET NULL")
+    ] = None
+    """Absent on securityless cash events (account fees, plain deposits) —
+    and nulled, never cascaded, if its security ever goes: the record
+    outlives the identity."""
+    provider_activity_id: str
+    date: CalendarDate
+    name: str
+    amount_minor: int
+    quantity: float = 0.0
+    price: float | None = None
+    fees_minor: int | None = None
+    type: InvestmentActivityType
+    subtype: str | None = None
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
