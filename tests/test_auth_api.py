@@ -131,12 +131,70 @@ async def test_patch_me_rejects_unknown_fields(client) -> None:
     assert (await client.get(ME)).json()["primary_currency"] == "USD"
 
 
+async def test_patch_me_updates_display_name_and_me_reflects_it(client) -> None:
+    """F7 enabler (issue #83): display name joins the self-profile allowlist."""
+    await _signup(client)
+    response = await client.patch(
+        ME, json={"display_name": "Taylor P."}, headers=await _csrf(client)
+    )
+    assert response.status_code == 200
+    assert response.json()["display_name"] == "Taylor P."
+    me = (await client.get(ME)).json()
+    assert me["display_name"] == "Taylor P."
+    assert me["primary_currency"] == "USD"
+
+
+async def test_patch_me_updates_both_profile_fields_together(client) -> None:
+    await _signup(client)
+    response = await client.patch(
+        ME,
+        json={"display_name": "T", "primary_currency": "EUR"},
+        headers=await _csrf(client),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["display_name"], body["primary_currency"]) == ("T", "EUR")
+
+
+async def test_patch_me_currency_alone_leaves_display_name_untouched(client) -> None:
+    await _signup(client)
+    await client.patch(ME, json={"primary_currency": "EUR"}, headers=await _csrf(client))
+    assert (await client.get(ME)).json()["display_name"] == "Taylor"
+
+
+async def test_patch_me_rejects_empty_and_oversized_display_names(client) -> None:
+    await _signup(client)
+    for bad in ("", "x" * 101):
+        response = await client.patch(ME, json={"display_name": bad}, headers=await _csrf(client))
+        assert response.status_code == 400, f"display_name={bad!r} must be rejected"
+    assert (await client.get(ME)).json()["display_name"] == "Taylor"
+
+
+async def test_patch_me_null_or_empty_body_changes_nothing(client) -> None:
+    """The categories-name convention: neither profile field is clearable, so
+    present-and-null means leave unchanged, and an empty patch is a 200 no-op."""
+    await _signup(client)
+    for payload in ({}, {"display_name": None}, {"primary_currency": None}):
+        response = await client.patch(ME, json=payload, headers=await _csrf(client))
+        assert response.status_code == 200, f"payload={payload!r}"
+    me = (await client.get(ME)).json()
+    assert (me["display_name"], me["primary_currency"]) == ("Taylor", "USD")
+
+
 async def test_patch_me_without_a_session_is_401(client) -> None:
     response = await client.patch(ME, json={"primary_currency": "EUR"}, headers=await _csrf(client))
     assert response.status_code == 401
 
 
 # --- Signup edges ------------------------------------------------------------
+
+
+async def test_signup_rejects_empty_and_oversized_display_names(client) -> None:
+    """Signup carries the same display-name bounds as PATCH /me — it must not
+    mint a name the profile editor could never produce."""
+    for bad in ("", "x" * 101):
+        response = await _signup(client, display_name=bad)
+        assert response.status_code == 400, f"display_name={bad!r} must be rejected"
 
 
 async def test_duplicate_email_signup_conflicts(client) -> None:

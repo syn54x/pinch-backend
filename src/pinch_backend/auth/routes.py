@@ -62,8 +62,9 @@ class SignupRequest(BaseModel):
     password: SecretStr = Field(min_length=8)
     """Breach corpus checking (HIBP) is the real gate and lands in CP4;
     a length floor is the NIST-baseline backstop, not the defense."""
-    display_name: str | None = None
-    """Defaults to the email's local part."""
+    display_name: str | None = Field(default=None, min_length=1, max_length=100)
+    """Defaults to the email's local part. Same bounds as PATCH /me — signup
+    must not mint a display name the profile editor could never produce."""
     primary_currency: str = Field(default="USD", pattern=r"^[A-Z]{3}$")
     """Chosen at signup (CONTEXT.md: Money)."""
 
@@ -94,10 +95,14 @@ class MePatchIn(BaseModel):
 
     model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
 
-    primary_currency: str = Field(pattern=r"^[A-Z]{3}$")
+    primary_currency: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
     """ISO 4217 alpha code, same shape rule as signup — unrestricted in v0
     (reports re-express at current rates), so any three uppercase letters
-    pass and anything else is a 400."""
+    pass and anything else is a 400. Not clearable: null means leave
+    unchanged (the categories-name convention)."""
+    display_name: str | None = Field(default=None, min_length=1, max_length=100)
+    """F7 enabler (issue #83). Same bounds as every user-facing name field;
+    not clearable — null means leave unchanged, and empty is a 400."""
 
 
 class SessionOut(BaseModel):
@@ -250,16 +255,20 @@ async def me(current_user: NamedDependency[User]) -> UserOut:
 
 @patch("/me")
 async def update_me(data: MePatchIn, current_user: NamedDependency[User]) -> UserOut:
-    """Onboarding's currency step (F3 enabler #42): the value pre-fills from
-    ``me`` and this writes it back. Credential-blind like ``me`` itself — a
-    write-scoped PAT may update the profile; only credential management is
-    cookie-fenced."""
-    current_user.primary_currency = data.primary_currency
+    """Onboarding's currency step (F3 enabler #42), joined by display name
+    for the Settings Profile pane (F7 enabler #83). Credential-blind like
+    ``me`` itself — a write-scoped PAT may update the profile; only
+    credential management is cookie-fenced."""
+    if data.primary_currency is not None:
+        current_user.primary_currency = data.primary_currency
+    if data.display_name is not None:
+        current_user.display_name = data.display_name
     await current_user.save()
     log.info(
         "auth.me.updated",
         user_id=str(current_user.id),
         primary_currency=data.primary_currency,
+        display_name=data.display_name,
     )
     return _user_out(current_user)
 
