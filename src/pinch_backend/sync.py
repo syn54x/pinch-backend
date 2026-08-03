@@ -84,6 +84,17 @@ AUTH_ERROR_CODES = {
 """Plaid codes that mean the login itself is dead — repair territory
 (update-mode link token), not retry territory."""
 
+CONSENT_ERROR_CODES = {"ADDITIONAL_CONSENT_REQUIRED"}
+"""The Plaid code meaning the Item lacks investments consent (M10 CP2) —
+the retrofit posture, healed by update-mode Link, never by retrying.
+Deliberately narrow: INVALID_PRODUCT is excluded because it also fires
+when the *operator's* Plaid client lacks the product, and a false consent
+flag raises an un-healable Enable-investments prompt, while a missed
+consent code merely shows as a visible investments error. Pinned for
+build-time verification in PRD #72: the first real retrofit (the Stash
+connection) confirms what production Plaid actually answers — adjust
+here if it's different."""
+
 
 @dataclass(config=ConfigDict(use_attribute_docstrings=True))
 class SyncOutcome:
@@ -143,20 +154,33 @@ async def _sync_investments(
             access_token, start_date=window_start, end_date=window_end
         )
     except providers.ProviderError as error:
+        if error.code in CONSENT_ERROR_CODES:
+            # Not an error — a consent posture (the retrofit path):
+            # update-mode Link collects it, the next sync clears it.
+            connection.investments_consent_required = True
+            connection.investments_error_detail = None
+            await connection.save()
+            log.info(
+                "sync.investments_consent_required",
+                connection_id=str(connection.id),
+                code=error.code,
+            )
+            return
         connection.investments_error_detail = error.code
         await connection.save()
         log.warning("sync.investments_broken", connection_id=str(connection.id), code=error.code)
         return
 
     account_ids = [a.id for a in investment_accounts.values()]
+    provider_securities: dict[str, providers.ProviderSecurity] = {}
+    for ps in [*batch.securities, *activity_batch.securities]:
+        provider_securities.setdefault(ps.provider_security_id, ps)
     skipped_unknown = 0
     async with transaction():
         # Queries before mutations (the ferro identity-map law): fetch
         # every existing set first, then write.
         securities_by_pid: dict[str, Security] = {}
-        provider_sids = sorted(
-            {s.provider_security_id for s in [*batch.securities, *activity_batch.securities]}
-        )
+        provider_sids = sorted(provider_securities)
         if provider_sids:
             for row in await Security.where(
                 lambda s, lid=ledger_id, pids=provider_sids: (
@@ -175,9 +199,6 @@ async def _sync_investments(
                 (activity_row.account_id, activity_row.provider_activity_id)  # ty: ignore[unresolved-attribute]
             ] = activity_row
 
-        provider_securities: dict[str, "providers.ProviderSecurity"] = {}
-        for ps in [*batch.securities, *activity_batch.securities]:
-            provider_securities.setdefault(ps.provider_security_id, ps)
         for ps in provider_securities.values():
             row = securities_by_pid.get(ps.provider_security_id)
             if row is None:
@@ -255,6 +276,9 @@ async def _sync_investments(
             except ValueError:
                 # Provider vocabulary this build doesn't know — loud skip,
                 # never a poisoned phase (the enum is Decision 14's law).
+                # The key still shields any stored row from the mirror
+                # sweep: Plaid IS returning it, so it must not be doomed.
+                activities_present.add((account.id, pa.provider_activity_id))
                 skipped_unknown += 1
                 continue
             security = (
@@ -302,6 +326,7 @@ async def _sync_investments(
             await InvestmentActivity.where(lambda x, ids=doomed_activities: x.id.in_(ids)).delete()
 
         connection.investments_error_detail = None
+        connection.investments_consent_required = False
         await connection.save()
 
     if skipped_unknown:

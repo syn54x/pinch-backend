@@ -475,6 +475,33 @@ async def test_activities_mirror_with_retention_floor(client, db, fake_provider,
     assert [a["name"] for a in items] == ["ANCIENT BUY"]  # the floor held
 
 
+async def test_unknown_activity_type_shields_its_stored_row_from_the_sweep(
+    client, db, fake_provider, run_jobs
+):
+    """Vocabulary this build doesn't know skips loudly — but the mirror
+    must not doom the stored row: Plaid is still returning it. The row
+    survives with its last-known shape."""
+    fake_provider.activity_batches = [
+        _activities(_activity("act-1", "2026-07-10", -50_00, "buy", name="KNOWN BUY"))
+    ]
+    await _signup(client)
+    body = await _connect(client)
+    await run_jobs()
+    assert len((await client.get(ACTIVITIES)).json()["items"]) == 1
+
+    fake_provider.activity_batches = [
+        _activities(
+            _activity("act-1", "2026-07-10", -50_00, "adjustment", name="KNOWN BUY")
+        )  # Plaid re-types the same row with vocabulary we don't know
+    ]
+    await client.post(f"{CONNECTIONS}/{body['id']}/sync", headers=await _csrf(client))
+    await run_jobs()
+
+    items = (await client.get(ACTIVITIES)).json()["items"]
+    assert [a["name"] for a in items] == ["KNOWN BUY"]  # survived, last-known shape
+    assert items[0]["type"] == "buy"
+
+
 async def test_resyncing_an_unchanged_window_creates_no_duplicates(
     client, db, fake_provider, run_jobs
 ):
@@ -546,6 +573,85 @@ async def test_orphan_sweep_spares_securities_still_named_by_activities(
     survivors = {s.ticker_symbol for s in await Security.all()}
     assert survivors == {"VTI"}  # AAPL orphaned and swept; VTI held by the IRA's activity
     assert [a["name"] for a in (await client.get(ACTIVITIES)).json()["items"]] == ["IRA VTI BUY"]
+
+
+async def test_missing_consent_flags_connection_and_banking_stands(
+    client, db, fake_provider, run_jobs
+):
+    """M10 CP2 (issue #75): the consent posture is a sibling of reauth,
+    not an error — the flag rises, error detail stays clean, the
+    connection stays active, and banking data lands untouched."""
+    fake_provider.investments_failure = providers.ProviderError(
+        code="ADDITIONAL_CONSENT_REQUIRED", message="consent needed"
+    )
+    await _signup(client)
+    body = await _connect(client)
+    await run_jobs()
+
+    health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
+    assert health["investments_consent_required"] is True
+    assert health["investments_error_detail"] is None  # consent isn't an error
+    assert health["status"] == "active"
+    assert (await client.get(HOLDINGS)).json()["items"] == []
+
+    brokerage = next(a for a in body["accounts"] if a["kind"] == "investment")
+    entries = (await client.get(f"/api/v1/accounts/{brokerage['id']}/balance-entries")).json()
+    assert len(entries["items"]) == 1  # the banking phase committed
+
+
+async def test_consent_flag_clears_after_consented_resync(client, db, fake_provider, run_jobs):
+    """The retrofit story: update-mode Link collects consent out-of-band;
+    the next sync simply succeeds and the flag falls."""
+    fake_provider.investments_failure = providers.ProviderError(
+        code="ADDITIONAL_CONSENT_REQUIRED", message="consent needed"
+    )
+    await _signup(client)
+    body = await _connect(client)
+    await run_jobs()
+    assert (await client.get(f"{CONNECTIONS}/{body['id']}")).json()[
+        "investments_consent_required"
+    ] is True
+
+    fake_provider.investments_failure = None  # consent granted via update-mode Link
+    fake_provider.investment_batches = [_default_batch()]
+    fake_provider.activity_batches = [
+        _activities(_activity("act-buy", "2026-07-10", -77_00, "buy"))
+    ]
+    await client.post(f"{CONNECTIONS}/{body['id']}/sync", headers=await _csrf(client))
+    await run_jobs()
+
+    health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
+    assert health["investments_consent_required"] is False
+    assert len((await client.get(HOLDINGS)).json()["items"]) == 2
+    assert len((await client.get(ACTIVITIES)).json()["items"]) == 1  # activities land too
+
+
+async def test_creation_consented_connection_never_flags(client, db, fake_provider, run_jobs):
+    """A connection that consented at creation sails straight through —
+    the flag never rises."""
+    fake_provider.investment_batches = [_default_batch()]
+    await _signup(client)
+    body = await _connect(client)
+    await run_jobs()
+    health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
+    assert health["investments_consent_required"] is False
+    assert health["investments_error_detail"] is None
+
+
+async def test_non_consent_investments_errors_still_record_as_errors(
+    client, db, fake_provider, run_jobs
+):
+    """The consent set is narrow: any other investments failure stays an
+    investments error, and the consent flag stays down."""
+    fake_provider.investments_failure = providers.ProviderError(
+        code="INTERNAL_SERVER_ERROR", message="plaid hiccup"
+    )
+    await _signup(client)
+    body = await _connect(client)
+    await run_jobs()
+    health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
+    assert health["investments_consent_required"] is False
+    assert health["investments_error_detail"] == "INTERNAL_SERVER_ERROR"
 
 
 async def test_holdings_are_ledger_fenced(client, db, fake_provider, run_jobs):

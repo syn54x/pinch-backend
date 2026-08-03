@@ -281,6 +281,12 @@ class PlaidProvider:
             payload["transactions"] = {"days_requested": BACKFILL_DAYS}
         else:
             payload["access_token"] = access_token
+        # Consent everywhere, billed nowhere until an endpoint is called
+        # (M10 CP2, PRD #72): never `products` (hides non-investment
+        # banks), never the auto-billing arrays. In update mode this is
+        # the retrofit path — consent collected on an existing Item,
+        # often without re-login.
+        payload["additional_consented_products"] = ["investments"]
         if settings.plaid_redirect_uri:
             # OAuth institutions bounce through the registered redirect URI
             # (F2 enabler, #39); non-OAuth flows ignore it entirely.

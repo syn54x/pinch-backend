@@ -70,17 +70,21 @@ class HoldingOut(BaseModel):
     """When the last investments sync observed this position."""
 
 
+def _security_out(security: Security) -> SecurityOut:
+    return SecurityOut(
+        id=security.id,
+        name=security.name,
+        ticker_symbol=security.ticker_symbol,
+        type=security.type,
+        is_cash_equivalent=security.is_cash_equivalent,
+    )
+
+
 def _holding_out(holding: Holding, security: Security) -> HoldingOut:
     return HoldingOut(
         id=holding.id,
         account_id=holding.account_id,  # ty: ignore[unresolved-attribute]
-        security=SecurityOut(
-            id=security.id,
-            name=security.name,
-            ticker_symbol=security.ticker_symbol,
-            type=security.type,
-            is_cash_equivalent=security.is_cash_equivalent,
-        ),
+        security=_security_out(security),
         quantity=holding.quantity,
         institution_price=holding.institution_price,
         institution_price_as_of=holding.institution_price_as_of,
@@ -145,15 +149,7 @@ def _activity_out(activity: InvestmentActivity, security: Security | None) -> In
     return InvestmentActivityOut(
         id=activity.id,
         account_id=activity.account_id,  # ty: ignore[unresolved-attribute]
-        security=None
-        if security is None
-        else SecurityOut(
-            id=security.id,
-            name=security.name,
-            ticker_symbol=security.ticker_symbol,
-            type=security.type,
-            is_cash_equivalent=security.is_cash_equivalent,
-        ),
+        security=None if security is None else _security_out(security),
         date=activity.date,
         name=activity.name,
         amount_minor=activity.amount_minor,

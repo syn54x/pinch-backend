@@ -87,6 +87,9 @@ class ConnectionOut(BaseModel):
     investments_error_detail: str | None
     """The investments phase's independent health (M10 CP0): set while
     holdings can't be fetched, without the connection leaving ``active``."""
+    investments_consent_required: bool
+    """True when the Item predates investments consent (M10 CP2) — the
+    frontend's cue to offer Enable investments (update-mode Link)."""
     accounts: list[AccountOut]
     created_at: datetime
 
@@ -156,6 +159,7 @@ async def _connection_out(connection: Connection) -> ConnectionOut:
         last_synced_at=connection.last_synced_at,
         error_detail=connection.error_detail,
         investments_error_detail=connection.investments_error_detail,
+        investments_consent_required=connection.investments_consent_required,
         accounts=[await account_out(a) for a in accounts],
         created_at=connection.created_at,
     )

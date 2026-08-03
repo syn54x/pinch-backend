@@ -411,6 +411,28 @@ async def test_institution_name_none_for_institutionless_item() -> None:
     assert await _provider(handler).get_institution_name("access-x") is None
 
 
+async def test_link_tokens_carry_investments_consent_in_both_modes() -> None:
+    """M10 CP2 (issue #75): additional_consented_products — consent
+    everywhere, billed nowhere until an endpoint is called. Never the
+    products array (hides banks), never the auto-billing arrays. Update
+    mode carries it too: that's the retrofit path for existing Items."""
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json={"link_token": "link-x"})
+
+    provider = _provider(handler)
+    await provider.create_link_token(client_user_id="user-1")
+    await provider.create_link_token(client_user_id="user-1", access_token="access-existing")
+
+    creation, update = seen
+    assert creation["additional_consented_products"] == ["investments"]
+    assert creation["products"] == ["transactions"]  # investments never rides products
+    assert update["additional_consented_products"] == ["investments"]
+    assert "products" not in update  # update mode still requests nothing
+
+
 # --- Investments (M10 CP0, issue #73; PRD #72) ----------------------------------
 
 

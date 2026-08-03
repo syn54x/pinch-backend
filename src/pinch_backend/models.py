@@ -311,6 +311,11 @@ class Connection(TimestampMixin, Model):
     never touch ``status``/``error_detail`` — banking sync and investments
     break independently, and only a provider error code ever lands here.
     Cleared by the next successful investments pass."""
+    investments_consent_required: bool = False
+    """The retrofit posture (M10 CP2): the Item predates investments
+    consent, so holdings calls refuse until update-mode Link collects it.
+    A sibling of ``reauth_required``, not an error — banking sync
+    continues, and the next successful investments pass clears it."""
     encrypted_secret: bytes | None = None
     """Opaque to M1 — the encryption utility lands with its first consumer (M7)."""
     created_at: datetime = Field(default_factory=utcnow)
