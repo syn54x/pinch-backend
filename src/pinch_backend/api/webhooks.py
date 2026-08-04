@@ -32,7 +32,7 @@ from litestar.status_codes import HTTP_200_OK
 
 from pinch_backend import providers
 from pinch_backend.jobs import enqueue_sync_connection, sync_connection, sync_investments
-from pinch_backend.models import Connection, ConnectionStatus
+from pinch_backend.models import Connection, ConnectionProvider, ConnectionStatus
 from pinch_backend.observability import get_logger
 from pinch_backend.settings import settings
 from pinch_backend.sync import AUTH_ERROR_CODES, record_broken
@@ -98,7 +98,9 @@ async def _resolve_key(kid: str) -> ec.EllipticCurvePublicKey:
     jwk = _jwk_cache.get(kid)
     if jwk is None:
         try:
-            jwk = await providers.get_provider().get_webhook_verification_key(kid)
+            # The Plaid-typed materialization (M13 CP1): key resolution is
+            # Plaid plumbing, off the universal protocol (ADR 0009).
+            jwk = await providers.get_plaid_provider().get_webhook_verification_key(kid)
         except providers.ProviderError as error:
             raise VerificationFailure("key_fetch_failed") from error
         _jwk_cache[kid] = jwk
@@ -195,7 +197,13 @@ async def receive_plaid_webhook(request: Request) -> None:
     if job is None and not acts_on_item:
         log.info("webhook.ignored", webhook_type=webhook_type, webhook_code=webhook_code)
         return
-    connection = await Connection.where(lambda c, iid=item_id: c.provider_item_id == iid).first()
+    # Scoped by (provider, provider_item_id) — ids are only unique per
+    # provider (M13 CP1); this receiver is Plaid's door.
+    connection = await Connection.where(
+        lambda c, iid=item_id: (
+            (c.provider == ConnectionProvider.PLAID) & (c.provider_item_id == iid)
+        )
+    ).first()
     if connection is None:
         # Membership churn or a stale Item: acknowledged, never confirmed —
         # the 200 tells a prober nothing about which item ids exist.

@@ -1,9 +1,13 @@
-"""The owned Plaid client against Plaid's wire shapes (M7 CP1, issue #33).
+"""The owned Plaid client against Plaid's wire shapes (M7 CP1, issue #33;
+provider-neutral reshape M13 CP1, #88).
 
 httpx.MockTransport scripts Plaid's documented JSON — the kind mapping,
 currency extraction, backfill depth, and error surfacing are proven here
 without a network; the opt-in live-sandbox smoke (CP2) proves the same
-client against the real thing.
+client against the real thing. Credentials ride the constructor since
+M13 CP1: a bound instance carries its connection's access token, and the
+connect pair (create_connect_session / complete_connect) is the only
+pre-credential surface.
 """
 
 import json
@@ -14,16 +18,17 @@ import pytest
 from pinch_backend.providers import BACKFILL_DAYS, PlaidProvider, ProviderError
 
 
-def _provider(handler) -> PlaidProvider:
+def _provider(handler, access_token: str | None = None) -> PlaidProvider:
     return PlaidProvider(
         client_id="cid",
         secret="sec",
         environment="sandbox",
+        access_token=access_token,
         transport=httpx.MockTransport(handler),
     )
 
 
-async def test_link_token_carries_backfill_and_credentials() -> None:
+async def test_connect_session_carries_backfill_and_credentials() -> None:
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -31,7 +36,7 @@ async def test_link_token_carries_backfill_and_credentials() -> None:
         seen["path"] = request.url.path
         return httpx.Response(200, json={"link_token": "link-sandbox-123"})
 
-    token = await _provider(handler).create_link_token(client_user_id="user-1")
+    token = await _provider(handler).create_connect_session(client_user_id="user-1")
     assert token == "link-sandbox-123"
     assert seen["path"] == "/link/token/create"
     assert seen["client_id"] == "cid" and seen["secret"] == "sec"
@@ -40,14 +45,63 @@ async def test_link_token_carries_backfill_and_credentials() -> None:
     assert BACKFILL_DAYS == 730  # PRD #31: two years of history requested
 
 
-async def test_exchange_parses_token_and_item() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/item/public_token/exchange"
+def _exchange_flow_handler(request: httpx.Request) -> httpx.Response:
+    """The complete_connect wire flow (M13 CP1): exchange, then the
+    institution identity in the same motion."""
+    if request.url.path == "/item/public_token/exchange":
         return httpx.Response(200, json={"access_token": "access-sandbox-x", "item_id": "item-x"})
+    if request.url.path == "/item/get":
+        return httpx.Response(200, json={"item": {"institution_id": "ins_1"}})
+    assert request.url.path == "/institutions/get_by_id"
+    return httpx.Response(200, json={"institution": {"name": "First Platypus Bank"}})
 
-    exchanged = await _provider(handler).exchange_public_token("public-x")
-    assert exchanged.access_token == "access-sandbox-x"
-    assert exchanged.item_id == "item-x"
+
+async def test_complete_connect_parses_identity_and_secret() -> None:
+    """The exchange and the institution identity land together: item id,
+    institution id + name (the dupe guard's basis), and the minted access
+    token as the connection's secret."""
+    result = await _provider(_exchange_flow_handler).complete_connect("public-x")
+    assert result.provider_item_id == "item-x"
+    assert result.provider_institution_id == "ins_1"
+    assert result.institution_name == "First Platypus Bank"
+    assert result.secret is not None
+    # SecretStr: the token never rides a repr — only an explicit unwrap.
+    assert result.secret.get_secret_value() == "access-sandbox-x"
+    assert "access-sandbox-x" not in repr(result)
+
+
+async def test_complete_connect_binds_the_instance() -> None:
+    """The minted token binds the instance: the caller's next verbs
+    (get_accounts) ride the same materialization without re-handling the
+    secret."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/accounts/get":
+            assert json.loads(request.content)["access_token"] == "access-sandbox-x"
+            return httpx.Response(200, json={"accounts": []})
+        return _exchange_flow_handler(request)
+
+    provider = _provider(handler)
+    await provider.complete_connect("public-x")
+    assert await provider.get_accounts() == []
+
+
+async def test_complete_connect_tolerates_institution_lookup_failure() -> None:
+    """The institution identity is a nicety — its lookup failing must
+    never block a consented connect; sync backfills opportunistically."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/item/public_token/exchange":
+            return httpx.Response(
+                200, json={"access_token": "access-sandbox-x", "item_id": "item-x"}
+            )
+        raise httpx.ConnectError("connection refused")
+
+    result = await _provider(handler).complete_connect("public-x")
+    assert result.provider_item_id == "item-x"
+    assert result.provider_institution_id is None and result.institution_name is None
+    assert result.secret is not None
+    assert result.secret.get_secret_value() == "access-sandbox-x"
 
 
 async def test_accounts_map_kinds_and_currency() -> None:
@@ -88,7 +142,7 @@ async def test_accounts_map_kinds_and_currency() -> None:
             },
         )
 
-    accounts = await _provider(handler).get_accounts("access-x")
+    accounts = await _provider(handler, "access-x").get_accounts()
     kinds = {a.provider_account_id: a.kind.value for a in accounts}
     assert kinds == {
         "a1": "depository",
@@ -110,22 +164,23 @@ async def test_remove_item_posts_token() -> None:
         seen["path"] = request.url.path
         return httpx.Response(200, json={"removed": True})
 
-    await _provider(handler).remove_item("access-x")
+    await _provider(handler, "access-x").remove_item()
     assert seen["path"] == "/item/remove"
     assert seen["access_token"] == "access-x"
 
 
-async def test_update_mode_link_token_carries_access_token() -> None:
-    """Reauth repair (PRD #31): the same endpoint in update mode — the
-    Item's access token rides instead of a products request."""
+async def test_update_mode_connect_session_carries_access_token() -> None:
+    """Reauth repair (PRD #31): the same endpoint in update mode — a
+    bound instance (M13 CP1: the mode is the binding) sends the Item's
+    access token instead of a products request."""
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.update(json.loads(request.content))
         return httpx.Response(200, json={"link_token": "link-update-1"})
 
-    token = await _provider(handler).create_link_token(
-        client_user_id="user-1", access_token="access-broken"
+    token = await _provider(handler, "access-broken").create_connect_session(
+        client_user_id="user-1"
     )
     assert token == "link-update-1"
     assert seen["access_token"] == "access-broken"
@@ -144,11 +199,11 @@ async def test_creation_link_token_carries_the_webhook_url(monkeypatch) -> None:
         seen.update(json.loads(request.content))
         return httpx.Response(200, json={"link_token": "link-sandbox-123"})
 
-    await _provider(handler).create_link_token(client_user_id="user-1")
+    await _provider(handler).create_connect_session(client_user_id="user-1")
     assert seen["webhook"] == "https://pinch.example/webhooks/plaid"
 
 
-async def test_update_mode_link_token_carries_no_webhook_url(monkeypatch) -> None:
+async def test_update_mode_connect_session_carries_no_webhook_url(monkeypatch) -> None:
     """Update mode is unchanged (PRD #77 decision 8): registration lives at
     creation and in the reconciler, never on the repair path."""
     from pinch_backend.settings import settings
@@ -160,9 +215,7 @@ async def test_update_mode_link_token_carries_no_webhook_url(monkeypatch) -> Non
         seen.update(json.loads(request.content))
         return httpx.Response(200, json={"link_token": "link-update-1"})
 
-    await _provider(handler).create_link_token(
-        client_user_id="user-1", access_token="access-broken"
-    )
+    await _provider(handler, "access-broken").create_connect_session(client_user_id="user-1")
     assert "webhook" not in seen
 
 
@@ -176,7 +229,7 @@ async def test_update_webhook_posts_token_and_url() -> None:
         seen["path"] = request.url.path
         return httpx.Response(200, json={"item": {}, "request_id": "req-1"})
 
-    await _provider(handler).update_webhook("access-x", "https://pinch.example/webhooks/plaid")
+    await _provider(handler, "access-x").update_webhook("https://pinch.example/webhooks/plaid")
     assert seen["path"] == "/item/webhook/update"
     assert seen["access_token"] == "access-x"
     assert seen["webhook"] == "https://pinch.example/webhooks/plaid"
@@ -204,7 +257,7 @@ async def test_item_state_reads_webhook_and_status_timestamps() -> None:
             },
         )
 
-    state = await _provider(handler).get_item_state("access-x")
+    state = await _provider(handler, "access-x").get_item_state()
     assert seen["path"] == "/item/get"
     assert seen["access_token"] == "access-x"
     assert state.webhook == "https://old.example/hook"
@@ -222,7 +275,7 @@ async def test_item_state_reads_an_unregistered_item_as_empty_webhook() -> None:
             200, json={"item": {"item_id": "item-x", "webhook": ""}, "request_id": "req-1"}
         )
 
-    state = await _provider(handler).get_item_state("access-x")
+    state = await _provider(handler, "access-x").get_item_state()
     assert state.webhook == ""
     assert state.transactions_updated_at is None and state.investments_updated_at is None
 
@@ -289,7 +342,7 @@ async def test_accounts_carry_minor_unit_balances() -> None:
             },
         )
 
-    accounts = await _provider(handler).get_accounts("access-x")
+    accounts = await _provider(handler, "access-x").get_accounts()
     balances = {a.provider_account_id: a.balance_minor for a in accounts}
     assert balances == {"a1": 123456, "a2": 5000, "a3": None}
 
@@ -358,7 +411,7 @@ async def test_sync_paginates_and_converts() -> None:
             },
         )
 
-    batch = await _provider(handler).sync_transactions("access-x", cursor="cursor-start")
+    batch = await _provider(handler, "access-x").sync_transactions(cursor="cursor-start")
     assert calls == ["cursor-start", "cursor-page-2"]
     assert batch.next_cursor == "cursor-final"
     assert [t.provider_transaction_id for t in batch.added] == ["t1", "t2"]
@@ -392,7 +445,7 @@ async def test_sync_not_ready_surfaces_transient_error() -> None:
         )
 
     with pytest.raises(ProviderError) as excinfo:
-        await _provider(handler).sync_transactions("access-x", cursor=None)
+        await _provider(handler, "access-x").sync_transactions(cursor=None)
     assert excinfo.value.code == "PRODUCT_NOT_READY"
 
     def legacy_handler(request: httpx.Request) -> httpx.Response:
@@ -402,7 +455,7 @@ async def test_sync_not_ready_surfaces_transient_error() -> None:
         )
 
     with pytest.raises(ProviderError) as excinfo:
-        await _provider(legacy_handler).sync_transactions("access-x", cursor=None)
+        await _provider(legacy_handler, "access-x").sync_transactions(cursor=None)
     assert excinfo.value.code == "PRODUCT_NOT_READY"
 
 
@@ -427,11 +480,11 @@ async def test_sync_accepts_a_completed_zero_transaction_item() -> None:
             },
         )
 
-    provider = _provider(handler)
-    batch = await provider.sync_transactions("access-x", cursor=None)
+    provider = _provider(handler, "access-x")
+    batch = await provider.sync_transactions(cursor=None)
     assert batch.added == [] and batch.next_cursor == ""
     # The persisted "" cursor round-trips as a fresh start next sync.
-    batch = await provider.sync_transactions("access-x", cursor="")
+    batch = await provider.sync_transactions(cursor="")
     assert batch.next_cursor == ""
 
 
@@ -450,7 +503,7 @@ async def test_sync_initial_cursor_omitted() -> None:
             },
         )
 
-    batch = await _provider(handler).sync_transactions("access-x", cursor=None)
+    batch = await _provider(handler, "access-x").sync_transactions(cursor=None)
     assert batch.next_cursor == "c1"
 
 
@@ -462,7 +515,7 @@ async def test_transport_fault_becomes_provider_error() -> None:
         raise httpx.ConnectError("connection refused")
 
     with pytest.raises(ProviderError) as excinfo:
-        await _provider(handler).get_accounts("access-x")
+        await _provider(handler, "access-x").get_accounts()
     assert excinfo.value.code == "NETWORK_ERROR"
 
 
@@ -471,7 +524,7 @@ async def test_non_json_response_becomes_provider_error() -> None:
         return httpx.Response(502, text="<html>Bad Gateway</html>")
 
     with pytest.raises(ProviderError) as excinfo:
-        await _provider(handler).get_accounts("access-x")
+        await _provider(handler, "access-x").get_accounts()
     assert excinfo.value.code == "HTTP_502"
 
 
@@ -486,7 +539,7 @@ async def test_plaid_error_surfaces_code_only() -> None:
         )
 
     with pytest.raises(ProviderError) as excinfo:
-        await _provider(handler).exchange_public_token("public-stale")
+        await _provider(handler).complete_connect("public-stale")
     assert excinfo.value.code == "INVALID_PUBLIC_TOKEN"
 
 
@@ -515,12 +568,12 @@ async def test_accounts_carry_mask() -> None:
             },
         )
 
-    accounts = await _provider(handler).get_accounts("access-x")
+    accounts = await _provider(handler, "access-x").get_accounts()
     assert accounts[0].mask == "4821"
     assert accounts[1].mask is None
 
 
-async def test_link_token_carries_redirect_uri(monkeypatch) -> None:
+async def test_connect_session_carries_redirect_uri(monkeypatch) -> None:
     """OAuth institutions need the registered redirect_uri — both modes."""
     from pinch_backend.settings import settings
 
@@ -533,14 +586,13 @@ async def test_link_token_carries_redirect_uri(monkeypatch) -> None:
         seen.append(json.loads(request.content))
         return httpx.Response(200, json={"link_token": "link-x"})
 
-    provider = _provider(handler)
-    await provider.create_link_token(client_user_id="user-1")
-    await provider.create_link_token(client_user_id="user-1", access_token="access-1")
+    await _provider(handler).create_connect_session(client_user_id="user-1")
+    await _provider(handler, "access-1").create_connect_session(client_user_id="user-1")
     assert seen[0]["redirect_uri"] == "http://localhost:5173/connect/oauth-return"
     assert seen[1]["redirect_uri"] == "http://localhost:5173/connect/oauth-return"
 
 
-async def test_link_token_omits_redirect_uri_when_unset(monkeypatch) -> None:
+async def test_connect_session_omits_redirect_uri_when_unset(monkeypatch) -> None:
     from pinch_backend.settings import settings
 
     monkeypatch.setattr(settings, "plaid_redirect_uri", "")
@@ -550,12 +602,13 @@ async def test_link_token_omits_redirect_uri_when_unset(monkeypatch) -> None:
         seen.update(json.loads(request.content))
         return httpx.Response(200, json={"link_token": "link-x"})
 
-    await _provider(handler).create_link_token(client_user_id="user-1")
+    await _provider(handler).create_connect_session(client_user_id="user-1")
     assert "redirect_uri" not in seen
 
 
-async def test_institution_name_resolved_in_two_steps() -> None:
-    """/item/get names the institution id; /institutions/get_by_id names it."""
+async def test_institution_resolved_in_two_steps() -> None:
+    """/item/get names the institution id; /institutions/get_by_id names
+    the institution — id and name answered together (M13 CP1)."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/item/get":
@@ -565,20 +618,24 @@ async def test_institution_name_resolved_in_two_steps() -> None:
         assert body["institution_id"] == "ins_1"
         return httpx.Response(200, json={"institution": {"name": "First Platypus Bank"}})
 
-    assert await _provider(handler).get_institution_name("access-x") == "First Platypus Bank"
+    institution = await _provider(handler, "access-x").get_institution()
+    assert institution.provider_institution_id == "ins_1"
+    assert institution.name == "First Platypus Bank"
 
 
-async def test_institution_name_none_for_institutionless_item() -> None:
-    """Some Items carry no institution; degrade to None without a second call."""
+async def test_institution_empty_for_institutionless_item() -> None:
+    """Some Items carry no institution; degrade to empty without a second
+    call."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/item/get"
         return httpx.Response(200, json={"item": {"institution_id": None}})
 
-    assert await _provider(handler).get_institution_name("access-x") is None
+    institution = await _provider(handler, "access-x").get_institution()
+    assert institution.provider_institution_id is None and institution.name is None
 
 
-async def test_link_tokens_carry_investments_consent_in_both_modes() -> None:
+async def test_connect_sessions_carry_investments_consent_in_both_modes() -> None:
     """M10 CP2 (issue #75): additional_consented_products — consent
     everywhere, billed nowhere until an endpoint is called. Never the
     products array (hides banks), never the auto-billing arrays. Update
@@ -589,9 +646,8 @@ async def test_link_tokens_carry_investments_consent_in_both_modes() -> None:
         seen.append(json.loads(request.content))
         return httpx.Response(200, json={"link_token": "link-x"})
 
-    provider = _provider(handler)
-    await provider.create_link_token(client_user_id="user-1")
-    await provider.create_link_token(client_user_id="user-1", access_token="access-existing")
+    await _provider(handler).create_connect_session(client_user_id="user-1")
+    await _provider(handler, "access-existing").create_connect_session(client_user_id="user-1")
 
     creation, update = seen
     assert creation["additional_consented_products"] == ["investments"]
@@ -658,7 +714,7 @@ async def test_holdings_convert_money_and_keep_price_precision() -> None:
         seen["path"] = request.url.path
         return httpx.Response(200, json=_holdings_response())
 
-    batch = await _provider(handler).get_holdings("access-x")
+    batch = await _provider(handler, "access-x").get_holdings()
     assert seen["path"] == "/investments/holdings/get"
     assert seen["access_token"] == "access-x"
 
@@ -692,7 +748,7 @@ async def test_holdings_use_the_investments_timeout() -> None:
 
     from pinch_backend.providers import INVESTMENTS_TIMEOUT
 
-    await _provider(handler).get_holdings("access-x")
+    await _provider(handler, "access-x").get_holdings()
     assert INVESTMENTS_TIMEOUT > 30
     assert seen["timeout"]["read"] == INVESTMENTS_TIMEOUT
 
@@ -748,8 +804,7 @@ async def test_activities_drain_offset_pages_and_flip_signs() -> None:
             },
         )
 
-    batch = await _provider(handler).get_investment_activities(
-        "access-x",
+    batch = await _provider(handler, "access-x").get_investment_activities(
         start_date=date_type.fromisoformat("2024-07-10"),
         end_date=date_type.fromisoformat("2026-07-10"),
     )
@@ -807,8 +862,7 @@ async def test_activities_tolerate_missing_security_and_use_timeout() -> None:
 
     from pinch_backend.providers import INVESTMENTS_TIMEOUT
 
-    batch = await _provider(handler).get_investment_activities(
-        "access-x",
+    batch = await _provider(handler, "access-x").get_investment_activities(
         start_date=date_type.fromisoformat("2024-07-10"),
         end_date=date_type.fromisoformat("2026-07-10"),
     )
@@ -859,7 +913,7 @@ async def test_item_status_probe_selects_the_diagnostic_fields() -> None:
             },
         )
 
-    report = await _provider(handler).get_item_status("access-x")
+    report = await _provider(handler, "access-x").get_item_status()
     assert calls == ["/item/get", "/transactions/sync"]
     assert report["consented_products"] == ["transactions", "investments"]
     assert report["transactions_update_status"] == "TRANSACTIONS_UPDATE_STATUS_NOT_READY"
@@ -878,5 +932,48 @@ async def test_holdings_error_surfaces_code_only() -> None:
         )
 
     with pytest.raises(ProviderError) as excinfo:
-        await _provider(handler).get_holdings("access-x")
+        await _provider(handler, "access-x").get_holdings()
     assert excinfo.value.code == "PRODUCT_NOT_READY"
+
+
+# --- The provider registry (M13 CP1, issue #88) ---------------------------------
+
+
+async def test_registry_materializes_a_bound_plaid_provider(monkeypatch) -> None:
+    """``get_provider`` is the one materialization point: the connection's
+    provider selects the client, the secret binds it."""
+    from pinch_backend import providers
+    from pinch_backend.models import ConnectionProvider
+    from pinch_backend.settings import settings
+
+    monkeypatch.setattr(settings, "plaid_client_id", "cid")
+    monkeypatch.setattr(settings, "plaid_secret", "sec")
+    provider = providers.get_provider(ConnectionProvider.PLAID, secret="access-x")
+    assert isinstance(provider, PlaidProvider)
+    assert provider._token == "access-x"  # the binding is the point
+
+
+async def test_registry_refuses_an_unimplemented_provider() -> None:
+    """MX is a known provider without a client until CP2 (#89): reaching
+    the registry for it is a caller bug, answered loudly."""
+    from pinch_backend import providers
+    from pinch_backend.models import ConnectionProvider
+
+    with pytest.raises(RuntimeError, match="mx"):
+        providers.get_provider(ConnectionProvider.MX)
+
+
+async def test_provider_configured_is_per_provider(monkeypatch) -> None:
+    """Partial configuration is a valid state (PRD #86 story 16): Plaid
+    configured says nothing about MX, which stays False until CP2."""
+    from pinch_backend import providers
+    from pinch_backend.models import ConnectionProvider
+    from pinch_backend.settings import settings
+
+    monkeypatch.setattr(settings, "plaid_client_id", "cid")
+    monkeypatch.setattr(settings, "plaid_secret", "sec")
+    assert providers.provider_configured(ConnectionProvider.PLAID) is True
+    assert providers.provider_configured(ConnectionProvider.MX) is False
+
+    monkeypatch.setattr(settings, "plaid_client_id", "")
+    assert providers.provider_configured(ConnectionProvider.PLAID) is False

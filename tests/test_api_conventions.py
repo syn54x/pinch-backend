@@ -157,7 +157,7 @@ async def test_operation_ids_are_handler_names(client) -> None:
         if isinstance(meta, dict) and "operationId" in meta
     ]
     assert len(ids) == len(set(ids)), "operation ids must be unique"
-    assert "signup" in ids and "list_accounts" in ids and "create_link_token" in ids
+    assert "signup" in ids and "list_accounts" in ids and "create_connect_session" in ids
     assert all(oid.replace("_", "").islower() for oid in ids), "snake_case handler names only"
 
 

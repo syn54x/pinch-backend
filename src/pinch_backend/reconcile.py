@@ -21,7 +21,7 @@ from datetime import datetime, timedelta
 from pinch_backend import providers
 from pinch_backend.crypto import decrypt_secret
 from pinch_backend.jobs import enqueue_sync_connection
-from pinch_backend.models import Connection, ConnectionStatus, utcnow
+from pinch_backend.models import Connection, ConnectionProvider, ConnectionStatus, utcnow
 from pinch_backend.observability import get_logger
 from pinch_backend.settings import settings
 
@@ -48,8 +48,14 @@ async def reconcile_pass() -> int:
     """One pass over every due connection; returns how many were examined.
     The periodic task and the manual CLI trigger both run exactly this."""
     cutoff = utcnow() - RECONCILE_STALENESS
+    # Plaid-only, explicitly (M13 CP1): the probe and the registration
+    # healer are Plaid plumbing; the MX probe arrives with CP3 (#90).
     active = await Connection.where(
-        lambda c: (c.status == ConnectionStatus.ACTIVE) & (c.encrypted_secret != None)  # noqa: E711
+        lambda c: (
+            (c.status == ConnectionStatus.ACTIVE)
+            & (c.provider == ConnectionProvider.PLAID)
+            & (c.encrypted_secret != None)  # noqa: E711
+        )
     ).all()
     due = [c for c in active if _due(c, cutoff)]
     for connection in due:
@@ -64,10 +70,12 @@ async def reconcile_connection(connection: Connection) -> str:
     pass retries instead of buying the failure 24 quiet hours. The stamp
     saves before any job defers (the repo's defer-after-commit stance):
     the enqueued sync must never race a write it can't see."""
-    provider = providers.get_provider()
-    access_token = decrypt_secret(connection.encrypted_secret)  # ty: ignore[invalid-argument-type]
+    # The full Plaid surface, deliberately (M13 CP1): the drift healer
+    # needs update_webhook, which the universal protocol doesn't owe.
+    assert connection.encrypted_secret is not None  # the pass filtered on it
+    provider = providers.get_plaid_provider(secret=decrypt_secret(connection.encrypted_secret))
     try:
-        state = await provider.get_item_state(access_token)
+        state = await provider.get_item_state()
     except providers.ProviderError as error:
         log.warning("reconcile.probe_failed", connection_id=str(connection.id), code=error.code)
         return "probe_failed"
@@ -77,7 +85,7 @@ async def reconcile_connection(connection: Connection) -> str:
         # else is a rotated tunnel or changed deploy domain. Re-register,
         # then sync — the Item may have been ringing a dead URL.
         try:
-            await provider.update_webhook(access_token, settings.plaid_webhook_url)
+            await provider.update_webhook(settings.plaid_webhook_url)
         except providers.ProviderError as error:
             log.warning(
                 "reconcile.reregister_failed",

@@ -68,7 +68,14 @@ class InvestmentActivityType(StrEnum):
 
 
 class ConnectionProvider(StrEnum):
+    """The sync providers Pinch knows (CONTEXT.md: Sync provider). Known
+    is not configured: the catalog endpoint reports which of these an
+    instance actually offers, and unconfigured providers refuse cleanly
+    (M13 CP1). MX's implementation lands in CP2 (#89); the enum value
+    leads it so the provider-neutral contract is complete in one sweep."""
+
     PLAID = "plaid"
+    MX = "mx"
 
 
 class ConnectionStatus(StrEnum):
@@ -289,15 +296,24 @@ class LedgerMember(TimestampMixin, Model):
 
 
 class Connection(TimestampMixin, Model):
-    """A live link to an external data source (one Plaid Item = one
-    institution login). Yields one or more accounts and owns credentials
-    and sync state; manual accounts have no connection."""
+    """A live link to an external data source: one institution login at a
+    sync provider (Plaid calls it an Item, MX a member — CONTEXT.md:
+    Connection). Yields one or more accounts and owns its provider
+    identity and sync state; manual accounts have no connection."""
 
     id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
     ledger: Annotated[Ledger, ForeignKey(related_name="connections", index=True)]
     ledger_id: uuid.UUID | None = None
     provider: ConnectionProvider = ConnectionProvider.PLAID
     provider_item_id: str
+    """The provider's id for this connection — a Plaid item_id, an MX
+    member guid. Provider-facing lookups (the webhook receivers) scope by
+    (provider, provider_item_id): ids are only unique per provider."""
+    provider_institution_id: str | None = None
+    """The provider's institution identity (M13 CP1) — the dupe guard's
+    basis (identity, not display name; PRD #86 story 13). Captured at
+    complete_connect; nullable because some Items carry no institution
+    and pre-M13 rows backfill opportunistically at sync."""
     institution_name: str | None = None
     """Captured server-side at exchange (F2 enabler, #39); backfilled by
     sync for pre-enabler rows. A nicety: never load-bearing, never trusted

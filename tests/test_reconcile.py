@@ -49,13 +49,13 @@ class FakeReconcileProvider(FakeInvestmentsProvider):
         self.probes = 0
         self.webhook_updates: list[str] = []
 
-    async def get_item_state(self, access_token: str) -> providers.ItemState:
+    async def get_item_state(self) -> providers.ItemState:
         self.probes += 1
         if self.item_state_failure is not None:
             raise self.item_state_failure
         return self.item_state
 
-    async def update_webhook(self, access_token: str, url: str) -> None:
+    async def update_webhook(self, url: str) -> None:
         self.webhook_updates.append(url)
 
 
@@ -68,7 +68,7 @@ def fake_provider(monkeypatch):
     monkeypatch.setattr(settings, "secret_encryption_key", Fernet.generate_key().decode())
     monkeypatch.setattr(settings, "plaid_webhook_url", OUR_URL)
     fake = FakeReconcileProvider()
-    monkeypatch.setattr(providers, "get_provider", lambda: fake)
+    monkeypatch.setattr(providers, "get_provider", fake.materialize)
     return fake
 
 
@@ -78,7 +78,7 @@ async def connection(client, db, fake_provider, job_connector) -> Connection:
     never reconciled, job queue drained of the connect flow's enqueues."""
     await _signup(client)
     response = await client.post(
-        CONNECTIONS, json={"public_token": "public-abc"}, headers=await _csrf(client)
+        CONNECTIONS, json={"provider": "plaid", "token": "public-abc"}, headers=await _csrf(client)
     )
     assert response.status_code == 201, response.text
     job_connector.reset()

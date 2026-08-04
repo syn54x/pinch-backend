@@ -1,24 +1,37 @@
-"""The connection-provider seam (M7 CP1, issue #33; PRD #31).
+"""The sync-provider seam (M7 CP1, issue #33; reshaped M13 CP1, #88;
+ADR 0009).
 
-A thin internal interface shaped by exactly what the milestone consumes —
-the same stance as valuation providers, not plugin machinery. Plaid is the
-first implementation: an owned async httpx client over the handful of
-endpoints Pinch speaks (the official SDK is sync-only and generated-heavy,
-fighting both the Litestar app and the Procrastinate worker).
+A thin internal interface shaped by exactly what the product consumes —
+the same stance as valuation providers, not plugin machinery. The
+``SyncProvider`` protocol holds only universal verbs (every aggregator
+has them); provider-only plumbing (Plaid's webhook verification and
+registration) lives as methods on the concrete client, the
+``get_item_status`` precedent. Credentials ride constructors: a provider
+instance is materialized per use, bound to a connection's decrypted
+credential where one exists, so protocol methods never carry tokens.
 
-Tests substitute a scriptable fake at ``get_provider`` — CI never touches
-the network; the opt-in live-sandbox smoke test proves the real client.
+Plaid is the first implementation: an owned async httpx client over the
+handful of endpoints Pinch speaks (the official SDK is sync-only and
+generated-heavy, fighting both the Litestar app and the Procrastinate
+worker). MX joins in M13 CP2 (#89).
+
+Tests substitute a scriptable fake at ``get_provider`` — the one
+materialization point and the one monkeypatch seam; CI never touches the
+network. The opt-in live-sandbox smoke test proves the real client.
 """
 
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Protocol
+from typing import Literal, Protocol, cast
 
 import httpx
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, SecretStr
 
-from pinch_backend.models import AccountKind
+from pinch_backend.models import AccountKind, ConnectionProvider
+from pinch_backend.observability import get_logger
 from pinch_backend.settings import settings
+
+log = get_logger(__name__)
 
 PLAID_BASE_URLS = {
     "sandbox": "https://sandbox.plaid.com",
@@ -73,9 +86,67 @@ def _to_minor(amount: float, currency: str | None) -> int:
     return int((Decimal(str(amount)) / quantum).to_integral_value(rounding=ROUND_HALF_UP))
 
 
-class ExchangedToken(BaseModel):
-    access_token: str
-    item_id: str
+ProviderCapability = Literal["transactions", "balances", "holdings", "activity"]
+"""One kind of data a sync provider delivers (CONTEXT.md: Provider
+capability). What a provider lacks is a stated limit, never an error."""
+
+# Per-provider facts live in three parallel tables plus the registry
+# cascade below (capabilities, labels, configured, client). At two
+# providers that's legible; when MX lands (CP2, #89) collapse them into
+# one per-provider record if a third table appears.
+
+PROVIDER_CAPABILITIES: dict[ConnectionProvider, tuple[ProviderCapability, ...]] = {
+    ConnectionProvider.PLAID: ("transactions", "balances", "holdings", "activity"),
+    ConnectionProvider.MX: ("transactions", "balances"),
+}
+"""The catalog's truth (M13 CP1): what each known provider delivers.
+MX ships transactions + balances — holdings is a billable MX add-on and
+no investment-activity endpoint exists at all (PRD #86, out of scope)."""
+
+PROVIDER_LABELS: dict[ConnectionProvider, str] = {
+    ConnectionProvider.PLAID: "Plaid",
+    ConnectionProvider.MX: "MX",
+}
+"""Display names for user-facing copy (refusals, surfaced errors) — the
+copy must never assume Plaid is the only provider (M13 CP1)."""
+
+
+def provider_configured(provider: ConnectionProvider) -> bool:
+    """Per-provider configuration truth: partial configuration is a valid
+    state, not an error state (PRD #86 story 16). MX answers False until
+    its settings family lands with the implementation (CP2, #89)."""
+    if provider is ConnectionProvider.PLAID:
+        return settings.plaid_configured
+    return False
+
+
+class ConnectResult(BaseModel):
+    """What completing a connect yields (M13 CP1): the connection's
+    provider identity, plus the per-connection credential where the
+    provider mints one."""
+
+    model_config = ConfigDict(use_attribute_docstrings=True)
+
+    provider_item_id: str
+    provider_institution_id: str | None = None
+    """The provider's institution identity — the dupe guard's basis.
+    Best-effort: an institution-less Item (some sandbox constructs) or a
+    failed lookup leaves it None; sync backfills opportunistically."""
+    institution_name: str | None = None
+    secret: SecretStr | None = None
+    """The per-connection credential to encrypt at rest (Plaid: the
+    exchanged access token). None for guid-shaped providers (MX) whose
+    only credentials are instance-level (ADR 0009). ``SecretStr`` makes
+    the no-tokens-in-logs rule structural: a stray repr shows stars."""
+
+
+class ProviderInstitution(BaseModel):
+    """A connection's institution identity as the provider names it —
+    id and name captured together (M13 CP1), so the dupe guard and the
+    display name can never disagree about which lookup they came from."""
+
+    provider_institution_id: str | None = None
+    name: str | None = None
 
 
 class ProviderAccount(BaseModel):
@@ -215,37 +286,48 @@ class ProviderError(Exception):
 
 
 class SyncProvider(Protocol):
-    async def create_link_token(
-        self, *, client_user_id: str, access_token: str | None = None
-    ) -> str: ...
+    """The universal verbs — only what every aggregator has (ADR 0009).
+    Instances are bound: the connection's credential rides the
+    constructor (via ``get_provider``), never the method signatures.
+    The connect pair works pre-credential: ``create_connect_session``
+    answers the opaque string the provider's widget consumes (Plaid: a
+    link_token; MX: a widget URL) — an instance bound to a connection's
+    credential mints a repair session instead — and ``complete_connect``
+    answers the connection's provider identity, binding the instance to
+    whatever credential it minted along the way. Plaid-only verbs
+    (webhook verification, registration) live on ``PlaidProvider``:
+    fakes owe them nothing."""
 
-    async def exchange_public_token(self, public_token: str) -> ExchangedToken: ...
+    async def create_connect_session(self, *, client_user_id: str) -> str: ...
 
-    async def get_accounts(self, access_token: str) -> list[ProviderAccount]: ...
+    async def complete_connect(self, token: str) -> ConnectResult: ...
 
-    async def get_institution_name(self, access_token: str) -> str | None: ...
+    async def get_accounts(self) -> list[ProviderAccount]: ...
 
-    async def sync_transactions(self, access_token: str, cursor: str | None) -> SyncBatch: ...
+    async def get_institution(self) -> ProviderInstitution: ...
 
-    async def get_holdings(self, access_token: str) -> InvestmentsBatch: ...
+    async def sync_transactions(self, cursor: str | None) -> SyncBatch: ...
+
+    async def get_holdings(self) -> InvestmentsBatch: ...
 
     async def get_investment_activities(
-        self, access_token: str, start_date: date, end_date: date
+        self, start_date: date, end_date: date
     ) -> ActivitiesBatch: ...
 
-    async def remove_item(self, access_token: str) -> None: ...
+    async def remove_item(self) -> None: ...
 
-    async def get_webhook_verification_key(self, key_id: str) -> dict: ...
-
-    async def update_webhook(self, access_token: str, url: str) -> None: ...
-
-    async def get_item_state(self, access_token: str) -> ItemState: ...
+    async def get_item_state(self) -> ItemState: ...
 
 
 class PlaidProvider:
     """The owned Plaid client. Every call is one JSON POST with instance
     credentials injected; errors surface as ``ProviderError`` with Plaid's
-    ``error_code`` and nothing else."""
+    ``error_code`` and nothing else.
+
+    Constructed per use (M13 CP1): ``access_token`` binds the instance to
+    one connection's decrypted credential, so no method carries a token.
+    Unbound instances serve exactly the pre-credential connect pair —
+    ``complete_connect`` binds the instance to the token it mints."""
 
     def __init__(
         self,
@@ -253,14 +335,23 @@ class PlaidProvider:
         client_id: str,
         secret: str,
         environment: str,
+        access_token: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._client_id = client_id
         self._secret = secret
         self._base_url = PLAID_BASE_URLS[environment]
+        self._access_token = access_token
         self._transport = transport
         """httpx's documented test seam: wire-shape tests hand in a
         MockTransport; production leaves it None."""
+
+    @property
+    def _token(self) -> str:
+        """The bound credential, assert-narrowed: reaching a post-connect
+        verb unbound is a caller bug, never a request problem."""
+        assert self._access_token is not None, "PlaidProvider is not bound to a connection"
+        return self._access_token
 
     async def _post(self, path: str, payload: dict, *, timeout: float = 30) -> dict:
         """Every failure mode funnels into ``ProviderError`` — transport
@@ -288,19 +379,19 @@ class PlaidProvider:
             )
         return data
 
-    async def create_link_token(
-        self, *, client_user_id: str, access_token: str | None = None
-    ) -> str:
-        """Creation mode requests products; update mode (reauth repair)
-        carries the Item's access token instead — Plaid Link then walks the
-        user through re-login and the same token stays valid after."""
+    async def create_connect_session(self, *, client_user_id: str) -> str:
+        """One link-token create; the mode is the binding (M13 CP1). An
+        unbound instance is a fresh connect: creation mode requests
+        products. A bound instance is reauth repair: update mode carries
+        the Item's access token instead — Plaid Link then walks the user
+        through re-login and the same token stays valid after."""
         payload: dict = {
             "user": {"client_user_id": client_user_id},
             "client_name": "Pinch",
             "country_codes": settings.plaid_country_codes,
             "language": "en",
         }
-        if access_token is None:
+        if self._access_token is None:
             payload["products"] = ["transactions"]
             payload["transactions"] = {"days_requested": BACKFILL_DAYS}
             if settings.plaid_webhook_url:
@@ -309,7 +400,7 @@ class PlaidProvider:
                 # that's the reconciler's job.
                 payload["webhook"] = settings.plaid_webhook_url
         else:
-            payload["access_token"] = access_token
+            payload["access_token"] = self._access_token
         # Consent everywhere, billed nowhere until an endpoint is called
         # (M10 CP2, PRD #72): never `products` (hides non-investment
         # banks), never the auto-billing arrays. In update mode this is
@@ -323,29 +414,50 @@ class PlaidProvider:
         data = await self._post("/link/token/create", payload)
         return data["link_token"]
 
-    async def exchange_public_token(self, public_token: str) -> ExchangedToken:
-        data = await self._post("/item/public_token/exchange", {"public_token": public_token})
-        return ExchangedToken(access_token=data["access_token"], item_id=data["item_id"])
+    async def complete_connect(self, token: str) -> ConnectResult:
+        """Exchange the public token and capture the Item's provider
+        identity in one motion (M13 CP1). The exchange failing raises;
+        the institution lookup is a nicety — its failure must never block
+        a consented connect, so it degrades to None (sync backfills
+        opportunistically later). Binds the instance to the minted access
+        token: the caller's next verbs (get_accounts) just work."""
+        data = await self._post("/item/public_token/exchange", {"public_token": token})
+        self._access_token = data["access_token"]
+        try:
+            institution = await self.get_institution()
+        except ProviderError as error:
+            log.info("connection.institution_lookup_failed", code=error.code)
+            institution = ProviderInstitution()
+        return ConnectResult(
+            provider_item_id=data["item_id"],
+            provider_institution_id=institution.provider_institution_id,
+            institution_name=institution.name,
+            secret=data["access_token"],
+        )
 
-    async def remove_item(self, access_token: str) -> None:
+    async def remove_item(self) -> None:
         """Revoke Plaid's side: stops Item billing and invalidates the
         token. Pinch-side severing is the caller's business."""
-        await self._post("/item/remove", {"access_token": access_token})
+        await self._post("/item/remove", {"access_token": self._token})
 
     async def get_webhook_verification_key(self, key_id: str) -> dict:
         """The receiver's key resolution (M11 CP0): the JWK Plaid signed a
         webhook's JWT with, named by the token header's kid. An instance
-        credential call — no access token; Items don't own signing keys."""
+        credential call — no access token; Items don't own signing keys.
+        PlaidProvider-only since M13 CP1 (ADR 0009): webhook verification
+        is Plaid plumbing, so the universal protocol doesn't owe it."""
         data = await self._post("/webhook_verification_key/get", {"key_id": key_id})
         return data["key"]
 
-    async def update_webhook(self, access_token: str, url: str) -> None:
+    async def update_webhook(self, url: str) -> None:
         """Re-register the Item's webhook URL (M11 CP3): the reconciler's
         healer for URL drift and the pre-M11 retrofit — the only
-        registration home besides link-token creation."""
-        await self._post("/item/webhook/update", {"access_token": access_token, "webhook": url})
+        registration home besides link-token creation. PlaidProvider-only
+        since M13 CP1 (ADR 0009): MX registration is dashboard-side and
+        unprobeable, so the universal protocol doesn't owe this verb."""
+        await self._post("/item/webhook/update", {"access_token": self._token, "webhook": url})
 
-    async def get_item_state(self, access_token: str) -> ItemState:
+    async def get_item_state(self) -> ItemState:
         """The probe half of probe-then-decide (M11 CP3): free, read-only,
         one call. Sibling of ``get_item_status`` (the developer CLI's
         two-call diagnostic) — this one is load-bearing and protocol-level."""
@@ -354,7 +466,7 @@ class PlaidProvider:
             raw = (status.get(product) or {}).get("last_successful_update")
             return None if raw is None else datetime.fromisoformat(raw)
 
-        data = await self._post("/item/get", {"access_token": access_token})
+        data = await self._post("/item/get", {"access_token": self._token})
         status = data.get("status") or {}
         return ItemState(
             webhook=(data.get("item") or {}).get("webhook") or "",
@@ -362,8 +474,8 @@ class PlaidProvider:
             investments_updated_at=timestamp("investments"),
         )
 
-    async def get_accounts(self, access_token: str) -> list[ProviderAccount]:
-        data = await self._post("/accounts/get", {"access_token": access_token})
+    async def get_accounts(self) -> list[ProviderAccount]:
+        data = await self._post("/accounts/get", {"access_token": self._token})
         accounts = []
         for a in data["accounts"]:
             balances = a.get("balances") or {}
@@ -381,7 +493,7 @@ class PlaidProvider:
             )
         return accounts
 
-    async def get_item_status(self, access_token: str) -> dict:
+    async def get_item_status(self) -> dict:
         """Diagnostic probe (post-Stash-QA): the Item's own account of
         itself — products, the transactions pull's real state, its
         standing error. Two reads: /item/get for identity+products
@@ -393,10 +505,10 @@ class PlaidProvider:
         PlaidProvider-only, deliberately outside the ``SyncProvider``
         protocol: this feeds the ``plaid-item`` developer CLI, never the
         sync engine, so fakes owe it nothing."""
-        data = await self._post("/item/get", {"access_token": access_token})
+        data = await self._post("/item/get", {"access_token": self._token})
         item = data.get("item") or {}
         sync_probe = await self._post(
-            "/transactions/sync", {"access_token": access_token, "count": 1}
+            "/transactions/sync", {"access_token": self._token, "count": 1}
         )
         return {
             "item_id": item.get("item_id"),
@@ -413,28 +525,33 @@ class PlaidProvider:
             },
         }
 
-    async def get_institution_name(self, access_token: str) -> str | None:
+    async def get_institution(self) -> ProviderInstitution:
         """Two documented steps: the Item names its institution id, the
-        institutions endpoint names the institution. Institution-less Items
-        (some sandbox constructs) answer None without a second call."""
-        item = await self._post("/item/get", {"access_token": access_token})
+        institutions endpoint names the institution — id and name captured
+        together (M13 CP1) so the dupe guard's identity and the display
+        name never disagree. Institution-less Items (some sandbox
+        constructs) answer empty without a second call."""
+        item = await self._post("/item/get", {"access_token": self._token})
         institution_id = (item.get("item") or {}).get("institution_id")
         if not institution_id:
-            return None
+            return ProviderInstitution()
         data = await self._post(
             "/institutions/get_by_id",
             {"institution_id": institution_id, "country_codes": settings.plaid_country_codes},
         )
-        return (data.get("institution") or {}).get("name")
+        return ProviderInstitution(
+            provider_institution_id=institution_id,
+            name=(data.get("institution") or {}).get("name"),
+        )
 
-    async def get_holdings(self, access_token: str) -> InvestmentsBatch:
+    async def get_holdings(self) -> InvestmentsBatch:
         """One holdings pull (M10 CP0). Plaid's floats become minor units
         at the seam, like every money value; the per-share price rides raw
         (a quote, not an Amount). A synchronous call on a fresh Item may
         block minutes-scale — hence the investments timeout."""
         data = await self._post(
             "/investments/holdings/get",
-            {"access_token": access_token},
+            {"access_token": self._token},
             timeout=INVESTMENTS_TIMEOUT,
         )
         securities = [
@@ -469,9 +586,7 @@ class PlaidProvider:
             )
         return InvestmentsBatch(securities=securities, holdings=holdings)
 
-    async def get_investment_activities(
-        self, access_token: str, start_date: date, end_date: date
-    ) -> ActivitiesBatch:
+    async def get_investment_activities(self, start_date: date, end_date: date) -> ActivitiesBatch:
         """Drain the window: /investments/transactions/get is offset-
         paginated (there is no cursor endpoint for investments — PRD #72),
         so every page up to total_investment_transactions comes back in
@@ -503,7 +618,7 @@ class PlaidProvider:
             data = await self._post(
                 "/investments/transactions/get",
                 {
-                    "access_token": access_token,
+                    "access_token": self._token,
                     "start_date": start_date.isoformat(),
                     "end_date": end_date.isoformat(),
                     "options": {"count": 500, "offset": offset},
@@ -527,7 +642,7 @@ class PlaidProvider:
             if offset >= data["total_investment_transactions"] or not page:
                 return ActivitiesBatch(securities=list(securities.values()), activities=activities)
 
-    async def sync_transactions(self, access_token: str, cursor: str | None) -> SyncBatch:
+    async def sync_transactions(self, cursor: str | None) -> SyncBatch:
         """Drain the cursor: every has_more page in one call. The job is
         idempotent — a retry replays from the last *persisted* cursor."""
 
@@ -549,7 +664,7 @@ class PlaidProvider:
         modified: list[ProviderTransaction] = []
         removed: list[str] = []
         while True:
-            payload: dict = {"access_token": access_token, "count": 500}
+            payload: dict = {"access_token": self._token, "count": 500}
             if cursor:  # "" is the zero-transaction Item's persisted cursor: start over
                 payload["cursor"] = cursor
             data = await self._post("/transactions/sync", payload)
@@ -583,11 +698,29 @@ class PlaidProvider:
                 )
 
 
-def get_provider() -> SyncProvider:
-    """The one place a provider is materialized; tests monkeypatch here.
-    Callers gate on ``settings.plaid_configured`` before reaching this."""
-    return PlaidProvider(
-        client_id=settings.plaid_client_id,
-        secret=settings.plaid_secret,
-        environment=settings.plaid_environment,
-    )
+def get_provider(provider: ConnectionProvider, *, secret: str | None = None) -> SyncProvider:
+    """The provider registry (M13 CP1): still the one place a provider is
+    materialized and the one test-monkeypatch seam. ``secret`` is the
+    connection's decrypted per-connection credential (Plaid: the access
+    token; MX will pass None — its credentials are instance-level).
+    Callers gate on ``provider_configured`` before reaching this; an
+    unimplemented provider raising is a caller bug, not a request path."""
+    if provider is ConnectionProvider.PLAID:
+        return PlaidProvider(
+            client_id=settings.plaid_client_id,
+            secret=settings.plaid_secret,
+            environment=settings.plaid_environment,
+            access_token=secret,
+        )
+    raise RuntimeError(f"no client registered for provider {provider.value!r}")
+
+
+def get_plaid_provider(*, secret: str | None = None) -> PlaidProvider:
+    """Plaid-only plumbing's materialization (webhook JWT verification,
+    registration healing): the same registry entry, typed to Plaid's full
+    surface — the verbs the universal protocol doesn't owe (the
+    ``get_item_status`` precedent). The cast is the narrowing the registry
+    return type can't express; tests monkeypatch ``get_provider`` and
+    their fakes flow through here scripting the Plaid-only verbs they
+    exercise."""
+    return cast("PlaidProvider", get_provider(ConnectionProvider.PLAID, secret=secret))

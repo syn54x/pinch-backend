@@ -46,10 +46,10 @@ async def _signup(client, email: str = "taylor@example.com") -> None:
 
 
 async def _connect(client) -> dict:
-    """The fake's exchange mints item_id ``item-public-abc`` for this
-    public token — the provider_item_id webhooks ring with."""
+    """The fake's completion mints item_id ``item-public-abc`` for this
+    token — the provider_item_id webhooks ring with."""
     response = await client.post(
-        CONNECTIONS, json={"public_token": "public-abc"}, headers=await _csrf(client)
+        CONNECTIONS, json={"provider": "plaid", "token": "public-abc"}, headers=await _csrf(client)
     )
     assert response.status_code == 201, response.text
     return response.json()
@@ -161,7 +161,7 @@ def fake_provider(keypair, monkeypatch):
     monkeypatch.setattr(settings, "plaid_webhook_url", "https://pinch.example/webhooks/plaid")
     _, kid, jwk = keypair
     fake = FakeWebhookProvider({kid: jwk})
-    monkeypatch.setattr(providers, "get_provider", lambda: fake)
+    monkeypatch.setattr(providers, "get_provider", fake.materialize)
     return fake
 
 
