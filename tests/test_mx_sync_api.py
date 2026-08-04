@@ -161,6 +161,13 @@ class FakeMXSyncProvider:
     async def get_institution(self) -> providers.ProviderInstitution:
         return providers.ProviderInstitution(provider_institution_id="mxbank", name="MX Bank")
 
+    async def get_item_state(self) -> providers.ItemState:
+        """The midnight-UTC reconcile cron can fire inside any test's
+        worker window (the FakeInvestmentsProvider precedent). A healthy
+        member with no aggregation stamp reads "quiet" — a no-op pass
+        instead of an AttributeError'd job failing an unrelated test."""
+        return providers.ItemState(webhook="", member_status="CONNECTED")
+
     async def remove_item(self) -> None:
         return None
 

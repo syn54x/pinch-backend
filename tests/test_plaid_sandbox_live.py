@@ -2,9 +2,22 @@
 
 Proves the owned httpx client speaks actual Plaid: link-token create,
 sandbox public token, exchange, accounts, one cursor sync. Never
-CI-gating — the whole module skips without credentials in the environment:
+CI-gating — the module runs only when BOTH guards pass (M13 CP4, #91):
 
-    PINCH_PLAID_CLIENT_ID=... PINCH_PLAID_SECRET=... uv run pytest tests/test_plaid_sandbox_live.py
+- Credentials exported from the shell (the conftest blanks
+  ``PINCH_PLAID_*`` with setdefault, so .env values do NOT opt in — the
+  suite stays hermetic):
+
+      PINCH_PLAID_CLIENT_ID=... PINCH_PLAID_SECRET=... \\
+          uv run pytest tests/test_plaid_sandbox_live.py
+
+- ``plaid_environment == "sandbox"``, hard: since the production cutover
+  a developer .env may hold PINCH_PLAID_ENVIRONMENT=production, and a
+  live module must never run under a production-configured instance —
+  export PINCH_PLAID_ENVIRONMENT=sandbox alongside the credentials if
+  the .env says otherwise. (Belt and suspenders: every URL below is
+  also pinned to the sandbox base, so production is unreachable from
+  this module regardless.)
 """
 
 import asyncio
@@ -14,14 +27,21 @@ import httpx
 import pytest
 
 from pinch_backend.providers import PLAID_BASE_URLS, PlaidProvider, ProviderError
+from pinch_backend.settings import settings
 
 CLIENT_ID = os.environ.get("PINCH_PLAID_CLIENT_ID", "")
 SECRET = os.environ.get("PINCH_PLAID_SECRET", "")
 
-pytestmark = pytest.mark.skipif(
-    not (CLIENT_ID and SECRET),
-    reason="live Plaid sandbox smoke: set PINCH_PLAID_CLIENT_ID / PINCH_PLAID_SECRET to run",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        not (CLIENT_ID and SECRET),
+        reason="live Plaid sandbox smoke: set PINCH_PLAID_CLIENT_ID / PINCH_PLAID_SECRET to run",
+    ),
+    pytest.mark.skipif(
+        settings.plaid_environment != "sandbox",
+        reason="live Plaid smoke is sandbox-only: PINCH_PLAID_ENVIRONMENT must be sandbox",
+    ),
+]
 
 
 async def _sandbox_public_token(products: list[str] | None = None) -> str:

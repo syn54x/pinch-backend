@@ -21,24 +21,41 @@ def pytest_configure() -> None:
     # No live network calls in CI (PRD M2): breach-check tests opt back in
     # through a stubbed transport.
     os.environ.setdefault("PINCH_BREACH_CHECK_ENABLED", "false")
-    # Hermetic against the developer's .env (M7): pydantic-settings reads it,
-    # but real Plaid credentials must never leak into the suite — "keyless"
-    # is the tested baseline, and env vars outrank the file. The empty
-    # string reads as unconfigured; tests that want Plaid monkeypatch the
-    # settings object directly.
-    os.environ["PINCH_PLAID_CLIENT_ID"] = ""
-    os.environ["PINCH_PLAID_SECRET"] = ""
-    os.environ["PINCH_PLAID_WEBHOOK_URL"] = ""
-    os.environ["PINCH_SECRET_ENCRYPTION_KEY"] = ""
-    # Same hermetic stance for MX (M13 CP2) — but setdefault, not
-    # assignment: this hook runs before settings.py's load_dotenv, so the
-    # developer's .env values aren't on os.environ yet (they stay out —
-    # dotenv leaves set keys alone), while a live-smoke opt-in exported
-    # from the shell IS here already and survives to gate
-    # test_mx_sandbox_live.
+    # Hermetic against the developer's .env (M7): pydantic-settings reads
+    # it, but real credentials must never leak into the suite — "keyless"
+    # is the tested baseline, and env vars outrank the file. setdefault,
+    # not assignment (the MX shape since CP2, Plaid folded in at CP4 #91):
+    # this hook runs before settings.py's load_dotenv, so the developer's
+    # .env values aren't on os.environ yet (they stay out — dotenv leaves
+    # set keys alone), while a live-smoke opt-in exported from the shell
+    # IS here already and survives to gate the live modules. The empty
+    # string reads as unconfigured; tests that want a provider monkeypatch
+    # the settings object directly.
+    os.environ.setdefault("PINCH_PLAID_CLIENT_ID", "")
+    os.environ.setdefault("PINCH_PLAID_SECRET", "")
     os.environ.setdefault("PINCH_MX_CLIENT_ID", "")
     os.environ.setdefault("PINCH_MX_API_KEY", "")
-    os.environ.setdefault("PINCH_MX_WEBHOOK_SECRET", "")
+    # A live-smoke opt-in makes the provider *configured*, which arms its
+    # startup validators (encryption key + webhook URL for Plaid, webhook
+    # secret for MX) — Settings() would refuse to construct at import.
+    # The opt-in stays a two-variable export by filling the validators'
+    # requirements with inert dummies; nothing live-smoke touches them
+    # (the live modules construct providers directly from the exported
+    # credentials). Without an opt-in these blank like everything else.
+    if os.environ.get("PINCH_PLAID_CLIENT_ID") and os.environ.get("PINCH_PLAID_SECRET"):
+        os.environ.setdefault(
+            "PINCH_PLAID_WEBHOOK_URL", "https://live-smoke.invalid/webhooks/plaid"
+        )
+        os.environ.setdefault(
+            "PINCH_SECRET_ENCRYPTION_KEY", "0fgqNJQuqR09ILyfU1jynGBXmn3_6a_h-8iLItevJXk="
+        )
+    else:
+        os.environ.setdefault("PINCH_PLAID_WEBHOOK_URL", "")
+        os.environ.setdefault("PINCH_SECRET_ENCRYPTION_KEY", "")
+    if os.environ.get("PINCH_MX_CLIENT_ID") and os.environ.get("PINCH_MX_API_KEY"):
+        os.environ.setdefault("PINCH_MX_WEBHOOK_SECRET", "live-smoke-not-a-secret")
+    else:
+        os.environ.setdefault("PINCH_MX_WEBHOOK_SECRET", "")
     # Keyless Penny is the tested baseline (PRD M9), same stance as Plaid:
     # a developer's .env model strings and gateway key must never leak in.
     # Tests that want an agent monkeypatch settings and agent.override().

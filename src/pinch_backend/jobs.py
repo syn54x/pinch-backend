@@ -156,12 +156,14 @@ def reconcile_cron(hours: int) -> str:
 @job_app.task(name="sync.reconcile_connections", queue="sync")
 async def reconcile_connections(timestamp: int) -> None:
     """The repo's first periodic task (M11 CP3): probe-then-decide over
-    every due connection. Procrastinate's deferrer runs in the worker and
-    hands the tick timestamp; keyless instances no-op — nothing to probe,
-    and get_provider must never materialize without credentials."""
+    every due connection, any configured provider (M13 CP4). Keyless
+    instances no-op — nothing to probe, and get_provider must never
+    materialize without credentials; the pass itself filters
+    per-provider, so a partially configured instance probes only what
+    it can."""
     from pinch_backend.reconcile import reconcile_pass
 
-    if not settings.plaid_configured:
+    if not (settings.plaid_configured or settings.mx_configured):
         return
     async with engines.session():
         await reconcile_pass()

@@ -344,11 +344,24 @@ class ItemState(BaseModel):
     Item's registered webhook URL ('' when none, the pre-M11 shape) and
     Plaid's own last-successful-update stamps, the timestamps the
     probe-then-decide verdicts read (production-empirical: ``status``
-    rides top-level on a parameterless call)."""
+    rides top-level on a parameterless call).
+
+    MX's probe (M13 CP4) answers the same shape to its honest extent:
+    ``webhook`` is always '' (registration is dashboard-side and
+    unprobeable — ADR 0009), ``transactions_updated_at`` carries the
+    member's ``successfully_aggregated_at`` (MX's one every-product
+    stamp), and ``member_status`` carries the connection status the lean
+    status probe reads alongside it."""
+
+    model_config = ConfigDict(use_attribute_docstrings=True)
 
     webhook: str
     transactions_updated_at: datetime | None = None
     investments_updated_at: datetime | None = None
+    member_status: str | None = None
+    """MX only: the member's ``connection_status``. None for Plaid —
+    Item health arrives through ITEM webhooks and sync errors, never
+    this probe."""
 
 
 class ProviderError(Exception):
@@ -994,11 +1007,10 @@ class MXProvider:
             raise
 
     async def _member_status(self) -> str:
-        """The lean member-status probe (CP0 spike: ``GET .../status``
-        answers ``connection_status`` and the aggregation stamps)."""
-        data = await self._request("GET", f"/users/{self._user}/members/{self._member}/status")
-        payload = data.get("member") or data
-        return payload.get("connection_status") or ""
+        """The sync path's spelling of the lean status probe: the same
+        read ``get_item_state`` makes (M13 CP4), needing only the
+        status."""
+        return (await self.get_item_state()).member_status or ""
 
     async def _list_transactions(self, filters: dict[str, str]) -> list[dict]:
         """One drained member-scoped listing — never user-scope (CP0
@@ -1131,11 +1143,33 @@ class MXProvider:
             return None
 
     async def get_item_state(self) -> ItemState:
-        """CP4 territory (#91): the reconciler's MX probe reads member
-        status + last-successful-aggregation. The reconciler pass is
-        explicitly Plaid-only until then — CP3's sync path probes member
-        status itself (``_member_status``) and never needs this verb."""
-        raise NotImplementedError("the MX reconciler probe lands in M13 CP4 (#91)")
+        """The reconciler's MX probe (M13 CP4, #91): member status +
+        last-successful-aggregation, one lean status read (CP0 spike:
+        ``GET .../status`` answers ``connection_status`` and the
+        aggregation stamps). ``webhook`` is honestly '' — registration
+        is dashboard-side and unprobeable (ADR 0009), so no
+        registration verdict can exist for MX. Parsed defensively: a
+        missing or unreadable stamp reads as None (never aggregated),
+        never a crash — and a naive timestamp is coerced to UTC so the
+        verdict comparison can't blow up on a format drift."""
+        data = await self._request("GET", f"/users/{self._user}/members/{self._member}/status")
+        payload = data.get("member") or data
+        raw = payload.get("successfully_aggregated_at")
+        aggregated_at = None
+        if isinstance(raw, str):
+            try:
+                aggregated_at = datetime.fromisoformat(raw)
+            except ValueError:
+                log.warning("reconcile.mx_stamp_unreadable")
+            else:
+                if aggregated_at.tzinfo is None:
+                    aggregated_at = aggregated_at.replace(tzinfo=UTC)
+        status = payload.get("connection_status")
+        return ItemState(
+            webhook="",
+            transactions_updated_at=aggregated_at,
+            member_status=status if isinstance(status, str) else None,
+        )
 
     async def get_holdings(self) -> InvestmentsBatch:
         """Never: holdings is a billable MX add-on Pinch doesn't ship —

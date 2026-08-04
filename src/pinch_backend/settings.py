@@ -145,9 +145,10 @@ class Settings(BaseSettings):
     like every other misconfiguration."""
     mx_webhook_secret: str = ""
     """The per-instance secret URL segment authenticating MX's unsigned
-    doorbells (/webhooks/mx/{secret}, ADR 0009). The receiver and its
-    required-when-configured startup validator land in CP4 (#91); the
-    setting leads them so operator config is additive."""
+    doorbells (/webhooks/mx/{secret}, ADR 0009): MX signs nothing, so a
+    constant-time compare of this segment is the receiver's whole front
+    door. Required whenever MX is configured (the ADR 0008 validator's
+    MX analog, CP4 #91)."""
     reconcile_interval_hours: int = Field(default=24, ge=1)
     """The reconciler's tick (M11 CP3, ADR 0008): how often the periodic
     probe-then-decide pass runs. 24h default so dev machines aren't
@@ -193,6 +194,20 @@ class Settings(BaseSettings):
         not discover it by never syncing."""
         if self.plaid_configured and not self.plaid_webhook_url:
             raise ValueError("PINCH_PLAID_WEBHOOK_URL is required when Plaid is configured")
+        return self
+
+    @model_validator(mode="after")
+    def _require_webhook_secret_with_mx(self) -> "Settings":
+        """ADR 0008's webhook validator to MX's honest extent (ADR 0009):
+        the receiver URL itself is registered dashboard-side and the API
+        can neither probe nor heal it, so startup can only require the
+        secret that authenticates the doorbells — the setting's existence
+        is the operator's attestation that /webhooks/mx/{secret} was
+        registered. A registration mistake still can't be silent: MX
+        self-aggregates nightly, so the reconciler cries webhook.missed
+        daily at a URL nobody rings."""
+        if self.mx_configured and not self.mx_webhook_secret:
+            raise ValueError("PINCH_MX_WEBHOOK_SECRET is required when MX is configured")
         return self
 
 

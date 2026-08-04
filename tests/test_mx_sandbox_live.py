@@ -7,8 +7,17 @@ MX has no Plaid-style sandbox token, but the integration environment
 lets members be created directly with the scripted mxbank credentials),
 the verifying member read, member-scoped accounts with signed balances,
 the CP3 transaction sync (watermark, window diff, posted-only, segment
-signs — issue #90), and member deletion. Everything created MX-side is
-deleted at the end, user included — success or failure.
+signs — issue #90), the CP4 reconciler probe (member status +
+last-successful-aggregation — issue #91), and member deletion.
+Everything created MX-side is deleted at the end, user included —
+success or failure.
+
+The webhook path is deliberately absent: registration is dashboard-only
+(the CP0 spike's empirical 404s), so end-to-end doorbell delivery stays
+gated on the operator registering /webhooks/mx/{secret} in the MX
+dashboard — the receiver itself is fully proven by direct POST in
+test_mx_webhooks_api, and a registration that never happens surfaces as
+the reconciler's daily webhook.missed (ADR 0009).
 
 Never CI-gating — the module skips without credentials in the
 environment. The conftest blanks ``PINCH_MX_*`` with setdefault, so a
@@ -111,6 +120,16 @@ async def test_mx_connect_accounts_and_disconnect_against_integration() -> None:
         assert result.provider_institution_id == "mxbank"
         assert result.secret is None  # guid-shaped provider, honestly no secret
 
+        # --- The reconciler's probe (M13 CP4, issue #91) -----------------
+        # Against the real status endpoint: a freshly aggregated member
+        # answers CONNECTED with a usable aggregation stamp, and the
+        # registration read is honestly absent (webhook '').
+        state = await provider.get_item_state()
+        assert state.member_status == "CONNECTED"
+        assert state.transactions_updated_at is not None
+        assert state.transactions_updated_at.tzinfo is not None  # comparable to utcnow()
+        assert state.webhook == ""  # dashboard-side, unprobeable (ADR 0009)
+
         accounts = await provider.get_accounts()
         assert accounts, "MX Bank member should carry accounts"
         assert all(a.provider_account_id.startswith("ACT-") for a in accounts)
@@ -193,6 +212,11 @@ async def test_mx_connect_accounts_and_disconnect_against_integration() -> None:
         with pytest.raises(ProviderError) as excinfo:
             await denied.sync_transactions(None)
         assert excinfo.value.code == "DENIED"
+        # The reconciler's probe sees the same broken status without
+        # raising (CP4): the missed-doorbell verdict reads it and lets
+        # the enqueued sync's own probe do the recording.
+        denied_state = await denied.get_item_state()
+        assert denied_state.member_status == "DENIED"
     finally:
         # The spike's hygiene: the throwaway user is hard-deleted,
         # members and all, pass or fail.
