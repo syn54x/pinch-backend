@@ -1,21 +1,22 @@
-"""The owned Plaid client against Plaid's wire shapes (M7 CP1, issue #33;
-provider-neutral reshape M13 CP1, #88).
+"""The owned provider clients against their wire shapes (M7 CP1, issue
+#33; provider-neutral reshape M13 CP1, #88; MX M13 CP2, #89).
 
-httpx.MockTransport scripts Plaid's documented JSON — the kind mapping,
-currency extraction, backfill depth, and error surfacing are proven here
-without a network; the opt-in live-sandbox smoke (CP2) proves the same
-client against the real thing. Credentials ride the constructor since
-M13 CP1: a bound instance carries its connection's access token, and the
-connect pair (create_connect_session / complete_connect) is the only
-pre-credential surface.
+httpx.MockTransport scripts each provider's captured JSON — Plaid's
+documented shapes, MX's CP0-spike-captured ones (docs/research/
+mx-platform-api.md) — so kind mapping, money conversion, and error
+surfacing are proven without a network; the opt-in live smokes prove the
+same clients against the real things. Credentials ride the constructors
+since M13 CP1: Plaid binds an access token, MX binds guids, and the
+connect pair is the only pre-credential surface.
 """
 
+import base64
 import json
 
 import httpx
 import pytest
 
-from pinch_backend.providers import BACKFILL_DAYS, PlaidProvider, ProviderError
+from pinch_backend.providers import BACKFILL_DAYS, MXProvider, PlaidProvider, ProviderError
 
 
 def _provider(handler, access_token: str | None = None) -> PlaidProvider:
@@ -953,19 +954,36 @@ async def test_registry_materializes_a_bound_plaid_provider(monkeypatch) -> None
     assert provider._token == "access-x"  # the binding is the point
 
 
-async def test_registry_refuses_an_unimplemented_provider() -> None:
-    """MX is a known provider without a client until CP2 (#89): reaching
-    the registry for it is a caller bug, answered loudly."""
+async def test_registry_materializes_a_bound_mx_provider(monkeypatch) -> None:
+    """MX's binding is guids, not a token (ADR 0009): the enrollment's
+    user guid and the connection's member guid ride the same registry."""
+    from pinch_backend import providers
+    from pinch_backend.models import ConnectionProvider
+    from pinch_backend.settings import settings
+
+    monkeypatch.setattr(settings, "mx_client_id", "cid")
+    monkeypatch.setattr(settings, "mx_api_key", "key")
+    provider = providers.get_provider(ConnectionProvider.MX, user_guid="USR-1", member_guid="MBR-2")
+    assert isinstance(provider, MXProvider)
+    assert provider._user == "USR-1" and provider._member == "MBR-2"
+
+
+async def test_registry_rejects_foreign_binding_kwargs() -> None:
+    """Each provider's factory signature IS its credential shape (ADR
+    0009): handing Plaid a guid or MX a secret is a caller bug, answered
+    with a loud TypeError — never silently ignored."""
     from pinch_backend import providers
     from pinch_backend.models import ConnectionProvider
 
-    with pytest.raises(RuntimeError, match="mx"):
-        providers.get_provider(ConnectionProvider.MX)
+    with pytest.raises(TypeError):
+        providers.get_provider(ConnectionProvider.PLAID, user_guid="USR-1")
+    with pytest.raises(TypeError):
+        providers.get_provider(ConnectionProvider.MX, secret="access-x")
 
 
 async def test_provider_configured_is_per_provider(monkeypatch) -> None:
     """Partial configuration is a valid state (PRD #86 story 16): Plaid
-    configured says nothing about MX, which stays False until CP2."""
+    configured says nothing about MX, and vice versa."""
     from pinch_backend import providers
     from pinch_backend.models import ConnectionProvider
     from pinch_backend.settings import settings
@@ -975,5 +993,358 @@ async def test_provider_configured_is_per_provider(monkeypatch) -> None:
     assert providers.provider_configured(ConnectionProvider.PLAID) is True
     assert providers.provider_configured(ConnectionProvider.MX) is False
 
+    monkeypatch.setattr(settings, "mx_client_id", "cid")
+    monkeypatch.setattr(settings, "mx_api_key", "key")
+    assert providers.provider_configured(ConnectionProvider.MX) is True
+
     monkeypatch.setattr(settings, "plaid_client_id", "")
     assert providers.provider_configured(ConnectionProvider.PLAID) is False
+    assert providers.provider_configured(ConnectionProvider.MX) is True
+
+
+# --- The owned MX client (M13 CP2, issue #89) ------------------------------------
+# Wire shapes from the CP0 spike's live captures (docs/research/
+# mx-platform-api.md, "CP0 spike findings") — integration-environment
+# empirical, not documentation guesses.
+
+
+def _mx(handler, user_guid: str | None = None, member_guid: str | None = None) -> MXProvider:
+    return MXProvider(
+        client_id="cid",
+        api_key="key",
+        environment="sandbox",
+        user_guid=user_guid,
+        member_guid=member_guid,
+        transport=httpx.MockTransport(handler),
+    )
+
+
+async def test_mx_requests_carry_basic_auth_and_the_vnd_accept() -> None:
+    """HTTP Basic client_id:api_key plus the vnd media type on every call
+    (CP0 spike: the Accept alone suffices, no Accept-Version) — and the
+    credentials ride the header, never the payload."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["authorization"] = request.headers["Authorization"]
+        seen["accept"] = request.headers["Accept"]
+        seen["body"] = request.content.decode()
+        return httpx.Response(200, json={"user": {"guid": "USR-1"}})
+
+    await _mx(handler).create_user(ledger_id="lid-1")
+    assert seen["authorization"] == "Basic " + base64.b64encode(b"cid:key").decode()
+    assert seen["accept"] == "application/vnd.mx.api.v1+json"
+    assert "cid" not in seen["body"] and "key" not in seen["body"]
+
+
+async def test_mx_create_user_posts_the_ledger_id() -> None:
+    """The enrollment's container mint: POST /users with the pinch ledger
+    id on MX's integrator id field — an operator's dashboard breadcrumb,
+    never user data."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"user": {"guid": "USR-abc", "id": "pinch-lid-1"}})
+
+    guid = await _mx(handler).create_user(ledger_id="lid-1")
+    assert guid == "USR-abc"
+    assert seen["path"] == "/users"
+    assert seen["user"] == {"id": "pinch-lid-1"}
+
+
+async def test_mx_connect_session_mints_a_widget_url() -> None:
+    """The spike-verified request shape under the enrollment user; the
+    answer is the hosted widget URL — the opaque string the frontend's
+    widget consumes."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={"widget_url": {"url": "https://int-widgets.moneydesktop.com/md/connect/xyz"}},
+        )
+
+    token = await _mx(handler, user_guid="USR-1").create_connect_session(client_user_id="user-1")
+    assert token == "https://int-widgets.moneydesktop.com/md/connect/xyz"
+    assert seen["path"] == "/users/USR-1/widget_urls"
+    assert seen["widget_url"] == {
+        "widget_type": "connect_widget",
+        "mode": "aggregation",
+        "ui_message_version": 4,
+    }
+
+
+async def test_mx_repair_session_pins_the_member() -> None:
+    """A member-bound instance mints repair (MX's reconnect story):
+    current_member_guid pins the widget to the broken login and the
+    institution search disappears — never a fresh connect on top of a
+    broken one."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"widget_url": {"url": "https://int-widgets.example/r"}})
+
+    await _mx(handler, user_guid="USR-1", member_guid="MBR-9").create_connect_session(
+        client_user_id="user-1"
+    )
+    assert seen["widget_url"]["current_member_guid"] == "MBR-9"
+    assert seen["widget_url"]["disable_institution_search"] is True
+    assert seen["widget_url"]["mode"] == "aggregation"
+
+
+def _member_flow_handler(request: httpx.Request) -> httpx.Response:
+    """The complete_connect wire flow: the verifying member read under
+    OUR enrollment user, then the institution name in the same motion."""
+    if request.url.path == "/users/USR-1/members/MBR-9":
+        return httpx.Response(
+            200,
+            json={
+                "member": {
+                    "guid": "MBR-9",
+                    "institution_code": "mxbank",
+                    "connection_status": "CONNECTED",
+                    "successfully_aggregated_at": "2026-08-04T19:59:17Z",
+                }
+            },
+        )
+    assert request.url.path == "/institutions/mxbank"
+    return httpx.Response(200, json={"institution": {"code": "mxbank", "name": "MX Bank"}})
+
+
+async def test_mx_complete_connect_verifies_under_our_enrollment() -> None:
+    """The token is the widget's member guid, read back scoped to our
+    enrollment user — the guid is never trusted naked. The answer is the
+    connection's identity: member guid, institution code + name, and
+    honestly no secret (ADR 0009)."""
+    result = await _mx(_member_flow_handler, user_guid="USR-1").complete_connect("MBR-9")
+    assert result.provider_item_id == "MBR-9"
+    assert result.provider_institution_id == "mxbank"
+    assert result.institution_name == "MX Bank"
+    assert result.secret is None
+
+
+async def test_mx_complete_connect_binds_the_verified_member() -> None:
+    """The verified member binds the instance: the caller's next verbs
+    (get_accounts) ride the same materialization — the PlaidProvider
+    precedent."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/users/USR-1/members/MBR-9/accounts":
+            return httpx.Response(200, json={"accounts": [], "pagination": {"total_pages": 1}})
+        return _member_flow_handler(request)
+
+    provider = _mx(handler, user_guid="USR-1")
+    await provider.complete_connect("MBR-9")
+    assert await provider.get_accounts() == []
+
+
+async def test_mx_foreign_member_guid_is_member_not_found() -> None:
+    """A guid not under our enrollment answers 404 MX-side and surfaces
+    as MEMBER_NOT_FOUND — the client's fault at the API surface (400),
+    never upstream's."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": {"message": "Invalid route"}})
+
+    with pytest.raises(ProviderError) as excinfo:
+        await _mx(handler, user_guid="USR-1").complete_connect("MBR-stolen")
+    assert excinfo.value.code == "MEMBER_NOT_FOUND"
+
+
+async def test_mx_complete_connect_tolerates_institution_lookup_failure() -> None:
+    """The display name is a nicety; the institution code rides the
+    verifying member read and survives the name lookup failing."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/users/USR-1/members/MBR-9":
+            return _member_flow_handler(request)
+        raise httpx.ConnectError("connection refused")
+
+    result = await _mx(handler, user_guid="USR-1").complete_connect("MBR-9")
+    assert result.provider_item_id == "MBR-9"
+    assert result.provider_institution_id == "mxbank"
+    assert result.institution_name is None
+
+
+async def test_mx_accounts_are_member_scoped_with_kinds_and_signed_balances() -> None:
+    """The load-bearing spike amendments in one shape: the listing is
+    member-scoped (never user-scope — deletion ghosts), kinds map with
+    the asset catch-all, decimal-dollar strings and numbers both convert
+    exponent-aware, and debt-kind balances flip to Pinch's negative
+    (CONTEXT.md: loans and credit carry negative balances; MX reports
+    them positive). An overpaid card comes out positive."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        return httpx.Response(
+            200,
+            json={
+                "accounts": [
+                    {
+                        "guid": "ACT-1",
+                        "name": "Checking",
+                        "type": "CHECKING",
+                        "currency_code": "USD",
+                        "balance": "1500.25",
+                        "account_number": "XXXX4821",
+                    },
+                    {
+                        "guid": "ACT-2",
+                        "name": "Credit Card",
+                        "type": "CREDIT_CARD",
+                        "currency_code": "USD",
+                        "balance": 100.5,
+                    },
+                    {
+                        "guid": "ACT-3",
+                        "name": "Home Loan",
+                        "type": "MORTGAGE",
+                        "currency_code": "USD",
+                        "balance": 250000,
+                    },
+                    {
+                        "guid": "ACT-4",
+                        "name": "Overpaid Card",
+                        "type": "CREDIT_CARD",
+                        "currency_code": "USD",
+                        "balance": -50,
+                    },
+                    {
+                        "guid": "ACT-5",
+                        "name": "Yen Savings",
+                        "type": "SAVINGS",
+                        "currency_code": "JPY",
+                        "balance": 5000,
+                    },
+                    {
+                        "guid": "ACT-6",
+                        "name": "Beach House",
+                        "type": "PROPERTY",
+                        "currency_code": None,
+                        "balance": None,
+                    },
+                    {
+                        "guid": "ACT-7",
+                        "name": "Brokerage",
+                        "type": "INVESTMENT",
+                        "currency_code": "USD",
+                        "balance": "1996.30",
+                    },
+                ],
+                "pagination": {"current_page": 1, "total_pages": 1},
+            },
+        )
+
+    accounts = await _mx(handler, user_guid="USR-1", member_guid="MBR-9").get_accounts()
+    assert seen["path"] == "/users/USR-1/members/MBR-9/accounts"
+
+    by_guid = {a.provider_account_id: a for a in accounts}
+    assert by_guid["ACT-1"].kind.value == "depository"
+    assert by_guid["ACT-1"].balance_minor == 150025  # string decimal, no float round-trip
+    assert by_guid["ACT-1"].mask == "4821"
+    assert by_guid["ACT-2"].kind.value == "credit"
+    assert by_guid["ACT-2"].balance_minor == -10050  # owed flips negative at the seam
+    assert by_guid["ACT-2"].mask is None
+    assert by_guid["ACT-3"].kind.value == "loan"
+    assert by_guid["ACT-3"].balance_minor == -25_000_000
+    assert by_guid["ACT-4"].balance_minor == 5000  # overpaid debt is honestly an asset
+    assert by_guid["ACT-5"].balance_minor == 5000  # JPY: exponent 0, never *100
+    assert by_guid["ACT-6"].kind.value == "asset"  # the catch-all
+    assert by_guid["ACT-6"].balance_minor is None and by_guid["ACT-6"].currency is None
+    assert by_guid["ACT-7"].kind.value == "investment"
+    assert by_guid["ACT-7"].balance_minor == 199630
+
+
+async def test_mx_accounts_drain_pagination() -> None:
+    """MX paginates everything; the client drains total_pages so a
+    many-account member never truncates."""
+    calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        page = int(request.url.params["page"])
+        account = {
+            "guid": f"ACT-{page}",
+            "name": f"Account {page}",
+            "type": "CHECKING",
+            "currency_code": "USD",
+            "balance": 1,
+        }
+        return httpx.Response(
+            200,
+            json={"accounts": [account], "pagination": {"current_page": page, "total_pages": 2}},
+        )
+
+    accounts = await _mx(handler, user_guid="USR-1", member_guid="MBR-9").get_accounts()
+    assert [a.provider_account_id for a in accounts] == ["ACT-1", "ACT-2"]
+    assert [c["page"] for c in calls] == ["1", "2"]
+    assert all(c["records_per_page"] == "100" for c in calls)
+
+
+async def test_mx_remove_item_deletes_the_member() -> None:
+    """DELETE the member, member-scoped; MX answers 204 with no body."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        return httpx.Response(204)
+
+    await _mx(handler, user_guid="USR-1", member_guid="MBR-9").remove_item()
+    assert seen["method"] == "DELETE"
+    assert seen["path"] == "/users/USR-1/members/MBR-9"
+
+
+async def test_mx_remove_item_maps_gone_to_member_not_found() -> None:
+    """The provider already not knowing the member is disconnect's
+    success case — surfaced as MEMBER_NOT_FOUND for the API's
+    ALREADY_DISCONNECTED tolerance, Plaid's ITEM_NOT_FOUND analog."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": {"message": "Invalid route"}})
+
+    with pytest.raises(ProviderError) as excinfo:
+        await _mx(handler, user_guid="USR-1", member_guid="MBR-9").remove_item()
+    assert excinfo.value.code == "MEMBER_NOT_FOUND"
+
+
+async def test_mx_error_surfaces_status_only_never_the_body() -> None:
+    """MX error bodies are never parsed: free-form messages can carry
+    anything, so the status code is the whole story — nothing from the
+    payload may reach an error, a log, or a client."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400, json={"error": {"message": "user SECRET-DETAIL did something odd"}}
+        )
+
+    with pytest.raises(ProviderError) as excinfo:
+        await _mx(handler, user_guid="USR-1").create_connect_session(client_user_id="u")
+    assert excinfo.value.code == "HTTP_400"
+    assert "SECRET-DETAIL" not in str(excinfo.value)
+
+
+async def test_mx_transport_fault_becomes_provider_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    with pytest.raises(ProviderError) as excinfo:
+        await _mx(handler, user_guid="USR-1").create_user(ledger_id="lid-1")
+    assert excinfo.value.code == "NETWORK_ERROR"
+
+
+async def test_mx_sync_transactions_is_cp3_seam() -> None:
+    """The engine skips MX before materializing (sync.mx_pending_cp3);
+    reaching this anyway is a developer's loud signpost to #90."""
+
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("must not touch the wire")
+
+    with pytest.raises(NotImplementedError, match="CP3"):
+        await _mx(handler, user_guid="USR-1", member_guid="MBR-9").sync_transactions(None)

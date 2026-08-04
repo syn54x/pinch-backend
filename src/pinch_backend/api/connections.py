@@ -6,7 +6,9 @@ the provider's widget consumes) → the widget, or a sandbox shortcut →
 completion, which creates the Connection and one Account per consented
 provider account — no second selection layer; the widget already did
 selection. Per-connection credentials (Plaid's access token) are
-encrypted at rest and write-only at this surface.
+encrypted at rest and write-only at this surface; MX mints none —
+``encrypted_secret`` is honestly NULL, and its binding is the ledger's
+enrollment user plus the member guid (M13 CP2, ADR 0009).
 
 Configuration is per provider: an instance refuses an unconfigured
 provider's endpoints cleanly while everything else stands (PRD #86 story
@@ -38,14 +40,18 @@ from pinch_backend.crypto import decrypt_secret, encrypt_secret
 from pinch_backend.jobs import enqueue_sync_connection
 from pinch_backend.models import (
     Account,
+    BalanceEntry,
+    BalanceSource,
     Connection,
     ConnectionProvider,
     ConnectionStatus,
+    Enrollment,
     Ledger,
     LedgerMember,
     LedgerRole,
     User,
     transaction,
+    utcnow,
 )
 from pinch_backend.observability import get_logger
 
@@ -122,13 +128,20 @@ class ConnectionOut(BaseModel):
     created_at: datetime
 
 
+REJECTED_TOKEN_CODES = frozenset({"INVALID_PUBLIC_TOKEN", "MEMBER_NOT_FOUND"})
+"""The completion-handle rejections, one per provider: Plaid refusing a
+stale public token, MX's member guid not living under our enrollment
+(M13 CP2 — the never-trust-a-client-guid verdict). The client's fault,
+never upstream's."""
+
+
 def _require_provider(provider: ConnectionProvider) -> None:
     """The keyless stance, per provider since M13 CP1 (PRD #86 story 16):
     a clean refusal on the endpoints that would touch an unconfigured
     provider, and nothing else changes."""
     if not providers.provider_configured(provider):
         raise PermissionDeniedException(
-            detail=f"{providers.PROVIDER_LABELS[provider]} is not configured on this instance"
+            detail=f"{providers.PROVIDERS[provider].label} is not configured on this instance"
         )
 
 
@@ -137,8 +150,8 @@ def _surface(error: providers.ProviderError, provider: ConnectionProvider) -> Ex
     provider detail allowed out (PRD #31) — reaches the client instead of
     an opaque 500, naming the provider that failed. A rejected completion
     token is the client's fault (400); anything else is upstream's (502)."""
-    detail = f"{providers.PROVIDER_LABELS[provider]} request failed: {error.code}"
-    if error.code == "INVALID_PUBLIC_TOKEN":
+    detail = f"{providers.PROVIDERS[provider].label} request failed: {error.code}"
+    if error.code in REJECTED_TOKEN_CODES:
         return ClientException(detail=detail)
     return ClientException(detail=detail, status_code=HTTP_502_BAD_GATEWAY)
 
@@ -173,6 +186,56 @@ async def _enqueue_sync(connection: Connection) -> None:
     await enqueue_sync_connection(connection.id)
 
 
+async def _mx_enrollment(ledger: Ledger) -> Enrollment | None:
+    lid = ledger.id
+    return await Enrollment.where(
+        lambda e: (e.ledger_id == lid) & (e.provider == ConnectionProvider.MX)
+    ).first()
+
+
+async def _ensure_mx_enrollment(ledger: Ledger) -> Enrollment:
+    """The ledger's MX user container (CONTEXT.md: Enrollment), created
+    lazily at the first connect session and reused by every later one —
+    exactly one row per (provider, ledger), the composite unique's law.
+    A create racing itself can strand one unused MX-side user (the DB
+    keeps one row; MX-side cleanup is not worth machinery for a
+    two-clicks-at-once race)."""
+    enrollment = await _mx_enrollment(ledger)
+    if enrollment is None:
+        user_guid = await providers.get_mx_provider().create_user(ledger_id=str(ledger.id))
+        enrollment = await Enrollment.create(
+            ledger=ledger, provider=ConnectionProvider.MX, provider_user_id=user_guid
+        )
+        log.info("enrollment.created", ledger_id=str(ledger.id), provider="mx")
+    return enrollment
+
+
+async def _bind_for_connect(
+    provider: ConnectionProvider, ledger: Ledger, connection: Connection | None
+) -> providers.SyncProvider:
+    """Materialize the provider for a connect session, bound in its own
+    credential shape (ADR 0009). Plaid: unbound for a fresh connect, the
+    repair connection's decrypted access token for update mode. MX: the
+    enrollment user (ensured lazily right here), plus the member guid
+    when this is repair. May raise ``ProviderError`` (the MX enrollment
+    ensure speaks to MX) — the caller surfaces it."""
+    if provider is ConnectionProvider.MX:
+        enrollment = await _ensure_mx_enrollment(ledger)
+        return providers.get_provider(
+            provider,
+            user_guid=enrollment.provider_user_id,
+            member_guid=None if connection is None else connection.provider_item_id,
+        )
+    if connection is None:
+        return providers.get_provider(provider)
+    if connection.encrypted_secret is None:
+        # Plaid repair rides the stored token; a tokenless row must never
+        # silently fall back to creation mode — a fresh connect on top of
+        # a broken one duplicates accounts.
+        raise ClientException(detail="Connection has no provider credentials to repair")
+    return providers.get_provider(provider, secret=decrypt_secret(connection.encrypted_secret))
+
+
 async def _connection_out(connection: Connection) -> ConnectionOut:
     cid = connection.id
     accounts = await Account.where(lambda a: a.connection_id == cid).all()
@@ -203,22 +266,16 @@ async def create_connect_session(
     ``connection_id`` this is the repair path: a session bound to the
     same provider-side login."""
     _require_provider(data.provider)
-    secret: str | None = None
+    connection: Connection | None = None
     if data.connection_id is not None:
         connection = await _get_connection(current_ledger, data.connection_id)
         if connection.provider != data.provider:
             # A repair session is the connection's provider's to mint —
             # a mismatch is a client bug, never a silent re-route.
             raise ClientException(detail="Provider does not match the connection")
-        if connection.encrypted_secret is None:
-            # Repair mode must never silently fall back to creation mode —
-            # a fresh connect on top of a broken one duplicates accounts.
-            raise ClientException(detail="Connection has no provider credentials to repair")
-        secret = decrypt_secret(connection.encrypted_secret)
     try:
-        token = await providers.get_provider(data.provider, secret=secret).create_connect_session(
-            client_user_id=str(current_user.id)
-        )
+        provider = await _bind_for_connect(data.provider, current_ledger, connection)
+        token = await provider.create_connect_session(client_user_id=str(current_user.id))
     except providers.ProviderError as error:
         raise _surface(error, data.provider) from error
     return ConnectSessionOut(provider=data.provider, token=token)
@@ -233,7 +290,7 @@ async def list_providers() -> list[ProviderCatalogEntry]:
         ProviderCatalogEntry(
             provider=provider,
             configured=providers.provider_configured(provider),
-            capabilities=list(providers.PROVIDER_CAPABILITIES[provider]),
+            capabilities=list(providers.PROVIDERS[provider].capabilities),
         )
         for provider in ConnectionProvider
     ]
@@ -247,15 +304,30 @@ async def create_connection(
     """Complete the connect: verify the token with the provider, then
     create the Connection and one Account per consented provider account,
     atomically. Currency falls back to the ledger's primary currency when
-    the provider omits it."""
+    the provider omits it. Balances the provider handed over in the same
+    breath become the accounts' first balance entries (M13 CP2): MX
+    aggregation finished before the widget answered, and its transaction
+    sync — the balance writer — waits for CP3; Plaid's connect-time
+    answer simply arrives a sync early. Either way the story is
+    "accounts appear with balances", not "wait for a sync"."""
     _require_provider(data.provider)
-    provider = providers.get_provider(data.provider)
+    if data.provider is ConnectionProvider.MX:
+        # The member guid is only verifiable under this ledger's own
+        # enrollment; no enrollment means no session was ever minted
+        # here, so the token cannot be ours — a client bug, 400.
+        enrollment = await _mx_enrollment(current_ledger)
+        if enrollment is None:
+            raise ClientException(detail="No MX enrollment for this ledger")
+        provider = providers.get_provider(data.provider, user_guid=enrollment.provider_user_id)
+    else:
+        provider = providers.get_provider(data.provider)
     try:
         result = await provider.complete_connect(data.token)
         provider_accounts = await provider.get_accounts()
     except providers.ProviderError as error:
         raise _surface(error, data.provider) from error
     fallback_currency = await ledger_primary_currency(current_ledger)
+    observed_at = utcnow()
     async with transaction():
         connection = await Connection.create(
             ledger=current_ledger,
@@ -271,7 +343,7 @@ async def create_connection(
             ),
         )
         for pa in provider_accounts:
-            await Account.create(
+            account = await Account.create(
                 ledger=current_ledger,
                 kind=pa.kind,
                 label=pa.name,
@@ -280,6 +352,15 @@ async def create_connection(
                 provider_account_id=pa.provider_account_id,
                 mask=pa.mask,
             )
+            if pa.balance_minor is not None:
+                await BalanceEntry.create(
+                    ledger=current_ledger,
+                    account=account,
+                    amount_minor=pa.balance_minor,
+                    currency=account.currency,
+                    as_of=observed_at,
+                    source=BalanceSource.PROVIDER,
+                )
     # Defer-after-commit: the initial sync is auto-enqueued — the story is
     # "accounts appear with balances", not "now call sync yourself" (PRD
     # #31); manual-only governs re-syncs.
@@ -332,9 +413,12 @@ async def refresh_connection(
 async def delete_connection(
     connection_id: FromPath[uuid.UUID], current_ledger: NamedDependency[Ledger]
 ) -> None:
-    """Disconnect severs, never destroys (CONTEXT.md): Plaid's side is
-    revoked, the connection row deleted, and the accounts live on with
-    ``connection`` nulled (SET NULL) — structurally manual from here on.
+    """Disconnect severs, never destroys (CONTEXT.md): the provider's
+    side is revoked (Plaid's Item removed, MX's member deleted), the
+    connection row deleted, and the accounts live on with ``connection``
+    nulled (SET NULL) — structurally manual from here on. The MX
+    enrollment persists: it is the ledger's container, reused by the
+    next connect (M13 CP2).
 
     Ordering is deliberate: revoke first, sever second. If revocation
     fails transiently the client retries (502, nothing severed); the
@@ -342,14 +426,27 @@ async def delete_connection(
     seat."""
     connection = await _get_connection(current_ledger, connection_id)
     _require_provider(connection.provider)
-    if connection.encrypted_secret is not None:
+    provider: providers.SyncProvider | None = None
+    if connection.provider is ConnectionProvider.MX:
+        enrollment = await _mx_enrollment(current_ledger)
+        # An MX connection without its enrollment is corrupted state, not
+        # a request problem: connects only ever ride an ensured enrollment.
+        if enrollment is None:
+            raise RuntimeError(f"MX connection {connection.id} has no enrollment")
+        provider = providers.get_provider(
+            connection.provider,
+            user_guid=enrollment.provider_user_id,
+            member_guid=connection.provider_item_id,
+        )
+    elif connection.encrypted_secret is not None:
         provider = providers.get_provider(
             connection.provider, secret=decrypt_secret(connection.encrypted_secret)
         )
+    if provider is not None:
         try:
             await provider.remove_item()
         except providers.ProviderError as error:
-            if error.code != "ITEM_NOT_FOUND":
+            if error.code not in providers.ALREADY_DISCONNECTED_CODES:
                 raise _surface(error, connection.provider) from error
     await Connection.where(lambda c, cid=connection.id: c.id == cid).delete()
     log.info(

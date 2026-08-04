@@ -13,10 +13,11 @@ import uuid
 
 import pytest
 from cryptography.fernet import Fernet
+from ferro import UniqueViolationError
 
 from pinch_backend import providers
 from pinch_backend.crypto import decrypt_secret
-from pinch_backend.models import Connection
+from pinch_backend.models import Connection, ConnectionProvider, Enrollment, Ledger
 
 CONNECTIONS = "/api/v1/connections"
 
@@ -494,3 +495,288 @@ async def test_repair_session_provider_must_match_the_connection(
     )
     assert response.status_code == 400
     assert response.json()["detail"] == "Provider does not match the connection"
+
+
+# --- MX connect end-to-end (M13 CP2, issue #89) ----------------------------
+
+
+class FakeMXProvider:
+    """Scriptable MX at the registry seam: guid bindings instead of a
+    token — ``materialize`` records the user/member guids each
+    materialization bound, the credential assertions MX's shape needs."""
+
+    def __init__(self) -> None:
+        self.accounts: list[providers.ProviderAccount] = []
+        self.users_created: list[str] = []
+        """ledger ids handed to create_user — laziness is its length."""
+        self.sessions_created: list[dict] = []
+        self.completed: list[dict] = []
+        self.removed: list[dict] = []
+        self.materialized: list[dict] = []
+        self.user_guid: str | None = None
+        self.member_guid: str | None = None
+
+    def materialize(
+        self, provider, *, user_guid: str | None = None, member_guid: str | None = None
+    ) -> "FakeMXProvider":
+        self.materialized.append(
+            {"provider": provider, "user_guid": user_guid, "member_guid": member_guid}
+        )
+        self.user_guid = user_guid
+        self.member_guid = member_guid
+        return self
+
+    async def create_user(self, *, ledger_id: str) -> str:
+        self.users_created.append(ledger_id)
+        return f"USR-{len(self.users_created)}"
+
+    async def create_connect_session(self, *, client_user_id: str) -> str:
+        self.sessions_created.append({"user_guid": self.user_guid, "member_guid": self.member_guid})
+        return "https://int-widgets.moneydesktop.com/md/connect/fake"
+
+    async def complete_connect(self, token: str) -> providers.ConnectResult:
+        self.completed.append({"token": token, "user_guid": self.user_guid})
+        self.member_guid = token
+        return providers.ConnectResult(
+            provider_item_id=token,
+            provider_institution_id="mxbank",
+            institution_name="MX Bank",
+            secret=None,
+        )
+
+    async def get_accounts(self) -> list[providers.ProviderAccount]:
+        return self.accounts
+
+    async def remove_item(self) -> None:
+        self.removed.append({"user_guid": self.user_guid, "member_guid": self.member_guid})
+
+
+@pytest.fixture
+def mx_provider(monkeypatch):
+    """An MX-configured instance over the faked registry. Deliberately NO
+    encryption key: MX must never need it (PRD #86 story 17)."""
+    from pinch_backend.settings import settings
+
+    monkeypatch.setattr(settings, "mx_client_id", "test-mx-client-id")
+    monkeypatch.setattr(settings, "mx_api_key", "test-mx-api-key")
+    fake = FakeMXProvider()
+    monkeypatch.setattr(providers, "get_provider", fake.materialize)
+    return fake
+
+
+def _script_mx_accounts(fake: FakeMXProvider) -> None:
+    fake.accounts = [
+        providers.ProviderAccount(
+            provider_account_id="ACT-checking",
+            name="MX Checking",
+            kind="depository",
+            currency="USD",
+            mask="4821",
+            balance_minor=150_025,
+        ),
+        providers.ProviderAccount(
+            provider_account_id="ACT-card",
+            name="MX Credit Card",
+            kind="credit",
+            currency="USD",
+            balance_minor=-10_050,  # the client already signed it per segment
+        ),
+    ]
+
+
+async def _connect_mx(client, fake: FakeMXProvider) -> dict:
+    _script_mx_accounts(fake)
+    session = await client.post(
+        f"{CONNECTIONS}/connect-session", json={"provider": "mx"}, headers=await _csrf(client)
+    )
+    assert session.status_code == 201, session.text
+    response = await client.post(
+        CONNECTIONS, json={"provider": "mx", "token": "MBR-9"}, headers=await _csrf(client)
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+async def test_mx_connect_session_creates_enrollment_lazily(client, db, mx_provider) -> None:
+    """The first MX connect session mints the provider-side user and the
+    Enrollment row (CONTEXT.md: Enrollment); the second reuses both —
+    exactly one container per (provider, ledger), one create_user ever."""
+    await _signup(client)
+    assert await Enrollment.where(lambda e: e.provider == ConnectionProvider.MX).all() == []
+
+    first = await client.post(
+        f"{CONNECTIONS}/connect-session", json={"provider": "mx"}, headers=await _csrf(client)
+    )
+    assert first.status_code == 201, first.text
+    assert first.json() == {
+        "provider": "mx",
+        "token": "https://int-widgets.moneydesktop.com/md/connect/fake",
+    }
+    rows = await Enrollment.where(lambda e: e.provider == ConnectionProvider.MX).all()
+    assert len(rows) == 1
+    assert rows[0].provider_user_id == "USR-1"
+    assert rows[0].ledger_id is not None
+    ledger_id = str(rows[0].ledger_id)
+    assert mx_provider.users_created == [ledger_id]  # the dashboard breadcrumb is the ledger
+    assert mx_provider.sessions_created[-1] == {"user_guid": "USR-1", "member_guid": None}
+
+    second = await client.post(
+        f"{CONNECTIONS}/connect-session", json={"provider": "mx"}, headers=await _csrf(client)
+    )
+    assert second.status_code == 201
+    assert mx_provider.users_created == [ledger_id]  # no second mint
+    assert len(await Enrollment.where(lambda e: e.provider == ConnectionProvider.MX).all()) == 1
+    assert mx_provider.sessions_created[-1] == {"user_guid": "USR-1", "member_guid": None}
+
+
+async def test_enrollment_is_unique_per_provider_and_ledger(client, db, mx_provider) -> None:
+    """The composite unique is the one-container law at the DB: a second
+    row for the same (provider, ledger) refuses."""
+    await _signup(client)
+    await client.post(
+        f"{CONNECTIONS}/connect-session", json={"provider": "mx"}, headers=await _csrf(client)
+    )
+    enrollment = await Enrollment.where(lambda e: e.provider == ConnectionProvider.MX).first()
+    assert enrollment is not None and enrollment.ledger_id is not None
+    ledger_id = enrollment.ledger_id
+    ledger = await Ledger.where(lambda led: led.id == ledger_id).first()
+    assert ledger is not None
+    with pytest.raises(UniqueViolationError):
+        await Enrollment.create(
+            ledger=ledger, provider=ConnectionProvider.MX, provider_user_id="USR-dupe"
+        )
+
+
+async def test_mx_connect_creates_connection_with_null_secret_and_balances(
+    client, db, mx_provider, run_jobs
+) -> None:
+    """The acceptance shape: verified member becomes the Connection
+    (provider_item_id = member guid, encrypted_secret honestly NULL —
+    ADR 0009), one Account per MX account, and balances land at connect —
+    aggregation finished before the widget answered, so there is nothing
+    to wait for. The auto-enqueued initial sync is CP3's quiet skip:
+    no crash, no recorded error, health untouched."""
+    await _signup(client)
+    body = await _connect_mx(client, mx_provider)
+    assert body["provider"] == "mx"
+    assert body["status"] == "active"
+    assert body["institution_name"] == "MX Bank"
+    assert body["provider_institution_id"] == "mxbank"
+    assert mx_provider.completed == [{"token": "MBR-9", "user_guid": "USR-1"}]
+
+    row = await Connection.where(lambda c: c.provider_item_id == "MBR-9").first()
+    assert row is not None
+    assert row.provider == ConnectionProvider.MX
+    assert row.encrypted_secret is None
+
+    labels = {a["label"]: a for a in body["accounts"]}
+    assert set(labels) == {"MX Checking", "MX Credit Card"}
+    assert labels["MX Checking"]["kind"] == "depository"
+    assert labels["MX Checking"]["mask"] == "4821"
+    assert labels["MX Credit Card"]["kind"] == "credit"
+
+    checking = labels["MX Checking"]["id"]
+    entries = (await client.get(f"/api/v1/accounts/{checking}/balance-entries")).json()["items"]
+    assert [e["amount_minor"] for e in entries] == [150_025]
+    assert entries[0]["source"] == "provider"
+    card = labels["MX Credit Card"]["id"]
+    entries = (await client.get(f"/api/v1/accounts/{card}/balance-entries")).json()["items"]
+    assert [e["amount_minor"] for e in entries] == [-10_050]
+
+    # The initial-sync enqueue stands (provider-neutral doorbell shape);
+    # running it is CP3's quiet skip — never an error on the connection.
+    await run_jobs()
+    health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
+    assert health["status"] == "active"
+    assert health["error_detail"] is None
+    assert health["last_synced_at"] is None  # nothing synced yet: CP3's story
+
+
+async def test_mx_complete_without_enrollment_is_400(client, db, mx_provider) -> None:
+    """A completion token with no enrollment cannot be ours — no session
+    was ever minted here. A client bug, never a provider call."""
+    await _signup(client)
+    response = await client.post(
+        CONNECTIONS, json={"provider": "mx", "token": "MBR-9"}, headers=await _csrf(client)
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "No MX enrollment for this ledger"
+    assert mx_provider.completed == []
+
+
+async def test_mx_complete_rejects_a_foreign_member_guid(client, db, mx_provider) -> None:
+    """The never-trust-a-client-guid verdict surfaces as the client's
+    fault: MEMBER_NOT_FOUND → 400, naming MX and the code only."""
+
+    async def refuse(token: str):
+        raise providers.ProviderError("MEMBER_NOT_FOUND", "member is not under this enrollment")
+
+    mx_provider.complete_connect = refuse
+    await _signup(client)
+    await client.post(
+        f"{CONNECTIONS}/connect-session", json={"provider": "mx"}, headers=await _csrf(client)
+    )
+    response = await client.post(
+        CONNECTIONS, json={"provider": "mx", "token": "MBR-stolen"}, headers=await _csrf(client)
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "MX request failed: MEMBER_NOT_FOUND"
+
+
+async def test_mx_repair_session_binds_the_member(client, db, mx_provider) -> None:
+    """MX repair needs no stored secret (there is none, honestly): the
+    binding is the enrollment user plus the connection's member guid —
+    the credential gate is per-provider, so the Plaid tokenless-row 400
+    never fires here."""
+    await _signup(client)
+    body = await _connect_mx(client, mx_provider)
+    response = await client.post(
+        f"{CONNECTIONS}/connect-session",
+        json={"provider": "mx", "connection_id": body["id"]},
+        headers=await _csrf(client),
+    )
+    assert response.status_code == 201, response.text
+    assert mx_provider.sessions_created[-1] == {"user_guid": "USR-1", "member_guid": "MBR-9"}
+
+
+async def test_mx_disconnect_deletes_the_member_and_severs(client, db, mx_provider) -> None:
+    """Disconnect keeps its contract (PRD #86 story 10): the MX-side
+    member is deleted under our enrollment, the connection severs, the
+    accounts live on as manual — and the enrollment persists, the
+    ledger's container for the next connect."""
+    await _signup(client)
+    body = await _connect_mx(client, mx_provider)
+    response = await client.delete(f"{CONNECTIONS}/{body['id']}", headers=await _csrf(client))
+    assert response.status_code == 204, response.text
+    assert mx_provider.removed == [{"user_guid": "USR-1", "member_guid": "MBR-9"}]
+    assert (await client.get(f"{CONNECTIONS}/{body['id']}")).status_code == 404
+    accounts = (await client.get("/api/v1/accounts")).json()["items"]
+    assert {a["label"] for a in accounts} == {"MX Checking", "MX Credit Card"}
+    assert all(a["manual"] is True for a in accounts)
+    assert len(await Enrollment.where(lambda e: e.provider == ConnectionProvider.MX).all()) == 1
+
+
+async def test_mx_disconnect_member_already_gone_still_severs(client, db, mx_provider) -> None:
+    """MEMBER_NOT_FOUND is Plaid's ITEM_NOT_FOUND analog: the provider
+    already not knowing the member is success, the sever proceeds."""
+
+    async def already_gone() -> None:
+        raise providers.ProviderError("MEMBER_NOT_FOUND", "member already gone")
+
+    mx_provider.remove_item = already_gone
+    await _signup(client)
+    body = await _connect_mx(client, mx_provider)
+    response = await client.delete(f"{CONNECTIONS}/{body['id']}", headers=await _csrf(client))
+    assert response.status_code == 204
+    assert (await client.get(f"{CONNECTIONS}/{body['id']}")).status_code == 404
+
+
+async def test_catalog_reports_mx_configured(client, db, mx_provider) -> None:
+    """The MX entry flips on its own settings (PRD #86 stories 11/16):
+    configured with its capability atoms, while keyless Plaid stays
+    honestly off."""
+    await _signup(client)
+    entries = {e["provider"]: e for e in (await client.get(f"{CONNECTIONS}/providers")).json()}
+    assert entries["mx"]["configured"] is True
+    assert entries["mx"]["capabilities"] == ["transactions", "balances"]
+    assert entries["plaid"]["configured"] is False

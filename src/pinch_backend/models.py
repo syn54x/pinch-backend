@@ -227,6 +227,7 @@ class Ledger(TimestampMixin, Model):
     members: Relation[list["LedgerMember"]] = BackRef()
     accounts: Relation[list["Account"]] = BackRef()
     connections: Relation[list["Connection"]] = BackRef()
+    enrollments: Relation[list["Enrollment"]] = BackRef()
     balance_entries: Relation[list["BalanceEntry"]] = BackRef()
     imports: Relation[list["Import"]] = BackRef()
     import_rows: Relation[list["ImportRow"]] = BackRef()
@@ -291,6 +292,32 @@ class LedgerMember(TimestampMixin, Model):
     ledger: Annotated[Ledger, ForeignKey(related_name="members", index=True)]
     ledger_id: uuid.UUID | None = None
     role: LedgerRole = LedgerRole.OWNER
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class Enrollment(TimestampMixin, Model):
+    """A ledger's registration with a sync provider (M13 CP2, issue #89;
+    CONTEXT.md: Enrollment): the provider-side user container some
+    providers require before any connection can exist — an MX user, a
+    future Finicity customer. At most one per (provider, ledger), created
+    lazily at the first connect session through that provider and reused
+    by every later connect; Plaid requires none and never writes a row.
+    Ledger-owned, not user-owned: connections are ledger data, and this
+    is their container."""
+
+    __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
+        ("provider", "ledger_id"),
+    )
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid7, primary_key=True)
+    ledger: Annotated[Ledger, ForeignKey(related_name="enrollments", index=True)]
+    ledger_id: uuid.UUID | None = None
+    provider: ConnectionProvider
+    provider_user_id: str
+    """The provider's id for the container — an MX user guid (USR-…).
+    Not a secret: useless without the instance credentials, so it rides
+    plainly like ``provider_item_id``."""
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 

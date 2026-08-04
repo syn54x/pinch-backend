@@ -114,6 +114,31 @@ def test_plaid_configured_with_key() -> None:
     assert s.plaid_environment == "sandbox"
 
 
+def test_mx_unconfigured_by_default() -> None:
+    s = Settings()
+    assert s.mx_configured is False
+    assert s.mx_environment == "sandbox"
+
+
+def test_mx_configured_needs_both_credentials() -> None:
+    """The pair is the credential (ADR 0009): half a pair is unconfigured,
+    never half-working."""
+    assert Settings(mx_client_id="cid").mx_configured is False
+    assert Settings(mx_api_key="key").mx_configured is False
+    assert Settings(mx_client_id="cid", mx_api_key="key").mx_configured is True
+
+
+def test_mx_needs_no_encryption_key() -> None:
+    """An MX-only instance skips Plaid-only machinery (PRD #86 story 17):
+    MX mints no per-connection secret, so the encryption-key requirement
+    stays Plaid's. No webhook-secret requirement yet either — that
+    validator lands with the receiver (CP4, #91)."""
+    s = Settings(mx_client_id="cid", mx_api_key="key")
+    assert s.mx_configured is True
+    assert s.secret_encryption_key == ""
+    assert s.mx_webhook_secret == ""
+
+
 def test_reconcile_interval_defaults_dev_friendly() -> None:
     """24h default so dev machines aren't ticking hourly for no one
     (PRD #77 story 17); production sets PINCH_RECONCILE_INTERVAL_HOURS=1."""

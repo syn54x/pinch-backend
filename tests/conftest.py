@@ -30,6 +30,15 @@ def pytest_configure() -> None:
     os.environ["PINCH_PLAID_SECRET"] = ""
     os.environ["PINCH_PLAID_WEBHOOK_URL"] = ""
     os.environ["PINCH_SECRET_ENCRYPTION_KEY"] = ""
+    # Same hermetic stance for MX (M13 CP2) — but setdefault, not
+    # assignment: this hook runs before settings.py's load_dotenv, so the
+    # developer's .env values aren't on os.environ yet (they stay out —
+    # dotenv leaves set keys alone), while a live-smoke opt-in exported
+    # from the shell IS here already and survives to gate
+    # test_mx_sandbox_live.
+    os.environ.setdefault("PINCH_MX_CLIENT_ID", "")
+    os.environ.setdefault("PINCH_MX_API_KEY", "")
+    os.environ.setdefault("PINCH_MX_WEBHOOK_SECRET", "")
     # Keyless Penny is the tested baseline (PRD M9), same stance as Plaid:
     # a developer's .env model strings and gateway key must never leak in.
     # Tests that want an agent monkeypatch settings and agent.override().

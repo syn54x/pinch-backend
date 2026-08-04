@@ -195,9 +195,12 @@ async def test_connect_auto_enqueues_initial_sync(client, db, fake_provider, run
 
     account_id = body["accounts"][0]["id"]
     entries = (await client.get(f"/api/v1/accounts/{account_id}/balance-entries")).json()["items"]
-    assert len(entries) == 1
-    assert entries[0]["amount_minor"] == 100_000
-    assert entries[0]["source"] == "provider"
+    # Two provider entries: the connect-time observation (M13 CP2 — the
+    # provider handed balances over with the accounts) and the initial
+    # sync's; same value, both honest reads.
+    assert len(entries) == 2
+    assert all(e["amount_minor"] == 100_000 for e in entries)
+    assert all(e["source"] == "provider" for e in entries)
 
     health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
     assert health["status"] == "active"

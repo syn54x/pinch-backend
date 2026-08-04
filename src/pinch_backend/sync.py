@@ -53,6 +53,7 @@ from pinch_backend.models import (
     BalanceEntry,
     BalanceSource,
     Connection,
+    ConnectionProvider,
     ConnectionStatus,
     CorrectionActor,
     Holding,
@@ -395,9 +396,20 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
     the backoff; on the final attempt the failure is recorded instead.
     A not-ready pull does neither: quiet wait (M11 CP1)."""
     connection = await Connection.where(lambda c: c.id == connection_id).first()
-    if connection is None or connection.encrypted_secret is None:
-        # Deleted between defer and run (disconnect), or never completed
-        # exchange — nothing to sync, nothing to record.
+    if connection is None:
+        # Deleted between defer and run (disconnect) — nothing to sync,
+        # nothing to record.
+        return SyncOutcome()
+    if connection.provider is ConnectionProvider.MX:
+        # CP3's seam (M13, #90): the MX transaction sync (watermark +
+        # re-list window, ADR 0009) isn't built yet. The connect flow
+        # still enqueues — the doorbell architecture is provider-neutral
+        # — so this skip must be quiet: no error recorded, the
+        # connection's health untouched, one log line.
+        log.info("sync.mx_pending_cp3", connection_id=str(connection.id))
+        return SyncOutcome()
+    if connection.encrypted_secret is None:
+        # Never completed exchange — nothing to sync, nothing to record.
         return SyncOutcome()
 
     provider = providers.get_provider(
@@ -640,8 +652,15 @@ async def run_investments_sync(connection_id: uuid.UUID) -> None:
     (CI finding); chained, banking latency and the flywheel are
     untouched. Never raises: the guarded phase records its own health."""
     connection = await Connection.where(lambda c: c.id == connection_id).first()
-    if connection is None or connection.encrypted_secret is None:
+    if connection is None:
         return  # deleted between defer and run — nothing to record
+    if connection.provider is ConnectionProvider.MX or connection.encrypted_secret is None:
+        # Explicitly per-provider (M13 CP2): MX never chains here — its
+        # capability atoms exclude holdings/activity, and its banking pass
+        # never sets investments_due. A secretless Plaid row never
+        # completed exchange. Either way: nothing to sync, nothing to
+        # record.
+        return
     provider = providers.get_provider(
         connection.provider, secret=decrypt_secret(connection.encrypted_secret)
     )

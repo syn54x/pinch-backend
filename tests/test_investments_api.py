@@ -679,7 +679,8 @@ async def test_missing_consent_flags_connection_and_banking_stands(
 
     brokerage = next(a for a in body["accounts"] if a["kind"] == "investment")
     entries = (await client.get(f"/api/v1/accounts/{brokerage['id']}/balance-entries")).json()
-    assert len(entries["items"]) == 1  # the banking phase committed
+    # Connect-time observation (M13 CP2) + the banking phase's commit.
+    assert len(entries["items"]) == 2
 
 
 async def test_consent_flag_clears_after_consented_resync(client, db, fake_provider, run_jobs):

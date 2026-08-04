@@ -133,6 +133,21 @@ class Settings(BaseSettings):
     whenever Plaid is configured (ADR 0008): there is no webhook-less mode,
     so a Plaid instance that can't be reached must fail at startup, not
     silently never sync. Dev and self-host use a tunnel (ngrok)."""
+    mx_client_id: str = ""
+    """Instance-level, like everything MX (ADR 0009): MX holds no
+    per-connection secret — the client_id/api_key pair plus guids is the
+    whole credential story. Absent ⇒ MX endpoints refuse cleanly while
+    every other provider stands (PRD #86 story 16)."""
+    mx_api_key: str = ""
+    mx_environment: Literal["sandbox", "production"] = "sandbox"
+    """Same code path, different base URL (MX calls its sandbox the
+    integration environment — int-api.mx.com); a typo fails at startup
+    like every other misconfiguration."""
+    mx_webhook_secret: str = ""
+    """The per-instance secret URL segment authenticating MX's unsigned
+    doorbells (/webhooks/mx/{secret}, ADR 0009). The receiver and its
+    required-when-configured startup validator land in CP4 (#91); the
+    setting leads them so operator config is additive."""
     reconcile_interval_hours: int = Field(default=24, ge=1)
     """The reconciler's tick (M11 CP3, ADR 0008): how often the periodic
     probe-then-decide pass runs. 24h default so dev machines aren't
@@ -147,6 +162,13 @@ class Settings(BaseSettings):
     @property
     def plaid_configured(self) -> bool:
         return bool(self.plaid_client_id and self.plaid_secret)
+
+    @property
+    def mx_configured(self) -> bool:
+        """MX needs no encryption key (PRD #86 story 17): the
+        ``secret_encryption_key`` requirement stays Plaid-only because MX
+        mints no per-connection secret to encrypt."""
+        return bool(self.mx_client_id and self.mx_api_key)
 
     @model_validator(mode="after")
     def _resolve_secret_key(self) -> "Settings":
