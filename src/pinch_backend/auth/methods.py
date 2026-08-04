@@ -7,8 +7,6 @@ verified ``User`` (or None) out. All methods terminate in the same
 password.
 """
 
-import functools
-import secrets
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -17,7 +15,12 @@ if TYPE_CHECKING:
 
 from pydantic import BaseModel, SecretStr
 
-from pinch_backend.auth.passwords import hash_password, needs_rehash, verify_password
+from pinch_backend.auth.passwords import (
+    decoy_hash,
+    hash_password,
+    needs_rehash,
+    verify_password,
+)
 from pinch_backend.models import User
 
 
@@ -47,15 +50,6 @@ class PasswordCredentials(BaseModel):
     """SecretStr so a stray repr/log of the credentials never shows it."""
 
 
-@functools.cache
-def _decoy_hash() -> str:
-    """A well-formed hash of an unknowable password, verified when the user
-    doesn't exist (or has no password) so both failure paths cost one argon2
-    verification. Cached: the cost must match real verifies, not include
-    hashing setup."""
-    return hash_password(secrets.token_urlsafe(32))
-
-
 class PasswordMethod(LoginMethod):
     name = "password"
 
@@ -65,7 +59,7 @@ class PasswordMethod(LoginMethod):
         user = await User.where(lambda u: u.email == email).first()
 
         if user is None or user.password_hash is None:
-            verify_password(_decoy_hash(), creds.password.get_secret_value())
+            verify_password(decoy_hash(), creds.password.get_secret_value())
             return None
         if not verify_password(user.password_hash, creds.password.get_secret_value()):
             return None

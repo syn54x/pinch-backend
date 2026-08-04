@@ -10,7 +10,7 @@ to remove one.
 import uuid
 from datetime import datetime
 
-from ferro import UniqueViolationError
+from ferro import UniqueViolationError, transaction
 from litestar import Request, Response, Router, delete, get, patch, post
 from litestar.di import NamedDependency
 from litestar.exceptions import (
@@ -39,7 +39,7 @@ from pinch_backend.api.pagination import (
 from pinch_backend.auth import flows, methods
 from pinch_backend.auth.breach import password_is_breached
 from pinch_backend.auth.models import PatScope, PersonalAccessToken, Session
-from pinch_backend.auth.passwords import hash_password
+from pinch_backend.auth.passwords import decoy_hash, hash_password, verify_password
 from pinch_backend.auth.pats import issue_pat
 from pinch_backend.auth.rate_limit import require_within_limit
 from pinch_backend.auth.sessions import (
@@ -62,8 +62,9 @@ class SignupRequest(BaseModel):
     password: SecretStr = Field(min_length=8)
     """Breach corpus checking (HIBP) is the real gate and lands in CP4;
     a length floor is the NIST-baseline backstop, not the defense."""
-    display_name: str | None = None
-    """Defaults to the email's local part."""
+    display_name: str | None = Field(default=None, min_length=1, max_length=100)
+    """Defaults to the email's local part. Same bounds as PATCH /me — signup
+    must not mint a display name the profile editor could never produce."""
     primary_currency: str = Field(default="USD", pattern=r"^[A-Z]{3}$")
     """Chosen at signup (CONTEXT.md: Money)."""
 
@@ -94,10 +95,14 @@ class MePatchIn(BaseModel):
 
     model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
 
-    primary_currency: str = Field(pattern=r"^[A-Z]{3}$")
+    primary_currency: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
     """ISO 4217 alpha code, same shape rule as signup — unrestricted in v0
     (reports re-express at current rates), so any three uppercase letters
-    pass and anything else is a 400."""
+    pass and anything else is a 400. Not clearable: null means leave
+    unchanged (the categories-name convention)."""
+    display_name: str | None = Field(default=None, min_length=1, max_length=100)
+    """F7 enabler (issue #83). Same bounds as every user-facing name field;
+    not clearable — null means leave unchanged, and empty is a 400."""
 
 
 class SessionOut(BaseModel):
@@ -154,6 +159,17 @@ class PasswordResetRequestIn(BaseModel):
 class PasswordResetConfirmIn(BaseModel):
     token: SecretStr
     password: SecretStr = Field(min_length=8)
+
+
+class PasswordChangeIn(BaseModel):
+    """In-session rotation (F7 enabler #84): possession of the current
+    password is the proof, the session cookie is the fence."""
+
+    model_config = ConfigDict(use_attribute_docstrings=True)
+
+    current_password: SecretStr
+    new_password: SecretStr = Field(min_length=8)
+    """Same NIST-baseline floor as signup; the breach corpus is the real gate."""
 
 
 def _user_out(user: User) -> UserOut:
@@ -250,16 +266,20 @@ async def me(current_user: NamedDependency[User]) -> UserOut:
 
 @patch("/me")
 async def update_me(data: MePatchIn, current_user: NamedDependency[User]) -> UserOut:
-    """Onboarding's currency step (F3 enabler #42): the value pre-fills from
-    ``me`` and this writes it back. Credential-blind like ``me`` itself — a
-    write-scoped PAT may update the profile; only credential management is
-    cookie-fenced."""
-    current_user.primary_currency = data.primary_currency
+    """Onboarding's currency step (F3 enabler #42), joined by display name
+    for the Settings Profile pane (F7 enabler #83). Credential-blind like
+    ``me`` itself — a write-scoped PAT may update the profile; only
+    credential management is cookie-fenced."""
+    if data.primary_currency is not None:
+        current_user.primary_currency = data.primary_currency
+    if data.display_name is not None:
+        current_user.display_name = data.display_name
     await current_user.save()
     log.info(
         "auth.me.updated",
         user_id=str(current_user.id),
         primary_currency=data.primary_currency,
+        display_name=data.display_name,
     )
     return _user_out(current_user)
 
@@ -458,6 +478,58 @@ async def confirm_password_reset(data: PasswordResetConfirmIn, request: Request)
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="Invalid or expired token")
 
 
+@post("/password/change", status_code=HTTP_204_NO_CONTENT)
+async def change_password(
+    data: PasswordChangeIn, current_session: NamedDependency[Session], request: Request
+) -> Response[None]:
+    """In-session rotation (F7 enabler #84). Cookie-session only, via
+    ``current_session`` — a stolen PAT must never rotate the credential it
+    rides on. Success revokes every pre-change session — including the
+    acting row, whose secret a thief may hold a copy of — and consumes
+    outstanding reset tokens, mirroring the reset flow's stance. The user
+    never notices: a fresh session rides out on the response cookie."""
+    user = await User.get(current_session.user_id)
+    await require_within_limit(
+        f"password-change:user:{user.id}",
+        limit=settings.auth_rate_limit_per_email,
+        window=settings.auth_rate_limit_window,
+    )
+    new_password = data.new_password.get_secret_value()
+    if await password_is_breached(new_password):
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="This password appears in known data breaches; choose a different one",
+        )
+    current = data.current_password.get_secret_value()
+    if user.password_hash is None:
+        # A passwordless account (non-password login method) has no current
+        # password to prove; the decoy keeps its 401 the same price.
+        verify_password(decoy_hash(), current)
+        password_ok = False
+    else:
+        password_ok = verify_password(user.password_hash, current)
+    if not password_ok:
+        # The login convention: 401 after the verify runs, never a
+        # distinguishable 400.
+        log.info("auth.password_change.failed", user_id=str(user.id))
+        raise NotAuthorizedException(detail="Invalid credentials")
+    now = utcnow()
+    user_id = user.id
+    async with transaction():
+        user.password_hash = hash_password(new_password)
+        await user.save()
+        await flows.consume_outstanding_reset_tokens(user_id, now)
+        revoked = await Session.where(lambda s: s.user_id == user_id).delete()
+        session, secret = await issue_session(user, client_hint=request.headers.get("user-agent"))
+    log.info(
+        "auth.password_change.completed",
+        user_id=str(user.id),
+        session_id=str(session.id),
+        sessions_revoked=revoked,
+    )
+    return Response(None, cookies=[session_cookie(secret)])
+
+
 auth_router = Router(
     path="/api/v1/auth",
     route_handlers=[
@@ -475,5 +547,6 @@ auth_router = Router(
         confirm_email_verification,
         request_password_reset,
         confirm_password_reset,
+        change_password,
     ],
 )

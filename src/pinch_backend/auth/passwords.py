@@ -7,6 +7,9 @@ choice for interactive logins. Raising them later is safe: ``needs_rehash``
 flags old hashes and login re-hashes on the next successful verify.
 """
 
+import functools
+import secrets
+
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 
@@ -40,3 +43,12 @@ def verify_password(stored_hash: str, password: str) -> bool:
 def needs_rehash(stored_hash: str) -> bool:
     """True when the hash predates the currently pinned parameters."""
     return _hasher.check_needs_rehash(stored_hash)
+
+
+@functools.cache
+def decoy_hash() -> str:
+    """A well-formed hash of an unknowable password, verified when there is
+    no real hash to check (unknown user, passwordless account) so both
+    failure paths cost one argon2 verification. Cached: the cost must match
+    real verifies, not include hashing setup."""
+    return hash_password(secrets.token_urlsafe(32))

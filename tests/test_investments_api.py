@@ -123,6 +123,18 @@ class FakeInvestmentsProvider:
         self.holdings_calls = 0
         self.cursor_serial = 0
 
+    async def get_item_state(self, access_token: str) -> providers.ItemState:
+        """The midnight-UTC reconcile cron (M11) can fire inside any test's
+        worker window. Answer with the registered URL and no update stamps
+        so the verdict is "quiet" — a no-op pass instead of an
+        AttributeError'd job failing an unrelated test's assertions."""
+        from pinch_backend.settings import settings
+
+        return providers.ItemState(webhook=settings.plaid_webhook_url)
+
+    async def update_webhook(self, access_token: str, url: str) -> None:
+        return None
+
     async def create_link_token(self, *, client_user_id: str, access_token: str | None = None):
         return "link-fake"
 
