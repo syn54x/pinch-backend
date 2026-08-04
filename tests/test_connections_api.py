@@ -517,7 +517,12 @@ class FakeMXProvider:
         self.member_guid: str | None = None
 
     def materialize(
-        self, provider, *, user_guid: str | None = None, member_guid: str | None = None
+        self,
+        provider,
+        *,
+        user_guid: str | None = None,
+        member_guid: str | None = None,
+        stored_window_ids=None,
     ) -> "FakeMXProvider":
         self.materialized.append(
             {"provider": provider, "user_guid": user_guid, "member_guid": member_guid}
@@ -546,6 +551,15 @@ class FakeMXProvider:
 
     async def get_accounts(self) -> list[providers.ProviderAccount]:
         return self.accounts
+
+    async def sync_transactions(self, cursor: str | None) -> providers.SyncBatch:
+        """The auto-enqueued initial sync is real since CP3 (#90): an
+        empty batch with a date-watermark cursor keeps these tests about
+        the connect surface (test_mx_sync_api owns the sync engine)."""
+        return providers.SyncBatch(added=[], modified=[], removed=[], next_cursor="2026-08-04")
+
+    async def get_institution(self) -> providers.ProviderInstitution:
+        return providers.ProviderInstitution(provider_institution_id="mxbank", name="MX Bank")
 
     async def remove_item(self) -> None:
         self.removed.append({"user_guid": self.user_guid, "member_guid": self.member_guid})
@@ -654,8 +668,8 @@ async def test_mx_connect_creates_connection_with_null_secret_and_balances(
     (provider_item_id = member guid, encrypted_secret honestly NULL —
     ADR 0009), one Account per MX account, and balances land at connect —
     aggregation finished before the widget answered, so there is nothing
-    to wait for. The auto-enqueued initial sync is CP3's quiet skip:
-    no crash, no recorded error, health untouched."""
+    to wait for. The auto-enqueued initial sync is real since CP3 (#90):
+    it completes secretless and the health surface reads synced."""
     await _signup(client)
     body = await _connect_mx(client, mx_provider)
     assert body["provider"] == "mx"
@@ -684,12 +698,12 @@ async def test_mx_connect_creates_connection_with_null_secret_and_balances(
     assert [e["amount_minor"] for e in entries] == [-10_050]
 
     # The initial-sync enqueue stands (provider-neutral doorbell shape);
-    # running it is CP3's quiet skip — never an error on the connection.
+    # since CP3 it runs for real — secretless, and the health reflects it.
     await run_jobs()
     health = (await client.get(f"{CONNECTIONS}/{body['id']}")).json()
     assert health["status"] == "active"
     assert health["error_detail"] is None
-    assert health["last_synced_at"] is None  # nothing synced yet: CP3's story
+    assert health["last_synced_at"] is not None  # the initial sync completed
 
 
 async def test_mx_complete_without_enrollment_is_400(client, db, mx_provider) -> None:

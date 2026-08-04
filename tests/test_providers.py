@@ -12,11 +12,20 @@ connect pair is the only pre-credential surface.
 
 import base64
 import json
+from datetime import UTC, date, datetime, timedelta
 
 import httpx
 import pytest
 
-from pinch_backend.providers import BACKFILL_DAYS, MXProvider, PlaidProvider, ProviderError
+from pinch_backend.providers import (
+    BACKFILL_DAYS,
+    MX_INITIAL_WINDOW_DAYS,
+    MX_REMOVAL_WINDOW_DAYS,
+    MX_SYNC_LOOKAHEAD_DAYS,
+    MXProvider,
+    PlaidProvider,
+    ProviderError,
+)
 
 
 def _provider(handler, access_token: str | None = None) -> PlaidProvider:
@@ -1339,12 +1348,298 @@ async def test_mx_transport_fault_becomes_provider_error() -> None:
     assert excinfo.value.code == "NETWORK_ERROR"
 
 
-async def test_mx_sync_transactions_is_cp3_seam() -> None:
-    """The engine skips MX before materializing (sync.mx_pending_cp3);
-    reaching this anyway is a developer's loud signpost to #90."""
+# --- MX transaction sync: watermark + window-diff (M13 CP3, issue #90) -----
+# Wire shapes from the CP0 spike plus the CP3 live probe (docs/research/
+# mx-platform-api.md): decimal amounts, account-relative CREDIT/DEBIT,
+# day-granularity updated_at filters with mandatory inclusive bounds.
 
-    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
-        raise AssertionError("must not touch the wire")
 
-    with pytest.raises(NotImplementedError, match="CP3"):
-        await _mx(handler, user_guid="USR-1", member_guid="MBR-9").sync_transactions(None)
+def _mx_txn(
+    guid: str,
+    amount: float | str,
+    *,
+    account_guid: str = "ACT-checking",
+    type: str = "DEBIT",  # MX's own field name
+    status: str = "POSTED",
+    day: str = "2026-08-01",
+    updated: str = "2026-08-04T21:57:11Z",
+    description: str = "Ross",
+    currency: str = "USD",
+) -> dict:
+    """One captured-shape MX transaction row (the fields the seam reads)."""
+    return {
+        "guid": guid,
+        "account_guid": account_guid,
+        "amount": amount,
+        "type": type,
+        "is_expense": type == "DEBIT",
+        "status": status,
+        "date": day,
+        "updated_at": updated,
+        "description": description,
+        "currency_code": currency,
+    }
+
+
+class _MXSyncHandler:
+    """Scripts the sync path's three reads — the member-status probe, the
+    updated_at-filtered listing, and the date-filtered window re-list —
+    and records every request for the read-only/param assertions."""
+
+    def __init__(
+        self,
+        *,
+        status: str = "CONNECTED",
+        by_update: list[dict] | None = None,
+        by_date: list[dict] | None = None,
+    ) -> None:
+        self.status = status
+        self.by_update = by_update or []
+        self.by_date = by_date or []
+        self.requests: list[httpx.Request] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if request.url.path == "/users/USR-1/members/MBR-9/status":
+            return httpx.Response(
+                200,
+                json={"member": {"connection_status": self.status, "is_being_aggregated": False}},
+            )
+        assert request.url.path == "/users/USR-1/members/MBR-9/transactions"
+        params = dict(request.url.params)
+        rows = self.by_update if "from_updated_at" in params else self.by_date
+        return httpx.Response(
+            200,
+            json={
+                "transactions": rows,
+                "pagination": {"current_page": int(params["page"]), "total_pages": 1},
+            },
+        )
+
+
+def _mx_sync(
+    handler, stored: set[str] | None = None, calls: list[date] | None = None
+) -> MXProvider:
+    async def stored_window_ids(window_start: date) -> set[str]:
+        if calls is not None:
+            calls.append(window_start)
+        return stored or set()
+
+    return MXProvider(
+        client_id="cid",
+        api_key="key",
+        environment="sandbox",
+        user_guid="USR-1",
+        member_guid="MBR-9",
+        stored_window_ids=stored_window_ids,
+        transport=httpx.MockTransport(handler),
+    )
+
+
+async def test_mx_initial_sync_is_one_wide_posted_only_listing() -> None:
+    """No cursor is the initial backfill: one member-scoped date-window
+    listing (explicit bounds — MX's filters ride in mandatory pairs and
+    the endpoint's implicit default would truncate), PENDING filtered at
+    the seam, everything landing in ``modified`` (the engine's upsert
+    stance — dedupe by guid is what makes replay safe by construction),
+    and the whole pass is GET-only: read-sync never touches MX's
+    throttled aggregate endpoint (PRD #86: Refresh means re-read)."""
+    today = datetime.now(UTC).date()
+    handler = _MXSyncHandler(
+        by_date=[
+            _mx_txn("TRN-1", 72.33, description="Ross"),
+            _mx_txn("TRN-2", "4.62", type="CREDIT", description="Transfer"),
+            _mx_txn("TRN-3", 8.90, status="PENDING", description="Pending card hold"),
+        ]
+    )
+    batch = await _mx_sync(handler).sync_transactions(None)
+
+    listing_params = [
+        dict(r.url.params) for r in handler.requests if r.url.path.endswith("/transactions")
+    ]
+    assert len(listing_params) == 1  # the backfill window already covers the re-list window
+    assert (
+        listing_params[0]["from_date"]
+        == (today - timedelta(days=MX_INITIAL_WINDOW_DAYS)).isoformat()
+    )
+    assert (
+        listing_params[0]["to_date"] == (today + timedelta(days=MX_SYNC_LOOKAHEAD_DAYS)).isoformat()
+    )
+    assert listing_params[0]["records_per_page"] == "1000"
+    assert all(r.method == "GET" for r in handler.requests)
+    assert not any("aggregate" in r.url.path for r in handler.requests)
+
+    assert batch.added == []  # re-derivation can't tell add from modify: upsert stance
+    assert [t.provider_transaction_id for t in batch.modified] == ["TRN-1", "TRN-2"]
+    assert all(t.pending is False for t in batch.modified)  # posted-only v1
+    assert batch.modified[0].amount_minor == -7233  # DEBIT: money out
+    assert batch.modified[1].amount_minor == 462  # CREDIT: money in (string decimal)
+    assert batch.modified[0].date == date.fromisoformat("2026-08-01")
+    assert batch.modified[0].description == "Ross"
+    assert batch.modified[0].provider_account_id == "ACT-checking"
+    assert batch.modified[0].currency == "USD"
+
+
+async def test_mx_credit_debit_signs_are_account_relative_on_every_segment() -> None:
+    """The spike's amendment, empirically re-verified for CP3 across all
+    MX Bank segments: CREDIT is money into the account and DEBIT money
+    out, on debt segments too — a mortgage payment arrives CREDIT on the
+    MORTGAGE account and lands positive (Pinch's transfer convention:
+    money into the loan), a late fee DEBIT lands negative. The trap this
+    test guards is borrowing the balance seam's debt-kind sign flip:
+    balances flip, transactions never do. JPY proves the conversion stays
+    exponent-aware."""
+    handler = _MXSyncHandler(
+        by_date=[
+            _mx_txn(
+                "TRN-pay", 1500.25, account_guid="ACT-mortgage", type="CREDIT",
+                description="Mortgage Payment",
+            ),
+            _mx_txn(
+                "TRN-fee", 17.85, account_guid="ACT-mortgage", type="DEBIT",
+                description="Late Fee",
+            ),
+            _mx_txn(
+                "TRN-cardpay", 20.71, account_guid="ACT-card", type="CREDIT",
+                description="Credit Card Payment",
+            ),
+            _mx_txn("TRN-buy", 69.03, account_guid="ACT-card", type="DEBIT", description="Gap"),
+            _mx_txn(
+                "TRN-yen", 5000, account_guid="ACT-yen", type="DEBIT",
+                description="Ramen", currency="JPY",
+            ),
+        ]
+    )  # fmt: skip
+    batch = await _mx_sync(handler).sync_transactions(None)
+    amounts = {t.provider_transaction_id: t.amount_minor for t in batch.modified}
+    assert amounts == {
+        "TRN-pay": 150_025,  # CREDIT on the debt account: money in, positive
+        "TRN-fee": -1785,  # DEBIT on the debt account: money out, negative
+        "TRN-cardpay": 2071,
+        "TRN-buy": -6903,
+        "TRN-yen": -5000,  # exponent 0: never *100
+    }
+
+
+async def test_mx_incremental_sync_rides_the_inclusive_watermark_pair() -> None:
+    """A persisted cursor is a date watermark (CP0 spike: the filters are
+    day-granularity only — unix timestamps rejected — and both bounds are
+    mandatory together, both inclusive). Inclusive means the watermark
+    day replays every sync: the overlap row lands in ``modified`` again,
+    priced in because ingestion dedupes by guid — replay-safe by
+    construction. The cursor advances to the max updated_at date MX
+    itself reported, never past it."""
+    handler = _MXSyncHandler(
+        by_update=[
+            _mx_txn("TRN-overlap", 10.00, updated="2026-08-01T09:00:00Z"),
+            _mx_txn("TRN-new", 20.00, updated="2026-08-03T12:00:00Z"),
+        ]
+    )
+    batch = await _mx_sync(handler).sync_transactions("2026-08-01")
+
+    today = datetime.now(UTC).date()
+    listing_params = [
+        dict(r.url.params) for r in handler.requests if r.url.path.endswith("/transactions")
+    ]
+    assert len(listing_params) == 2  # the watermark listing + the window re-list
+    assert listing_params[0]["from_updated_at"] == "2026-08-01"
+    assert (
+        listing_params[0]["to_updated_at"]
+        == (today + timedelta(days=MX_SYNC_LOOKAHEAD_DAYS)).isoformat()
+    )
+    assert (
+        listing_params[1]["from_date"]
+        == (today - timedelta(days=MX_REMOVAL_WINDOW_DAYS)).isoformat()
+    )
+    assert "from_updated_at" not in listing_params[1]
+
+    assert {t.provider_transaction_id for t in batch.modified} == {"TRN-overlap", "TRN-new"}
+    assert batch.next_cursor == "2026-08-03"  # MX's clock, not ours
+
+
+async def test_mx_watermark_never_regresses_and_starts_a_day_early() -> None:
+    """Monotonic against the old watermark (a quiet day must not rewind
+    it), and a member with nothing to observe starts at yesterday — one
+    day of overlap as provider-clock-skew insurance."""
+    quiet = _MXSyncHandler(by_update=[])
+    batch = await _mx_sync(quiet).sync_transactions("2026-08-01")
+    assert batch.next_cursor == "2026-08-01"
+
+    fresh = _MXSyncHandler(by_date=[])
+    batch = await _mx_sync(fresh).sync_transactions(None)
+    yesterday = datetime.now(UTC).date() - timedelta(days=1)
+    assert batch.next_cursor == yesterday.isoformat()
+    assert batch.modified == [] and batch.removed == []
+
+
+async def test_mx_removed_is_the_window_diff_against_stored_ids() -> None:
+    """Deletions manifest only as absence (CP0 spike: no tombstone field
+    exists anywhere in the shape), so ``removed`` is stored-minus-present
+    over the rolling window — and doorbell payloads are never read (ADR
+    0008/0009: MX's webhook-only deletion signal is rejected as a
+    correctness dependency). Ids still listed stay; ids we hold that MX
+    no longer lists inside the window retract."""
+    calls: list[date] = []
+    handler = _MXSyncHandler(
+        by_update=[],
+        by_date=[_mx_txn("TRN-keep", 5.00), _mx_txn("TRN-also", 6.00)],
+    )
+    provider = _mx_sync(handler, stored={"TRN-keep", "TRN-also", "TRN-gone"}, calls=calls)
+    batch = await provider.sync_transactions("2026-08-01")
+
+    assert batch.removed == ["TRN-gone"]
+    assert calls == [datetime.now(UTC).date() - timedelta(days=MX_REMOVAL_WINDOW_DAYS)]
+
+
+async def test_mx_sync_drains_listing_pagination() -> None:
+    """A member with more rows than one page never truncates."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/status"):
+            return httpx.Response(200, json={"member": {"connection_status": "CONNECTED"}})
+        page = int(request.url.params["page"])
+        return httpx.Response(
+            200,
+            json={
+                "transactions": [_mx_txn(f"TRN-{page}", 1.00, day="2026-08-02")],
+                "pagination": {"current_page": page, "total_pages": 2},
+            },
+        )
+
+    batch = await _mx_sync(handler).sync_transactions(None)
+    assert [t.provider_transaction_id for t in batch.modified] == ["TRN-1", "TRN-2"]
+
+
+@pytest.mark.parametrize("status", ["CHALLENGED", "DENIED", "LOCKED", "FAILED"])
+async def test_mx_sync_raises_the_member_status_before_listing(status: str) -> None:
+    """The status probe comes first: a dead or broken login raises with
+    the member status as the code — the engine's one error contract maps
+    reauth statuses to reauth_required and lets the FAILED family ride
+    the transient ladder — and no data listing ever follows."""
+    handler = _MXSyncHandler(status=status, by_date=[_mx_txn("TRN-1", 1.00)])
+    with pytest.raises(ProviderError) as excinfo:
+        await _mx_sync(handler).sync_transactions(None)
+    assert excinfo.value.code == status
+    assert not any(r.url.path.endswith("/transactions") for r in handler.requests)
+
+
+@pytest.mark.parametrize("status", ["CONNECTED", "DELAYED", "DEGRADED"])
+async def test_mx_sync_proceeds_on_benign_statuses(status: str) -> None:
+    """Statuses outside both broken families proceed: the data MX holds
+    is readable even mid-trouble, and a successful sync heals."""
+    handler = _MXSyncHandler(status=status, by_date=[_mx_txn("TRN-1", 1.00)])
+    batch = await _mx_sync(handler).sync_transactions(None)
+    assert [t.provider_transaction_id for t in batch.modified] == ["TRN-1"]
+
+
+async def test_mx_unreadable_cursor_self_heals_into_a_backfill() -> None:
+    """A cursor that isn't a date (however it got there) is treated as
+    the initial backfill — replay-safe by construction, so the remedy is
+    free — instead of wedging the sync."""
+    handler = _MXSyncHandler(by_date=[_mx_txn("TRN-1", 1.00)])
+    batch = await _mx_sync(handler).sync_transactions("plaid-shaped-cursor-blob")
+    listing_params = [
+        dict(r.url.params) for r in handler.requests if r.url.path.endswith("/transactions")
+    ]
+    assert "from_date" in listing_params[0]
+    assert [t.provider_transaction_id for t in batch.modified] == ["TRN-1"]

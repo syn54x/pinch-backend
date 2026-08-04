@@ -38,7 +38,7 @@ and logged; the cursor still advances. Adopting such an account later
 """
 
 import uuid  # runtime import: pydantic resolves the dataclass annotation at runtime
-from datetime import timedelta
+from datetime import date, timedelta
 
 from ferro import transaction
 from pydantic import ConfigDict
@@ -56,6 +56,7 @@ from pinch_backend.models import (
     ConnectionProvider,
     ConnectionStatus,
     CorrectionActor,
+    Enrollment,
     Holding,
     InvestmentActivity,
     InvestmentActivityType,
@@ -82,9 +83,16 @@ AUTH_ERROR_CODES = {
     "PENDING_EXPIRATION",
     "PENDING_DISCONNECT",
     "INVALID_ACCESS_TOKEN",
-}
-"""Plaid codes that mean the login itself is dead — repair territory
-(update-mode link token), not retry territory."""
+} | providers.MX_REAUTH_STATUSES
+"""Codes that mean the login itself is dead — repair territory (Plaid:
+update-mode link token; MX: the reconnect-mode widget), not retry
+territory. Plaid speaks error codes; MX speaks member connection
+statuses (CHALLENGED/DENIED/LOCKED/…, raised as codes by its sync-path
+status probe, M13 CP3) — disjoint vocabularies, one verdict, and only
+ever the existing three connection statuses (PRD #86). MX's FAILED
+family is deliberately absent: those ride the transient ladder below,
+because MX self-aggregates nightly and a later attempt may find the
+member healed."""
 
 CONSENT_ERROR_CODES = {"ADDITIONAL_CONSENT_REQUIRED"}
 """The Plaid code meaning the Item lacks investments consent (M10 CP2) —
@@ -390,6 +398,42 @@ async def _sync_investments(
     )
 
 
+async def _materialize_mx_for_sync(connection: Connection) -> "providers.SyncProvider":
+    """The MX sync binding (M13 CP3, #90): the enrollment's user guid plus
+    the connection's member guid — no per-connection secret exists (ADR
+    0009) — plus the removed-derivation's memory: a callable answering
+    which provider transaction ids Pinch holds inside the re-list window,
+    so the client can diff presence without ever seeing the database."""
+    ledger_id = connection.ledger_id
+    assert ledger_id is not None
+    enrollment = await Enrollment.where(
+        lambda e, lid=ledger_id: (e.ledger_id == lid) & (e.provider == ConnectionProvider.MX)
+    ).first()
+    if enrollment is None:
+        # Corrupted state, not a request or provider problem: MX connects
+        # only ever ride an ensured enrollment (the connections API's
+        # stance) — fail the job loudly instead of inventing a status.
+        raise RuntimeError(f"MX connection {connection.id} has no enrollment")
+    cid = connection.id
+
+    async def stored_window_ids(window_start: date) -> set[str]:
+        accounts = await Account.where(lambda a, c=cid: a.connection_id == c).all()
+        account_ids = [a.id for a in accounts]
+        if not account_ids:
+            return set()
+        rows = await Transaction.where(
+            lambda t, ids=account_ids, ws=window_start: t.account_id.in_(ids) & (t.date >= ws)
+        ).all()
+        return {r.provider_transaction_id for r in rows if r.provider_transaction_id is not None}
+
+    return providers.get_provider(
+        ConnectionProvider.MX,
+        user_guid=enrollment.provider_user_id,
+        member_guid=connection.provider_item_id,
+        stored_window_ids=stored_window_ids,
+    )
+
+
 async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutcome:
     """One sync pass. Raises ``providers.ProviderError`` on a genuine
     transient when retries remain — the job runner's retry strategy is
@@ -400,21 +444,19 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
         # Deleted between defer and run (disconnect) — nothing to sync,
         # nothing to record.
         return SyncOutcome()
+    # Investments chain only where the provider delivers them: MX's
+    # capability atoms exclude holdings/activity (PRD #86), so its banking
+    # pass never sets investments_due — the chained job is Plaid's.
+    chains_investments = connection.provider is not ConnectionProvider.MX
     if connection.provider is ConnectionProvider.MX:
-        # CP3's seam (M13, #90): the MX transaction sync (watermark +
-        # re-list window, ADR 0009) isn't built yet. The connect flow
-        # still enqueues — the doorbell architecture is provider-neutral
-        # — so this skip must be quiet: no error recorded, the
-        # connection's health untouched, one log line.
-        log.info("sync.mx_pending_cp3", connection_id=str(connection.id))
-        return SyncOutcome()
-    if connection.encrypted_secret is None:
-        # Never completed exchange — nothing to sync, nothing to record.
-        return SyncOutcome()
-
-    provider = providers.get_provider(
-        connection.provider, secret=decrypt_secret(connection.encrypted_secret)
-    )
+        provider = await _materialize_mx_for_sync(connection)
+    else:
+        if connection.encrypted_secret is None:
+            # Never completed exchange — nothing to sync, nothing to record.
+            return SyncOutcome()
+        provider = providers.get_provider(
+            connection.provider, secret=decrypt_secret(connection.encrypted_secret)
+        )
     try:
         provider_accounts = await provider.get_accounts()
         batch = await provider.sync_transactions(connection.sync_cursor)
@@ -448,7 +490,7 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
             # banking product must not hold investments hostage, so the
             # ladder's end still chains the phase. Once per ladder, at
             # exhaustion, not per retry — off ``investments_due``.
-            return SyncOutcome(investments_due=True)
+            return SyncOutcome(investments_due=chains_investments)
         raise  # transient with retries remaining: the runner's backoff handles it
 
     cid = connection.id
@@ -640,7 +682,7 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
         created=created,
         reopened=reopened,
         invalidated=invalidated,
-        investments_due=True,
+        investments_due=chains_investments,
     )
 
 

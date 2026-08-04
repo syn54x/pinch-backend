@@ -24,7 +24,7 @@ network. The opt-in live-sandbox smoke test proves the real client.
 """
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 
@@ -32,7 +32,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, SecretStr
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
 from pinch_backend.models import AccountKind, ConnectionProvider
 from pinch_backend.observability import get_logger
@@ -54,6 +54,56 @@ MX_BASE_URLS = {
 MX_ACCEPT = "application/vnd.mx.api.v1+json"
 """MX's versioned media type — the vnd Accept alone suffices on every
 endpoint (CP0 spike: no Accept-Version header needed)."""
+
+MX_TRANSACTIONS_PAGE_SIZE = 1000
+"""records_per_page on transaction listings: honored up to 1000 (CP0
+spike: a 910-row member answered in one page; values above 1000 silently
+revert to 25)."""
+
+MX_REMOVAL_WINDOW_DAYS = 30
+"""The rolling re-list window MX's ``removed`` derivation diffs (ADR
+0009, M13 CP3). MX deletions manifest only as absence — no list endpoint
+carries a tombstone, and the doorbell-only law forbids reading the
+webhook payloads that do — so each sync re-lists this many days back by
+transaction date and diffs the guids present against the guids Pinch
+holds. Thirty days because MX deletions are overwhelmingly pending
+cleanup: every PENDING row is hard-deleted at 14 days (and a failed
+pending→posted match deletes-and-replaces well inside that horizon), so
+double the pending lifetime covers the whole class with margin for the
+rarer institution-side posted correction. A deletion older than the
+window is invisible — accepted by ADR 0009, not an oversight."""
+
+MX_SYNC_LOOKAHEAD_DAYS = 5
+"""The explicit forward bound on MX listings: every date filter rides in
+a mandatory pair (CP0 spike: a lone ``from_*`` is a 400), so the upper
+bound must be spelled out even though "everything from the watermark on"
+is the real question. Five days forward mirrors MX's own ``to_date``
+default."""
+
+MX_INITIAL_WINDOW_DAYS = 730
+"""The initial backfill's explicit ``from_date``: MX's deepest history
+product (Extended Transaction History) is 24 months, so this bound never
+truncates — relying on the endpoint's implicit 120-day default window
+would, the moment an instance carries that add-on."""
+
+MX_REAUTH_STATUSES = frozenset(
+    {"CHALLENGED", "DENIED", "EXPIRED", "IMPAIRED", "IMPEDED", "LOCKED", "PREVENTED", "REJECTED"}
+)
+"""Member connection statuses meaning the login needs the user — MX's
+own "actionable" set (the Connection Status webhook's vocabulary).
+Raised as the ProviderError code by the sync-path status probe and
+mapped to ``reauth_required`` by the engine: repair territory (the
+reconnect-mode widget), never retry territory. Statuses only ever map
+into the existing three (PRD #86)."""
+
+MX_BROKEN_STATUSES = frozenset({"FAILED", "DISCONNECTED", "CLOSED", "DISCONTINUED", "DISABLED"})
+"""Member statuses broken without a user action to offer (aggregation
+failure, institution-side shutdown). Raised as the code and shaped like
+transients at the engine: retries ride the ladder — MX self-aggregates
+nightly, so a later attempt may find the member healed — and exhaustion
+records ``error`` carrying the status. Statuses outside both sets
+(CONNECTED, CREATED, DELAYED, DEGRADED, …) proceed: the data MX holds is
+readable even mid-trouble, and a successful sync heals."""
 
 BACKFILL_DAYS = 730
 """History requested at link time (PRD #31): depth is fuel for M8's
@@ -747,6 +797,7 @@ class MXProvider:
         environment: str,
         user_guid: str | None = None,
         member_guid: str | None = None,
+        stored_window_ids: "Callable[[date], Awaitable[set[str]]] | None" = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._client_id = client_id
@@ -754,6 +805,12 @@ class MXProvider:
         self._base_url = MX_BASE_URLS[environment]
         self._user_guid = user_guid
         self._member_guid = member_guid
+        self._stored_window_ids = stored_window_ids
+        """The removed-derivation's memory (M13 CP3, ADR 0009): given the
+        re-list window's start date, answers which provider transaction
+        ids Pinch holds in that window — bound by the sync engine the way
+        guids are, so the client diffs presence without ever seeing the
+        database. Only ``sync_transactions`` needs it."""
         self._transport = transport
         """httpx's documented test seam: wire-shape tests hand in a
         MockTransport; production leaves it None."""
@@ -936,17 +993,149 @@ class MXProvider:
                 ) from error
             raise
 
+    async def _member_status(self) -> str:
+        """The lean member-status probe (CP0 spike: ``GET .../status``
+        answers ``connection_status`` and the aggregation stamps)."""
+        data = await self._request("GET", f"/users/{self._user}/members/{self._member}/status")
+        payload = data.get("member") or data
+        return payload.get("connection_status") or ""
+
+    async def _list_transactions(self, filters: dict[str, str]) -> list[dict]:
+        """One drained member-scoped listing — never user-scope (CP0
+        spike amendment: deleted members leak ghost rows into user-scope
+        lists forever)."""
+        rows: list[dict] = []
+        page = 1
+        while True:
+            data = await self._request(
+                "GET",
+                f"/users/{self._user}/members/{self._member}/transactions",
+                params={**filters, "page": page, "records_per_page": MX_TRANSACTIONS_PAGE_SIZE},
+            )
+            rows.extend(data["transactions"])
+            pagination = data.get("pagination") or {}
+            if page >= int(pagination.get("total_pages") or 1):
+                return rows
+            page += 1
+
+    @staticmethod
+    def _convert_transaction(t: dict) -> ProviderTransaction:
+        """One MX row into Pinch vocabulary. Direction is account-relative
+        (CP0 spike + CP3 live probe, empirical across every MX Bank
+        segment): CREDIT is money into the account, DEBIT money out — so a
+        mortgage payment (CREDIT on the debt account) lands positive, the
+        transfer convention's loan side, and a late fee or card purchase
+        (DEBIT) lands negative. The per-segment trap is borrowing the
+        balance seam's debt flip (``_MX_DEBT_KINDS``): balances flip on
+        debt kinds, transactions never do — the CREDIT/DEBIT enum already
+        speaks from the account's perspective on every kind."""
+        currency = t.get("currency_code")
+        minor = _to_minor(t["amount"], currency)
+        if t.get("type") == "CREDIT":
+            signed = minor
+        elif t.get("type") == "DEBIT":
+            signed = -minor
+        else:
+            # Typeless edge rows: ``is_expense`` is MX's own money-out flag.
+            signed = -minor if t.get("is_expense") else minor
+        return ProviderTransaction(
+            provider_transaction_id=t["guid"],
+            provider_account_id=t["account_guid"],
+            amount_minor=signed,
+            currency=currency,
+            date=date.fromisoformat(t["date"]),
+            description=t.get("description") or t.get("original_description") or "",
+            # Posted-only v1 (PRD #86): PENDING is filtered before
+            # conversion, so every row that reaches Pinch is settled.
+            pending=False,
+        )
+
     async def sync_transactions(self, cursor: str | None) -> SyncBatch:
-        """CP3's seam (#90): the watermark + re-list-window derivation
-        (ADR 0009) is not built yet, and the sync engine skips MX
-        connections before ever materializing this client."""
-        raise NotImplementedError("MX transaction sync lands in M13 CP3 (#90)")
+        """The ``SyncBatch`` contract by re-derivation (ADR 0009, M13 CP3,
+        #90) — MX has no cursor endpoint, so truth is re-derived from
+        plain listings each pass:
+
+        - The member's status is probed first: a reauth-family or
+          broken-family status raises with the status as the code (the
+          engine's one error contract maps it) — data listing never
+          proceeds on a dead login.
+        - Adds and modifications: one member-scoped listing filtered from
+          the **date watermark** the cursor serializes (CP0 spike:
+          ``from_updated_at``/``to_updated_at`` are day-granularity only,
+          both bounds mandatory, both inclusive). Day granularity means
+          overlap re-fetch is the norm — at least the whole watermark day
+          replays every sync — so everything lands in ``modified``: the
+          engine's upsert stance dedupes by guid, replay-safe by
+          construction. A missing or unreadable cursor is the initial
+          backfill: an explicit wide date window instead.
+        - Removals: re-list ``MX_REMOVAL_WINDOW_DAYS`` back by transaction
+          date and diff the guids present against the stored ids the
+          engine bound (``stored_window_ids``) — absence is the only
+          deletion signal MX's listings offer, and doorbell payloads are
+          never read (ADR 0008/0009). The initial backfill already covers
+          the window, so its rows serve as the re-list.
+        - Posted-only (PRD #86): ``status != POSTED`` filtered right here
+          at the seam; pending rows also never count as "ours" for the
+          removal diff because they were never ingested.
+        - The next cursor is the max ``updated_at`` date observed — MX's
+          own clock, kept monotonic against the old watermark, so a
+          provider-side clock skew can never fast-forward past unseen
+          updates. A fresh member with nothing to observe starts at
+          yesterday: one day of overlap as skew insurance.
+        """
+        status = await self._member_status()
+        if status in MX_REAUTH_STATUSES or status in MX_BROKEN_STATUSES:
+            raise ProviderError(code=status, message="MX member is not connected")
+        assert self._stored_window_ids is not None, (
+            "MXProvider is not bound to the ledger's stored window ids"
+        )
+        today = datetime.now(UTC).date()
+        upper = (today + timedelta(days=MX_SYNC_LOOKAHEAD_DAYS)).isoformat()
+        window_start = today - timedelta(days=MX_REMOVAL_WINDOW_DAYS)
+        watermark = self._parse_watermark(cursor)
+        if watermark is None:
+            initial_start = today - timedelta(days=MX_INITIAL_WINDOW_DAYS)
+            rows = await self._list_transactions(
+                {"from_date": initial_start.isoformat(), "to_date": upper}
+            )
+            window_rows = [t for t in rows if date.fromisoformat(t["date"]) >= window_start]
+        else:
+            rows = await self._list_transactions(
+                {"from_updated_at": watermark.isoformat(), "to_updated_at": upper}
+            )
+            window_rows = await self._list_transactions(
+                {"from_date": window_start.isoformat(), "to_date": upper}
+            )
+        stored = await self._stored_window_ids(window_start)
+        removed = sorted(stored - {t["guid"] for t in window_rows})
+        modified = [self._convert_transaction(t) for t in rows if t.get("status") == "POSTED"]
+        observed = [date.fromisoformat(t["updated_at"][:10]) for t in rows if t.get("updated_at")]
+        if watermark is not None:
+            observed.append(watermark)
+        next_watermark = max(observed) if observed else today - timedelta(days=1)
+        return SyncBatch(
+            added=[], modified=modified, removed=removed, next_cursor=next_watermark.isoformat()
+        )
+
+    @staticmethod
+    def _parse_watermark(cursor: str | None) -> date | None:
+        if not cursor:
+            return None
+        try:
+            return date.fromisoformat(cursor)
+        except ValueError:
+            # Not a secret (the cursor is a date or garbage) and the
+            # remedy is free: a full backfill is replay-safe, so an
+            # unreadable cursor self-heals instead of wedging the sync.
+            log.warning("sync.mx_cursor_unreadable", cursor=cursor)
+            return None
 
     async def get_item_state(self) -> ItemState:
-        """CP3/CP4 territory: the reconciler's MX probe reads member
-        status + last-successful-aggregation (#90, #91). The reconciler
-        pass is explicitly Plaid-only until then."""
-        raise NotImplementedError("the MX reconciler probe lands in M13 CP3/CP4 (#90, #91)")
+        """CP4 territory (#91): the reconciler's MX probe reads member
+        status + last-successful-aggregation. The reconciler pass is
+        explicitly Plaid-only until then — CP3's sync path probes member
+        status itself (``_member_status``) and never needs this verb."""
+        raise NotImplementedError("the MX reconciler probe lands in M13 CP4 (#91)")
 
     async def get_holdings(self) -> InvestmentsBatch:
         """Never: holdings is a billable MX add-on Pinch doesn't ship —
@@ -972,7 +1161,10 @@ def _materialize_plaid(*, secret: str | None = None) -> SyncProvider:
 
 
 def _materialize_mx(
-    *, user_guid: str | None = None, member_guid: str | None = None
+    *,
+    user_guid: str | None = None,
+    member_guid: str | None = None,
+    stored_window_ids: "Callable[[date], Awaitable[set[str]]] | None" = None,
 ) -> SyncProvider:
     return MXProvider(
         client_id=settings.mx_client_id,
@@ -980,6 +1172,7 @@ def _materialize_mx(
         environment=settings.mx_environment,
         user_guid=user_guid,
         member_guid=member_guid,
+        stored_window_ids=stored_window_ids,
     )
 
 
@@ -1001,9 +1194,10 @@ class ProviderRecord:
     per test and this record is module-level."""
     materialize: Callable[..., SyncProvider]
     """The client factory. Its keyword signature IS the provider's
-    credential shape (ADR 0009): Plaid takes ``secret=``, MX takes
-    ``user_guid=``/``member_guid=`` — a foreign binding kwarg raises
-    TypeError, a caller bug answered loudly."""
+    binding shape (ADR 0009): Plaid takes ``secret=``, MX takes
+    ``user_guid=``/``member_guid=`` plus the sync engine's
+    ``stored_window_ids=`` re-derivation feed (M13 CP3) — a foreign
+    binding kwarg raises TypeError, a caller bug answered loudly."""
 
 
 PROVIDERS: dict[ConnectionProvider, ProviderRecord] = {

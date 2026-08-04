@@ -6,8 +6,9 @@ widget-URL mint, a server-side MX Bank member (the widget's stand-in —
 MX has no Plaid-style sandbox token, but the integration environment
 lets members be created directly with the scripted mxbank credentials),
 the verifying member read, member-scoped accounts with signed balances,
-and member deletion. Everything created MX-side is deleted at the end,
-user included — success or failure.
+the CP3 transaction sync (watermark, window diff, posted-only, segment
+signs — issue #90), and member deletion. Everything created MX-side is
+deleted at the end, user included — success or failure.
 
 Never CI-gating — the module skips without credentials in the
 environment. The conftest blanks ``PINCH_MX_*`` with setdefault, so a
@@ -22,6 +23,7 @@ shell export survives to here:
 import asyncio
 import os
 import uuid
+from datetime import date
 
 import pytest
 
@@ -36,9 +38,12 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-async def _mint_mx_bank_member(provider: MXProvider, user_guid: str) -> str:
+async def _mint_mx_bank_member(
+    provider: MXProvider, user_guid: str, *, password: str = "pinch-live-smoke"
+) -> str:
     """The widget shortcut: create an MX Bank member server-side with the
-    scripted credentials (mxuser + any non-scripted password connects —
+    scripted credentials (mxuser + any non-scripted password connects,
+    while scripted passwords drive every other member status —
     docs.mx.com/resources/test-platform/mxbank). Uses the client's
     private ``_request`` the way the Plaid smoke uses a raw httpx client
     for /sandbox/public_token/create — test-only plumbing, not product
@@ -48,7 +53,7 @@ async def _mint_mx_bank_member(provider: MXProvider, user_guid: str) -> str:
     for c in fields["credentials"]:
         field_name = (c.get("field_name") or "").lower()
         if "password" in field_name:
-            credentials.append({"guid": c["guid"], "value": "pinch-live-smoke"})
+            credentials.append({"guid": c["guid"], "value": password})
         else:
             credentials.append({"guid": c["guid"], "value": "mxuser"})
     data = await provider._request(
@@ -66,7 +71,14 @@ async def _wait_for_aggregation(provider: MXProvider, user_guid: str, member_gui
     for _attempt in range(24):
         data = await provider._request("GET", f"/users/{user_guid}/members/{member_guid}/status")
         status = data.get("member") or data
-        if status.get("connection_status") == "CONNECTED" and status.get("has_processed_accounts"):
+        if (
+            status.get("connection_status") == "CONNECTED"
+            and status.get("has_processed_accounts")
+            and status.get("has_processed_transactions")
+        ):
+            # Transactions too (CP3): gating on accounts alone let the
+            # first sync race MX's still-writing transaction pull, so the
+            # incremental leg saw "new" rows that were merely late.
             return
         await asyncio.sleep(5)
     pytest.fail("MX Bank member never finished aggregating (~2 min)")
@@ -109,11 +121,78 @@ async def test_mx_connect_accounts_and_disconnect_against_integration() -> None:
                 # The seam's segment-aware sign: owed is negative.
                 assert a.balance_minor <= 0
 
+        # --- The transactions leg (M13 CP3, issue #90) -------------------
+        # Bind the removed-derivation's memory the way the sync engine
+        # does — pretending Pinch holds one id MX doesn't, so the live
+        # window diff must name exactly it as removed (test-only private
+        # assignment, the ``_user_guid`` precedent above).
+        async def stored_window_ids(window_start: date) -> set[str]:
+            return {"TRN-pinch-ghost"}
+
+        provider._stored_window_ids = stored_window_ids
+
+        batch = await provider.sync_transactions(None)
+        assert batch.added == []  # re-derivation upserts: modified is the only lane
+        assert batch.modified, "MX Bank seeds ~90 days of transactions"
+        assert all(t.pending is False for t in batch.modified)  # posted-only v1
+        assert batch.removed == ["TRN-pinch-ghost"]  # stored-minus-present, live
+        date.fromisoformat(batch.next_cursor)  # the cursor is a date watermark
+
+        # Sign semantics against real MX Bank data. MX Bank's random seed
+        # attaches descriptions loosely (a "Credit Card Payment" row can
+        # be generated in either direction, run to run), so description-
+        # level assertions don't hold live — the deterministic per-segment
+        # sign cases are pinned in the wire tests from captured shapes.
+        # What IS seed-stable: both directions flow on debt accounts
+        # (payments in, charges out), and conversion preserves that
+        # diversity instead of collapsing it with a segment flip.
+        debt = {a.provider_account_id for a in accounts if a.kind.value in ("credit", "loan")}
+        debt_rows = [t for t in batch.modified if t.provider_account_id in debt]
+        assert debt_rows, "MX Bank seeds debt-account transactions"
+        assert any(t.amount_minor > 0 for t in debt_rows)  # CREDIT: money into the account
+        assert any(t.amount_minor < 0 for t in debt_rows)  # DEBIT: money out
+
+        # Incremental from the watermark: the inclusive day-granularity
+        # bounds re-fetch the watermark day (overlap is the norm) and
+        # every guid answered was already seen — the dedupe-by-guid
+        # replay story, against the real API.
+        first_guids = {t.provider_transaction_id for t in batch.modified}
+        again = await provider.sync_transactions(batch.next_cursor)
+        assert {t.provider_transaction_id for t in again.modified} <= first_guids
+        assert date.fromisoformat(again.next_cursor) >= date.fromisoformat(batch.next_cursor)
+
         await provider.remove_item()
         # Member-scope 404s immediately after deletion (CP0 spike).
         with pytest.raises(ProviderError) as excinfo:
             await provider.complete_connect(member_guid)
         assert excinfo.value.code == "MEMBER_NOT_FOUND"
+
+        # A scripted DENIED member (password "INVALID") — the
+        # deterministic reauth story Plaid's sandbox never allowed: the
+        # sync-path status probe raises the member status as the code,
+        # before any listing, and the engine maps it to reauth_required.
+        # Minted after the disconnect: MX allows one member per
+        # institution per user (a second mxbank member 409s).
+        denied_guid = await _mint_mx_bank_member(provider, user_guid, password="INVALID")
+        for _attempt in range(24):
+            data = await provider._request(
+                "GET", f"/users/{user_guid}/members/{denied_guid}/status"
+            )
+            if (data.get("member") or data).get("connection_status") == "DENIED":
+                break
+            await asyncio.sleep(5)
+        else:
+            pytest.fail("scripted INVALID member never reached DENIED (~2 min)")
+        denied = MXProvider(
+            client_id=CLIENT_ID,
+            api_key=API_KEY,
+            environment="sandbox",
+            user_guid=user_guid,
+            member_guid=denied_guid,
+        )
+        with pytest.raises(ProviderError) as excinfo:
+            await denied.sync_transactions(None)
+        assert excinfo.value.code == "DENIED"
     finally:
         # The spike's hygiene: the throwaway user is hard-deleted,
         # members and all, pass or fail.
