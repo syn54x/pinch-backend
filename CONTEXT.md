@@ -141,17 +141,32 @@ docs, and conversation. Implementation details do not belong in this file.
   account has a *kind*: depository, credit, investment, loan, or asset. Loans
   and credit carry negative balances. All kinds share one concept — there is
   no separate "asset tracker" or "loan tracker" entity.
-- **Connection** — a live link to an external data source (e.g. one Plaid
-  Item = one institution login). A connection yields one or more accounts and
-  owns credentials and sync state. Manual accounts have no connection.
-  Disconnecting severs the link, never the data: the connection's accounts
-  live on as manual accounts, history intact.
+- **Connection** — a live link to an external data source: one institution
+  login at a sync provider (Plaid calls it an Item, MX a member). A
+  connection yields one or more accounts and owns its provider identity and
+  sync state. Manual accounts have no connection. Disconnecting severs the
+  link, never the data: the connection's accounts live on as manual
+  accounts, history intact.
+- **Sync provider** — the external aggregation service a connection syncs
+  through (Plaid or MX today). Chosen per connection at connect time — one
+  ledger may hold connections through different providers. Providers differ
+  in institution reach and in which provider capabilities they deliver.
+- **Provider capability** — one kind of data a sync provider delivers for a
+  connection: transactions, balances, holdings, or activity. What a
+  provider lacks is a stated limit, never an error. Always the compound
+  term — a bare "capability" is Penny's.
+- **Enrollment** — a ledger's registration with a sync provider: the
+  provider-side container some providers require before any connection can
+  exist (an MX user; a Finicity customer). At most one per ledger per
+  provider, created lazily at first connect. Plaid requires none.
 - **Webhook** — the provider's doorbell: notice that something changed on
   a connection, never a data payload. Pinch reads only which connection
   rang and which kind of change, then runs the same sync it would have
   run by hand — a rung doorbell and a clicked Refresh are
   indistinguishable past the front door. Duplicate and out-of-order rings
-  are the norm, priced in by sync being replay-safe.
+  are the norm, priced in by sync being replay-safe. The law is
+  provider-universal: whichever provider rings, payload contents are
+  never read.
 - **Manual account** — an account maintained by the user without a
   connection: balances entered by hand, transactions entered manually or via
   file import.
@@ -163,7 +178,8 @@ docs, and conversation. Implementation details do not belong in this file.
 - **Balance history** — the per-account time series of balance entries that
   powers net worth over time.
 - **Valuation provider** — an external source of value estimates for asset
-  accounts (e.g. Zillow for a home), analogous to Plaid for bank accounts.
+  accounts (e.g. Zillow for a home), analogous to a sync provider for bank
+  accounts.
 - **Net worth** — the sum of all account balances at a point in time. A
   derived quantity, not a separate system.
 - **Holding** — a position in an investment account: a security, a quantity,

@@ -67,7 +67,9 @@ def _txn(
 
 class FakeSyncProvider:
     """Scriptable batches: each sync pops the next; an empty script answers
-    an empty batch. Raises whatever `failure` holds instead, if set."""
+    an empty batch. Raises whatever `failure` holds instead, if set.
+    ``materialize`` stands in for ``get_provider`` (M13 CP1), recording
+    the bound secret the method signatures no longer carry."""
 
     def __init__(self) -> None:
         self.accounts = [
@@ -82,16 +84,22 @@ class FakeSyncProvider:
         ]
         self.batches: list[providers.SyncBatch] = []
         self.sync_cursors: list[str | None] = []
-        self.link_tokens_created: list[dict] = []
+        self.sessions_created: list[dict] = []
         self.failure: providers.ProviderError | None = None
         self.transactions_failure: providers.ProviderError | None = None
         """Raises from sync_transactions only, accounts stay healthy —
         the fresh-Item PRODUCT_NOT_READY shape."""
         self.cursor_serial = 0
+        self.secret: str | None = None
+        """The most recent materialization's bound credential."""
 
         self.institution_lookups = 0
 
-    async def get_item_state(self, access_token: str) -> providers.ItemState:
+    def materialize(self, provider, *, secret: str | None = None) -> "FakeSyncProvider":
+        self.secret = secret
+        return self
+
+    async def get_item_state(self) -> providers.ItemState:
         """The midnight-UTC reconcile cron (M11) can fire inside any test's
         worker window. Answer with the registered URL and no update stamps
         so the verdict is "quiet" — a no-op pass instead of an
@@ -100,26 +108,28 @@ class FakeSyncProvider:
 
         return providers.ItemState(webhook=settings.plaid_webhook_url)
 
-    async def update_webhook(self, access_token: str, url: str) -> None:
+    async def update_webhook(self, url: str) -> None:
         return None
 
-    async def create_link_token(self, *, client_user_id: str, access_token: str | None = None):
-        self.link_tokens_created.append(
-            {"client_user_id": client_user_id, "access_token": access_token}
-        )
+    async def create_connect_session(self, *, client_user_id: str) -> str:
+        self.sessions_created.append({"client_user_id": client_user_id, "secret": self.secret})
         return "link-fake"
 
-    async def exchange_public_token(self, public_token: str) -> providers.ExchangedToken:
-        return providers.ExchangedToken(
-            access_token=f"access-fake-{public_token}", item_id=f"item-{public_token}"
+    async def complete_connect(self, token: str) -> providers.ConnectResult:
+        self.secret = f"access-fake-{token}"
+        return providers.ConnectResult(
+            provider_item_id=f"item-{token}",
+            provider_institution_id="ins_platypus",
+            institution_name="First Platypus Bank",
+            secret=self.secret,
         )
 
-    async def get_accounts(self, access_token: str) -> list[providers.ProviderAccount]:
+    async def get_accounts(self) -> list[providers.ProviderAccount]:
         if self.failure is not None:
             raise self.failure
         return self.accounts
 
-    async def sync_transactions(self, access_token: str, cursor: str | None):
+    async def sync_transactions(self, cursor: str | None):
         if self.failure is not None:
             raise self.failure
         if self.transactions_failure is not None:
@@ -132,24 +142,26 @@ class FakeSyncProvider:
             added=[], modified=[], removed=[], next_cursor=f"cursor-{self.cursor_serial}"
         )
 
-    async def remove_item(self, access_token: str) -> None:
+    async def remove_item(self) -> None:
         return None
 
-    async def get_institution_name(self, access_token: str) -> str | None:
+    async def get_institution(self) -> providers.ProviderInstitution:
         self.institution_lookups += 1
-        return "First Platypus Bank"
+        return providers.ProviderInstitution(
+            provider_institution_id="ins_platypus", name="First Platypus Bank"
+        )
 
 
 @pytest.fixture
 def fake_provider(plaid_settings, monkeypatch):
     fake = FakeSyncProvider()
-    monkeypatch.setattr(providers, "get_provider", lambda: fake)
+    monkeypatch.setattr(providers, "get_provider", fake.materialize)
     return fake
 
 
 async def _connect(client, fake) -> dict:
     response = await client.post(
-        CONNECTIONS, json={"public_token": "public-abc"}, headers=await _csrf(client)
+        CONNECTIONS, json={"provider": "plaid", "token": "public-abc"}, headers=await _csrf(client)
     )
     assert response.status_code == 201, response.text
     return response.json()
@@ -267,14 +279,15 @@ async def test_auth_error_marks_reauth_and_repair_flow_heals(
     assert health["status"] == "reauth_required"
     assert health["error_detail"] == "ITEM_LOGIN_REQUIRED"
 
-    # repair: update-mode link token for the same Item
+    # repair: a session bound to the same provider-side login — the
+    # connection's decrypted credential rides the materialization (M13 CP1)
     response = await client.post(
-        f"{CONNECTIONS}/link-token",
-        json={"connection_id": body["id"]},
+        f"{CONNECTIONS}/connect-session",
+        json={"provider": "plaid", "connection_id": body["id"]},
         headers=await _csrf(client),
     )
     assert response.status_code == 201, response.text
-    assert fake_provider.link_tokens_created[-1]["access_token"] == "access-fake-public-abc"
+    assert fake_provider.sessions_created[-1]["secret"] == "access-fake-public-abc"
 
     # the next successful sync is the healer
     fake_provider.failure = None
@@ -417,8 +430,12 @@ async def test_unknown_provider_account_is_skipped(client, db, fake_provider, ru
     assert health["status"] == "active"
 
 
-async def test_sync_backfills_missing_institution_name(client, db, fake_provider, run_jobs) -> None:
-    """Pre-enabler connections gain their bank name on the next sync."""
+async def test_sync_backfills_missing_institution_identity(
+    client, db, fake_provider, run_jobs
+) -> None:
+    """Pre-enabler connections gain their bank name — and pre-M13 rows
+    their provider institution id (#88: backfill opportunistic) — on the
+    next sync, from one shared lookup."""
     import uuid
 
     from pinch_backend.models import Connection
@@ -428,6 +445,7 @@ async def test_sync_backfills_missing_institution_name(client, db, fake_provider
     cid = uuid.UUID(body["id"])
     connection = (await Connection.where(lambda c, cid=cid: c.id == cid).all())[0]
     connection.institution_name = None  # simulate a pre-enabler row
+    connection.provider_institution_id = None  # ...that also predates M13
     await connection.save()
     from pinch_backend.models import Account
 
@@ -441,5 +459,32 @@ async def test_sync_backfills_missing_institution_name(client, db, fake_provider
 
     listed = (await client.get(CONNECTIONS)).json()["items"][0]
     assert listed["institution_name"] == "First Platypus Bank"
+    assert listed["provider_institution_id"] == "ins_platypus"
     masks = {a["label"]: a["mask"] for a in listed["accounts"]}
     assert masks["Everyday Checking"] == "4821"
+
+
+async def test_sync_backfills_the_id_of_a_named_pre_m13_row(
+    client, db, fake_provider, run_jobs
+) -> None:
+    """The M13 shape specifically: a row whose name was captured long ago
+    but whose provider_institution_id predates the column still gains the
+    id — and the name the user may have relied on stands untouched."""
+    import uuid
+
+    from pinch_backend.models import Connection
+
+    await _signup(client)
+    body = await _connect(client, fake_provider)
+    cid = uuid.UUID(body["id"])
+    connection = (await Connection.where(lambda c, cid=cid: c.id == cid).all())[0]
+    connection.institution_name = "A Name The User Knows"
+    connection.provider_institution_id = None  # pre-M13 row
+    await connection.save()
+
+    await client.post(f"{CONNECTIONS}/{body['id']}/sync", headers=await _csrf(client))
+    await run_jobs()
+
+    listed = (await client.get(CONNECTIONS)).json()["items"][0]
+    assert listed["provider_institution_id"] == "ins_platypus"
+    assert listed["institution_name"] == "A Name The User Knows"  # never overwritten

@@ -46,17 +46,20 @@ async def _sandbox_public_token(products: list[str] | None = None) -> str:
         return response.json()["public_token"]
 
 
-async def test_link_exchange_accounts_and_sync_against_sandbox() -> None:
+async def test_connect_accounts_and_sync_against_sandbox() -> None:
     provider = PlaidProvider(client_id=CLIENT_ID, secret=SECRET, environment="sandbox")
 
-    link_token = await provider.create_link_token(client_user_id="pinch-smoke-test")
-    assert link_token.startswith("link-sandbox-")
+    session_token = await provider.create_connect_session(client_user_id="pinch-smoke-test")
+    assert session_token.startswith("link-sandbox-")
 
-    exchanged = await provider.exchange_public_token(await _sandbox_public_token())
-    assert exchanged.access_token.startswith("access-sandbox-")
-    assert exchanged.item_id
+    result = await provider.complete_connect(await _sandbox_public_token())
+    assert result.secret is not None
+    assert result.secret.get_secret_value().startswith("access-sandbox-")
+    assert result.provider_item_id
+    # complete_connect binds the instance (M13 CP1): every verb below
+    # rides the minted credential without re-handling it.
 
-    accounts = await provider.get_accounts(exchanged.access_token)
+    accounts = await provider.get_accounts()
     assert accounts, "sandbox item should carry accounts"
     assert all(a.provider_account_id for a in accounts)
 
@@ -65,7 +68,7 @@ async def test_link_exchange_accounts_and_sync_against_sandbox() -> None:
     # worker's retry ladder waits it out — this loop plays that role here.
     for _attempt in range(24):
         try:
-            batch = await provider.sync_transactions(exchanged.access_token, cursor=None)
+            batch = await provider.sync_transactions(cursor=None)
             break
         except ProviderError as error:
             if error.code != "PRODUCT_NOT_READY":
@@ -75,7 +78,7 @@ async def test_link_exchange_accounts_and_sync_against_sandbox() -> None:
         pytest.fail("sandbox initial transaction pull never became ready (~2 min)")
     assert batch.next_cursor  # a drained cursor, ready to persist
 
-    await provider.remove_item(exchanged.access_token)
+    await provider.remove_item()
 
 
 async def test_investments_holdings_and_activities_against_sandbox() -> None:
@@ -85,13 +88,11 @@ async def test_investments_holdings_and_activities_against_sandbox() -> None:
     from datetime import date, timedelta
 
     provider = PlaidProvider(client_id=CLIENT_ID, secret=SECRET, environment="sandbox")
-    exchanged = await provider.exchange_public_token(
-        await _sandbox_public_token(products=["investments"])
-    )
+    await provider.complete_connect(await _sandbox_public_token(products=["investments"]))
 
     for _attempt in range(24):
         try:
-            batch = await provider.get_holdings(exchanged.access_token)
+            batch = await provider.get_holdings()
             break
         except ProviderError as error:
             if error.code != "PRODUCT_NOT_READY":
@@ -106,9 +107,9 @@ async def test_investments_holdings_and_activities_against_sandbox() -> None:
 
     end = date.today()
     activities = await provider.get_investment_activities(
-        exchanged.access_token, start_date=end - timedelta(days=730), end_date=end
+        start_date=end - timedelta(days=730), end_date=end
     )
     assert activities.activities, "sandbox investment item should carry activity"
     assert all(a.provider_activity_id for a in activities.activities)
 
-    await provider.remove_item(exchanged.access_token)
+    await provider.remove_item()

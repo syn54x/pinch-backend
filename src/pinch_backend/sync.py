@@ -134,7 +134,6 @@ async def record_broken(connection: Connection, status: ConnectionStatus, code: 
 async def _sync_investments_guarded(
     connection: Connection,
     provider: "providers.SyncProvider",
-    access_token: str,
     accounts: list[Account],
 ) -> None:
     """A code bug in the investments phase must record, never raise: the
@@ -144,7 +143,7 @@ async def _sync_investments_guarded(
     phase's transaction), logs with the traceback, and lands as
     INTERNAL_ERROR in the phase's health field."""
     try:
-        await _sync_investments(connection, provider, access_token, accounts)
+        await _sync_investments(connection, provider, accounts)
     except Exception:
         log.exception("sync.investments_phase_crashed", connection_id=str(connection.id))
         connection.investments_error_detail = "INTERNAL_ERROR"
@@ -154,7 +153,6 @@ async def _sync_investments_guarded(
 async def _sync_investments(
     connection: Connection,
     provider: "providers.SyncProvider",
-    access_token: str,
     accounts: list[Account],
 ) -> None:
     """The investments phase (M10 CP0, issue #73; ADR 0007) — after the
@@ -181,9 +179,9 @@ async def _sync_investments(
     window_end = utcnow().date()
     window_start = window_end - timedelta(days=providers.INVESTMENTS_WINDOW_DAYS)
     try:
-        batch = await provider.get_holdings(access_token)
+        batch = await provider.get_holdings()
         activity_batch = await provider.get_investment_activities(
-            access_token, start_date=window_start, end_date=window_end
+            start_date=window_start, end_date=window_end
         )
     except providers.ProviderError as error:
         if error.code in CONSENT_ERROR_CODES:
@@ -402,11 +400,12 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
         # exchange — nothing to sync, nothing to record.
         return SyncOutcome()
 
-    access_token = decrypt_secret(connection.encrypted_secret)
-    provider = providers.get_provider()
+    provider = providers.get_provider(
+        connection.provider, secret=decrypt_secret(connection.encrypted_secret)
+    )
     try:
-        provider_accounts = await provider.get_accounts(access_token)
-        batch = await provider.sync_transactions(access_token, connection.sync_cursor)
+        provider_accounts = await provider.get_accounts()
+        batch = await provider.sync_transactions(connection.sync_cursor)
     except providers.ProviderError as error:
         if error.code in AUTH_ERROR_CODES:
             # A dead login is dead for both products — no investments
@@ -598,16 +597,21 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
         connection.last_synced_at = utcnow()
         await connection.save()
 
-    if connection.institution_name is None:
-        # Backfill for pre-enabler rows (#39) — best-effort, outside the
-        # effects transaction: a nicety must never fail a sync.
+    if connection.institution_name is None or connection.provider_institution_id is None:
+        # Backfill for pre-enabler and pre-M13 rows (#39, #88): the name
+        # and the provider institution id ride the same lookup —
+        # best-effort, outside the effects transaction: a nicety must
+        # never fail a sync.
         try:
-            name = await provider.get_institution_name(access_token)
+            institution = await provider.get_institution()
         except providers.ProviderError as error:
             log.info("connection.institution_backfill_failed", code=error.code)
-            name = None
-        if name is not None:
-            connection.institution_name = name
+            institution = None
+        if institution is not None:
+            if connection.institution_name is None:
+                connection.institution_name = institution.name
+            if connection.provider_institution_id is None:
+                connection.provider_institution_id = institution.provider_institution_id
             await connection.save()
 
     log.info(
@@ -638,8 +642,9 @@ async def run_investments_sync(connection_id: uuid.UUID) -> None:
     connection = await Connection.where(lambda c: c.id == connection_id).first()
     if connection is None or connection.encrypted_secret is None:
         return  # deleted between defer and run — nothing to record
-    access_token = decrypt_secret(connection.encrypted_secret)
-    provider = providers.get_provider()
+    provider = providers.get_provider(
+        connection.provider, secret=decrypt_secret(connection.encrypted_secret)
+    )
     cid = connection.id
     accounts = await Account.where(lambda a, c=cid: a.connection_id == c).all()
-    await _sync_investments_guarded(connection, provider, access_token, accounts)
+    await _sync_investments_guarded(connection, provider, accounts)

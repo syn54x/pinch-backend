@@ -1,18 +1,18 @@
-"""/api/v1/connections — Plaid connections (M7 CP1, issue #33; PRD #31).
+"""/api/v1/connections — sync-provider connections (M7 CP1, issue #33;
+provider-neutral sweep M13 CP1, #88; ADR 0009).
 
-The connect flow: link token → (widget, or sandbox shortcut) → public-token
-exchange, which creates the Connection and one Account per consented Plaid
-account — no second selection layer; Link's widget already did selection.
-The access token is encrypted at rest and write-only at this surface.
+The connect flow is provider-neutral: a connect session (the opaque token
+the provider's widget consumes) → the widget, or a sandbox shortcut →
+completion, which creates the Connection and one Account per consented
+provider account — no second selection layer; the widget already did
+selection. Per-connection credentials (Plaid's access token) are
+encrypted at rest and write-only at this surface.
 
-Keyless instances (no Plaid settings) refuse the Plaid-touching endpoints
-cleanly and keep the health surface: connected-account support never holds
-manual tracking hostage.
-
-Absent by design, for now: DELETE (disconnect) is blocked on ferro-orm#325
-(auto-migrate ignores on_delete alteration; CP0 findings on #32) — shipping
-sever-not-destroy on a silently-CASCADE database would destroy. The initial
-sync auto-enqueue arrives with the sync job (CP2, #34).
+Configuration is per provider: an instance refuses an unconfigured
+provider's endpoints cleanly while everything else stands (PRD #86 story
+16) — connected-account support never holds manual tracking hostage. The
+catalog endpoint reports which providers this instance offers and what
+each delivers (provider capabilities).
 """
 
 import uuid
@@ -48,28 +48,53 @@ from pinch_backend.models import (
     transaction,
 )
 from pinch_backend.observability import get_logger
-from pinch_backend.settings import settings
 
 log = get_logger(__name__)
 
 
-class LinkTokenIn(BaseModel):
+class ConnectSessionIn(BaseModel):
     model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
 
+    provider: ConnectionProvider
+    """The sync provider the user chose — per connection, at connect time
+    (CONTEXT.md: Sync provider)."""
     connection_id: uuid.UUID | None = None
-    """Absent: a fresh connect. Present: an update-mode token repairing
-    this connection's login (PRD #31 reauth) — no exchange follows; the
+    """Absent: a fresh connect. Present: a repair session for this
+    connection's login (PRD #31 reauth) — no completion follows; the
     next successful sync is the healer."""
 
 
-class LinkTokenOut(BaseModel):
-    link_token: str
+class ConnectSessionOut(BaseModel):
+    model_config = ConfigDict(use_attribute_docstrings=True)
+
+    provider: ConnectionProvider
+    token: str
+    """Opaque: whatever the provider's widget consumes (Plaid: a
+    link_token; MX: a widget URL)."""
 
 
 class ConnectionCreateIn(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid")
 
-    public_token: str
+    provider: ConnectionProvider
+    token: str
+    """The provider's completion handle (Plaid: the public_token Link
+    answered with) — verified server-side, never trusted naked."""
+
+
+class ProviderCatalogEntry(BaseModel):
+    """One known provider as this instance offers it (M13 CP1): the
+    picker's honest coverage-and-capability surface (PRD #86 story 11)."""
+
+    model_config = ConfigDict(use_attribute_docstrings=True)
+
+    provider: ConnectionProvider
+    configured: bool
+    """Whether this instance holds the provider's credentials — an
+    unconfigured provider's endpoints refuse cleanly (story 16)."""
+    capabilities: list[providers.ProviderCapability]
+    """What the provider delivers (CONTEXT.md: Provider capability). A
+    missing atom is a stated limit, never an error."""
 
 
 class ConnectionOut(BaseModel):
@@ -80,6 +105,9 @@ class ConnectionOut(BaseModel):
 
     id: uuid.UUID
     provider: ConnectionProvider
+    provider_institution_id: str | None
+    """The provider's institution identity (M13 CP1) — the frontend dupe
+    guard's basis for "you already connected this bank"."""
     institution_name: str | None
     status: ConnectionStatus
     last_synced_at: datetime | None
@@ -94,19 +122,22 @@ class ConnectionOut(BaseModel):
     created_at: datetime
 
 
-def _require_plaid() -> None:
-    """The keyless stance (PRD #31): a clean refusal on the endpoints that
-    would touch Plaid, and nothing else changes."""
-    if not settings.plaid_configured:
-        raise PermissionDeniedException(detail="Plaid is not configured on this instance")
+def _require_provider(provider: ConnectionProvider) -> None:
+    """The keyless stance, per provider since M13 CP1 (PRD #86 story 16):
+    a clean refusal on the endpoints that would touch an unconfigured
+    provider, and nothing else changes."""
+    if not providers.provider_configured(provider):
+        raise PermissionDeniedException(
+            detail=f"{providers.PROVIDER_LABELS[provider]} is not configured on this instance"
+        )
 
 
-def _surface(error: providers.ProviderError) -> Exception:
+def _surface(error: providers.ProviderError, provider: ConnectionProvider) -> Exception:
     """The recovery point for provider failures: the code — the only
     provider detail allowed out (PRD #31) — reaches the client instead of
-    an opaque 500. A rejected public token is the client's fault (400);
-    anything else is upstream's (502)."""
-    detail = f"Plaid request failed: {error.code}"
+    an opaque 500, naming the provider that failed. A rejected completion
+    token is the client's fault (400); anything else is upstream's (502)."""
+    detail = f"{providers.PROVIDER_LABELS[provider]} request failed: {error.code}"
     if error.code == "INVALID_PUBLIC_TOKEN":
         return ClientException(detail=detail)
     return ClientException(detail=detail, status_code=HTTP_502_BAD_GATEWAY)
@@ -148,6 +179,7 @@ async def _connection_out(connection: Connection) -> ConnectionOut:
     return ConnectionOut(
         id=connection.id,
         provider=connection.provider,
+        provider_institution_id=connection.provider_institution_id,
         institution_name=connection.institution_name,
         status=connection.status,
         last_synced_at=connection.last_synced_at,
@@ -159,32 +191,52 @@ async def _connection_out(connection: Connection) -> ConnectionOut:
     )
 
 
-@post("/link-token")
-async def create_link_token(
+@post("/connect-session")
+async def create_connect_session(
     current_user: NamedDependency[User],
     current_ledger: NamedDependency[Ledger],
-    data: LinkTokenIn | None = None,
-) -> LinkTokenOut:
-    """Shaped for a future frontend to drop Plaid Link on top unchanged;
-    sandbox tests shortcut the widget between this and the exchange.
-    With a ``connection_id`` this is the repair path: an update-mode token
-    for the same Item."""
-    _require_plaid()
-    access_token: str | None = None
-    if data is not None and data.connection_id is not None:
+    data: ConnectSessionIn,
+) -> ConnectSessionOut:
+    """Mint the opaque token the chosen provider's widget consumes —
+    shaped for the frontend to drop the widget on top unchanged; sandbox
+    tests shortcut the widget between this and the completion. With a
+    ``connection_id`` this is the repair path: a session bound to the
+    same provider-side login."""
+    _require_provider(data.provider)
+    secret: str | None = None
+    if data.connection_id is not None:
         connection = await _get_connection(current_ledger, data.connection_id)
+        if connection.provider != data.provider:
+            # A repair session is the connection's provider's to mint —
+            # a mismatch is a client bug, never a silent re-route.
+            raise ClientException(detail="Provider does not match the connection")
         if connection.encrypted_secret is None:
             # Repair mode must never silently fall back to creation mode —
             # a fresh connect on top of a broken one duplicates accounts.
             raise ClientException(detail="Connection has no provider credentials to repair")
-        access_token = decrypt_secret(connection.encrypted_secret)
+        secret = decrypt_secret(connection.encrypted_secret)
     try:
-        token = await providers.get_provider().create_link_token(
-            client_user_id=str(current_user.id), access_token=access_token
+        token = await providers.get_provider(data.provider, secret=secret).create_connect_session(
+            client_user_id=str(current_user.id)
         )
     except providers.ProviderError as error:
-        raise _surface(error) from error
-    return LinkTokenOut(link_token=token)
+        raise _surface(error, data.provider) from error
+    return ConnectSessionOut(provider=data.provider, token=token)
+
+
+@get("/providers")
+async def list_providers() -> list[ProviderCatalogEntry]:
+    """The provider catalog (M13 CP1): one entry per known provider —
+    configured or not, so the picker can render coverage and capability
+    honestly instead of discovering refusals endpoint by endpoint."""
+    return [
+        ProviderCatalogEntry(
+            provider=provider,
+            configured=providers.provider_configured(provider),
+            capabilities=list(providers.PROVIDER_CAPABILITIES[provider]),
+        )
+        for provider in ConnectionProvider
+    ]
 
 
 @post("/")
@@ -192,32 +244,31 @@ async def create_connection(
     data: ConnectionCreateIn,
     current_ledger: NamedDependency[Ledger],
 ) -> ConnectionOut:
-    """Exchange the public token; create the Connection and one Account per
-    account on the Item, atomically. Currency falls back to the ledger's
-    primary currency when the provider omits it."""
-    _require_plaid()
-    provider = providers.get_provider()
+    """Complete the connect: verify the token with the provider, then
+    create the Connection and one Account per consented provider account,
+    atomically. Currency falls back to the ledger's primary currency when
+    the provider omits it."""
+    _require_provider(data.provider)
+    provider = providers.get_provider(data.provider)
     try:
-        exchanged = await provider.exchange_public_token(data.public_token)
-        provider_accounts = await provider.get_accounts(exchanged.access_token)
+        result = await provider.complete_connect(data.token)
+        provider_accounts = await provider.get_accounts()
     except providers.ProviderError as error:
-        raise _surface(error) from error
-    try:
-        institution_name = await provider.get_institution_name(exchanged.access_token)
-    except providers.ProviderError as error:
-        # The name is a nicety — never block a consented connect on it;
-        # sync backfills it opportunistically later.
-        log.info("connection.institution_lookup_failed", code=error.code)
-        institution_name = None
+        raise _surface(error, data.provider) from error
     fallback_currency = await ledger_primary_currency(current_ledger)
     async with transaction():
         connection = await Connection.create(
             ledger=current_ledger,
-            provider=ConnectionProvider.PLAID,
-            provider_item_id=exchanged.item_id,
-            institution_name=institution_name,
+            provider=data.provider,
+            provider_item_id=result.provider_item_id,
+            provider_institution_id=result.provider_institution_id,
+            institution_name=result.institution_name,
             status=ConnectionStatus.ACTIVE,
-            encrypted_secret=encrypt_secret(exchanged.access_token),
+            # Honestly NULL for providers that mint no per-connection
+            # secret (ADR 0009) — Plaid always answers one.
+            encrypted_secret=(
+                None if result.secret is None else encrypt_secret(result.secret.get_secret_value())
+            ),
         )
         for pa in provider_accounts:
             await Account.create(
@@ -269,9 +320,11 @@ async def refresh_connection(
     connection_id: FromPath[uuid.UUID], current_ledger: NamedDependency[Ledger]
 ) -> None:
     """Manual refresh (PRD #31): the one v0 re-sync trigger. 202 — the
-    work happens in the worker; the health surface reports the outcome."""
-    _require_plaid()
+    work happens in the worker; the health surface reports the outcome.
+    The refusal is per the connection's own provider (M13 CP1): a
+    keyless instance answers 404 for connections it can't hold anyway."""
     connection = await _get_connection(current_ledger, connection_id)
+    _require_provider(connection.provider)
     await _enqueue_sync(connection)
 
 
@@ -284,16 +337,20 @@ async def delete_connection(
     ``connection`` nulled (SET NULL) — structurally manual from here on.
 
     Ordering is deliberate: revoke first, sever second. If revocation
-    fails transiently the client retries (502, nothing severed); Plaid
-    already not knowing the item is success from this seat."""
-    _require_plaid()
+    fails transiently the client retries (502, nothing severed); the
+    provider already not knowing the connection is success from this
+    seat."""
     connection = await _get_connection(current_ledger, connection_id)
+    _require_provider(connection.provider)
     if connection.encrypted_secret is not None:
+        provider = providers.get_provider(
+            connection.provider, secret=decrypt_secret(connection.encrypted_secret)
+        )
         try:
-            await providers.get_provider().remove_item(decrypt_secret(connection.encrypted_secret))
+            await provider.remove_item()
         except providers.ProviderError as error:
             if error.code != "ITEM_NOT_FOUND":
-                raise _surface(error) from error
+                raise _surface(error, connection.provider) from error
     await Connection.where(lambda c, cid=connection.id: c.id == cid).delete()
     log.info(
         "connection.deleted",
@@ -305,7 +362,8 @@ async def delete_connection(
 connections_router = Router(
     path="/api/v1/connections",
     route_handlers=[
-        create_link_token,
+        create_connect_session,
+        list_providers,
         create_connection,
         list_connections,
         get_connection,
