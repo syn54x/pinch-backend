@@ -21,15 +21,46 @@ def pytest_configure() -> None:
     # No live network calls in CI (PRD M2): breach-check tests opt back in
     # through a stubbed transport.
     os.environ.setdefault("PINCH_BREACH_CHECK_ENABLED", "false")
-    # Hermetic against the developer's .env (M7): pydantic-settings reads it,
-    # but real Plaid credentials must never leak into the suite — "keyless"
-    # is the tested baseline, and env vars outrank the file. The empty
-    # string reads as unconfigured; tests that want Plaid monkeypatch the
-    # settings object directly.
-    os.environ["PINCH_PLAID_CLIENT_ID"] = ""
-    os.environ["PINCH_PLAID_SECRET"] = ""
-    os.environ["PINCH_PLAID_WEBHOOK_URL"] = ""
-    os.environ["PINCH_SECRET_ENCRYPTION_KEY"] = ""
+    # Hermetic against the developer's .env (M7): pydantic-settings reads
+    # it, but real credentials must never leak into the suite — "keyless"
+    # is the tested baseline, and env vars outrank the file. setdefault,
+    # not assignment (the MX shape since CP2, Plaid folded in at CP4 #91):
+    # this hook runs before settings.py's load_dotenv, so the developer's
+    # .env values aren't on os.environ yet (they stay out — dotenv leaves
+    # set keys alone), while a live-smoke opt-in exported from the shell
+    # IS here already and survives to gate the live modules. The empty
+    # string reads as unconfigured; tests that want a provider monkeypatch
+    # the settings object directly.
+    os.environ.setdefault("PINCH_PLAID_CLIENT_ID", "")
+    os.environ.setdefault("PINCH_PLAID_SECRET", "")
+    # The environment knob too, not only the credentials: a post-cutover
+    # developer .env says production, and Settings() in tests must answer
+    # the sandbox default (empty is not an option — the field is a
+    # Literal, and "" would refuse to construct).
+    os.environ.setdefault("PINCH_PLAID_ENVIRONMENT", "sandbox")
+    os.environ.setdefault("PINCH_MX_CLIENT_ID", "")
+    os.environ.setdefault("PINCH_MX_API_KEY", "")
+    # A live-smoke opt-in makes the provider *configured*, which arms its
+    # startup validators (encryption key + webhook URL for Plaid, webhook
+    # secret for MX) — Settings() would refuse to construct at import.
+    # The opt-in stays a two-variable export by filling the validators'
+    # requirements with inert dummies; nothing live-smoke touches them
+    # (the live modules construct providers directly from the exported
+    # credentials). Without an opt-in these blank like everything else.
+    if os.environ.get("PINCH_PLAID_CLIENT_ID") and os.environ.get("PINCH_PLAID_SECRET"):
+        os.environ.setdefault(
+            "PINCH_PLAID_WEBHOOK_URL", "https://live-smoke.invalid/webhooks/plaid"
+        )
+        os.environ.setdefault(
+            "PINCH_SECRET_ENCRYPTION_KEY", "0fgqNJQuqR09ILyfU1jynGBXmn3_6a_h-8iLItevJXk="
+        )
+    else:
+        os.environ.setdefault("PINCH_PLAID_WEBHOOK_URL", "")
+        os.environ.setdefault("PINCH_SECRET_ENCRYPTION_KEY", "")
+    if os.environ.get("PINCH_MX_CLIENT_ID") and os.environ.get("PINCH_MX_API_KEY"):
+        os.environ.setdefault("PINCH_MX_WEBHOOK_SECRET", "live-smoke-not-a-secret")
+    else:
+        os.environ.setdefault("PINCH_MX_WEBHOOK_SECRET", "")
     # Keyless Penny is the tested baseline (PRD M9), same stance as Plaid:
     # a developer's .env model strings and gateway key must never leak in.
     # Tests that want an agent monkeypatch settings and agent.override().
@@ -48,6 +79,9 @@ def pytest_configure() -> None:
     # Same hermetic stance for the cookie flag: developer .envs flip it off
     # for plain-http Safari dev; the suite tests the secure default.
     os.environ["PINCH_SESSION_COOKIE_SECURE"] = "true"
+    # And the frontend origin: the CORS tests assert the default; a
+    # developer .env carries the https dev origin (F1 Safari setup).
+    os.environ.setdefault("PINCH_FRONTEND_BASE_URL", "http://localhost:5173")
 
 
 def _test_database_url() -> str:

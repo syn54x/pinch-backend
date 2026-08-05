@@ -1,18 +1,24 @@
-"""/webhooks/plaid — the doorbell receiver (M11 CP0, issue #78; ADR 0008).
+"""/webhooks/{provider} — the doorbell receivers (M11 CP0, issue #78,
+ADR 0008; MX sibling M13 CP4, issue #91, ADR 0009).
 
-Provider plumbing, never Developer API: the route is sessionless,
+Provider plumbing, never Developer API: the routes are sessionless,
 CSRF-exempt, and excluded from the OpenAPI schema, so the frontend
-contract seam does not move. Verification is Plaid's JWT scheme in full —
-ES256 only, key resolved by kid through the provider seam, iat freshness,
-constant-time body-hash compare — with no bypass in any configuration.
+contract seam does not move. Verification is per-provider, to each
+provider's honest extent: Plaid's JWT scheme in full — ES256 only, key
+resolved by kid through the provider seam, iat freshness, constant-time
+body-hash compare — with no bypass in any configuration; MX signs
+nothing, so its front door is the per-instance secret URL segment
+(/webhooks/mx/{secret}), constant-time-compared, every failure an
+undifferentiated 401.
 
-Past the front door the doorbell-only law (CONTEXT.md: Webhook) governs:
-read which connection rang and which kind of change, enqueue the same
-lock-serialized job a clicked Refresh would, answer 200. Payload contents
-are never read — Plaid documents duplicate and out-of-order delivery, and
-sync is replay-safe by construction. Unknown codes and unmatched item ids
-log-and-200: an error answer only makes Plaid retry something we chose to
-ignore.
+Past the front door the doorbell-only law (CONTEXT.md: Webhook) governs
+every provider: read which connection rang and which kind of change,
+enqueue the same lock-serialized job a clicked Refresh would, answer 200.
+Payload contents are never read — Plaid documents duplicate and
+out-of-order delivery, MX doorbells are unsigned past the secret, and
+sync is replay-safe by construction, so forgery is capped at one
+idempotent sync. Unknown codes and unmatched ids log-and-200: an error
+answer only makes the provider retry something we chose to ignore.
 """
 
 import base64
@@ -32,7 +38,7 @@ from litestar.status_codes import HTTP_200_OK
 
 from pinch_backend import providers
 from pinch_backend.jobs import enqueue_sync_connection, sync_connection, sync_investments
-from pinch_backend.models import Connection, ConnectionStatus
+from pinch_backend.models import Connection, ConnectionProvider, ConnectionStatus
 from pinch_backend.observability import get_logger
 from pinch_backend.settings import settings
 from pinch_backend.sync import AUTH_ERROR_CODES, record_broken
@@ -98,7 +104,9 @@ async def _resolve_key(kid: str) -> ec.EllipticCurvePublicKey:
     jwk = _jwk_cache.get(kid)
     if jwk is None:
         try:
-            jwk = await providers.get_provider().get_webhook_verification_key(kid)
+            # The Plaid-typed materialization (M13 CP1): key resolution is
+            # Plaid plumbing, off the universal protocol (ADR 0009).
+            jwk = await providers.get_plaid_provider().get_webhook_verification_key(kid)
         except providers.ProviderError as error:
             raise VerificationFailure("key_fetch_failed") from error
         _jwk_cache[kid] = jwk
@@ -195,7 +203,13 @@ async def receive_plaid_webhook(request: Request) -> None:
     if job is None and not acts_on_item:
         log.info("webhook.ignored", webhook_type=webhook_type, webhook_code=webhook_code)
         return
-    connection = await Connection.where(lambda c, iid=item_id: c.provider_item_id == iid).first()
+    # Scoped by (provider, provider_item_id) — ids are only unique per
+    # provider (M13 CP1); this receiver is Plaid's door.
+    connection = await Connection.where(
+        lambda c, iid=item_id: (
+            (c.provider == ConnectionProvider.PLAID) & (c.provider_item_id == iid)
+        )
+    ).first()
     if connection is None:
         # Membership churn or a stale Item: acknowledged, never confirmed —
         # the 200 tells a prober nothing about which item ids exist.
@@ -248,4 +262,102 @@ async def _handle_item_event(webhook_code: str, payload: dict, connection: Conne
     )
 
 
-webhooks_router = Router(path="/webhooks", route_handlers=[receive_plaid_webhook])
+# --- MX (M13 CP4, issue #91; ADR 0009) -------------------------------------------
+
+MX_SYNC_FAMILIES = frozenset({"AGGREGATION", "INITIAL_DATA_READY", "CONNECTION_STATUS"})
+"""MX webhook types that ring the sync doorbell — each means "this
+member's world moved" and nothing more. AGGREGATION (member_data_updated)
+and INITIAL_DATA_READY are the aggregation-completed family; a
+CONNECTION_STATUS change dispatches the same sync because the sync path's
+own status probe is how a status change may reach Pinch (the no-new-states
+law: an unsigned payload never writes connection health — the probe reads
+MX and the engine's existing transitions record it). Everything else —
+including the Transactions and Holdings webhooks that carry full objects
+inline — is log-and-200: reading them would make unsigned delivery
+load-bearing for correctness (ADR 0009 rejects both). The family names
+are docs-derived, not spike-observed (registration is dashboard-only, so
+CP0 couldn't capture live payloads): an unrecognized shape logs-and-200s,
+and a family MX spells differently than documented costs at most a day —
+the reconciler's missed-doorbell verdict is the floor."""
+
+
+def _verify_mx_secret(secret: str) -> None:
+    """The whole MX front door (ADR 0009): MX signs nothing, so the
+    per-instance secret URL segment is the authentication. Constant-time
+    compare; unconfigured MX means there is nothing to compare against,
+    so every ring fails — never an unverified dispatch."""
+    if not settings.mx_configured or not settings.mx_webhook_secret:
+        raise VerificationFailure("mx_not_configured")
+    if not hmac.compare_digest(secret.encode(), settings.mx_webhook_secret.encode()):
+        raise VerificationFailure("bad_secret")
+
+
+@post("/mx/{secret:str}", include_in_schema=False, exclude_from_csrf=True, status_code=HTTP_200_OK)
+async def receive_mx_webhook(request: Request, secret: str) -> None:
+    """Authenticate, dispatch, 200 — the Plaid receiver's shape with MX's
+    front door. Past the door everything is tolerant: the payload shapes
+    are docs-derived, so unknown types, missing guids, and unparseable
+    bodies all log-and-200 (a retry would not go better, and a non-200
+    only makes MX ring again about something we chose how to handle)."""
+    try:
+        _verify_mx_secret(secret)
+    except VerificationFailure as failure:
+        log.warning("webhook.rejected", provider="mx", reason=failure.reason)
+        raise NotAuthorizedException(detail="Webhook verification failed") from failure
+
+    # Doorbell-only from here: which member rang, which kind of change.
+    try:
+        payload = json.loads(await request.body())
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict):
+        log.warning("webhook.unparseable_body", provider="mx")
+        return
+    webhook_type = payload.get("type")
+    action = payload.get("action")
+    if webhook_type not in MX_SYNC_FAMILIES:
+        log.info("webhook.ignored", provider="mx", webhook_type=webhook_type, action=action)
+        return
+    member_guid = payload.get("member_guid")
+    if not isinstance(member_guid, str) or not member_guid:
+        log.info("webhook.unmatched_item", provider="mx", webhook_type=webhook_type)
+        return
+    # Scoped by (provider, provider_item_id) — ids are only unique per
+    # provider (M13 CP1); this receiver is MX's door.
+    connection = await Connection.where(
+        lambda c, mid=member_guid: (
+            (c.provider == ConnectionProvider.MX) & (c.provider_item_id == mid)
+        )
+    ).first()
+    if connection is None:
+        # Membership churn or a stale member: acknowledged, never
+        # confirmed — the 200 tells a prober nothing about which guids
+        # exist.
+        log.info("webhook.unmatched_item", provider="mx", webhook_type=webhook_type)
+        return
+    # The same lock-serialized job a clicked Refresh would run; MX never
+    # chains investments (capability atoms exclude them, PRD #86).
+    await enqueue_sync_connection(connection.id)
+    log.info(
+        "webhook.dispatched",
+        provider="mx",
+        webhook_type=webhook_type,
+        action=action,
+        connection_id=str(connection.id),
+        job=sync_connection.name,
+    )
+
+
+@post("/mx", include_in_schema=False, exclude_from_csrf=True, status_code=HTTP_200_OK)
+async def receive_mx_webhook_without_secret() -> None:
+    """A ring with no secret segment at all is the same undifferentiated
+    401 as a wrong one — the bare path must not read as a different kind
+    of door."""
+    log.warning("webhook.rejected", provider="mx", reason="missing_secret")
+    raise NotAuthorizedException(detail="Webhook verification failed")
+
+
+webhooks_router = Router(
+    path="/webhooks",
+    route_handlers=[receive_plaid_webhook, receive_mx_webhook, receive_mx_webhook_without_secret],
+)

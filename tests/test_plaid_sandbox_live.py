@@ -2,9 +2,22 @@
 
 Proves the owned httpx client speaks actual Plaid: link-token create,
 sandbox public token, exchange, accounts, one cursor sync. Never
-CI-gating — the whole module skips without credentials in the environment:
+CI-gating — the module runs only when BOTH guards pass (M13 CP4, #91):
 
-    PINCH_PLAID_CLIENT_ID=... PINCH_PLAID_SECRET=... uv run pytest tests/test_plaid_sandbox_live.py
+- Credentials exported from the shell (the conftest blanks
+  ``PINCH_PLAID_*`` with setdefault, so .env values do NOT opt in — the
+  suite stays hermetic):
+
+      PINCH_PLAID_CLIENT_ID=... PINCH_PLAID_SECRET=... \\
+          uv run pytest tests/test_plaid_sandbox_live.py
+
+- ``plaid_environment == "sandbox"``, hard: since the production cutover
+  a developer .env may hold PINCH_PLAID_ENVIRONMENT=production, and a
+  live module must never run under a production-configured instance —
+  export PINCH_PLAID_ENVIRONMENT=sandbox alongside the credentials if
+  the .env says otherwise. (Belt and suspenders: every URL below is
+  also pinned to the sandbox base, so production is unreachable from
+  this module regardless.)
 """
 
 import asyncio
@@ -14,14 +27,21 @@ import httpx
 import pytest
 
 from pinch_backend.providers import PLAID_BASE_URLS, PlaidProvider, ProviderError
+from pinch_backend.settings import settings
 
 CLIENT_ID = os.environ.get("PINCH_PLAID_CLIENT_ID", "")
 SECRET = os.environ.get("PINCH_PLAID_SECRET", "")
 
-pytestmark = pytest.mark.skipif(
-    not (CLIENT_ID and SECRET),
-    reason="live Plaid sandbox smoke: set PINCH_PLAID_CLIENT_ID / PINCH_PLAID_SECRET to run",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        not (CLIENT_ID and SECRET),
+        reason="live Plaid sandbox smoke: set PINCH_PLAID_CLIENT_ID / PINCH_PLAID_SECRET to run",
+    ),
+    pytest.mark.skipif(
+        settings.plaid_environment != "sandbox",
+        reason="live Plaid smoke is sandbox-only: PINCH_PLAID_ENVIRONMENT must be sandbox",
+    ),
+]
 
 
 async def _sandbox_public_token(products: list[str] | None = None) -> str:
@@ -46,17 +66,20 @@ async def _sandbox_public_token(products: list[str] | None = None) -> str:
         return response.json()["public_token"]
 
 
-async def test_link_exchange_accounts_and_sync_against_sandbox() -> None:
+async def test_connect_accounts_and_sync_against_sandbox() -> None:
     provider = PlaidProvider(client_id=CLIENT_ID, secret=SECRET, environment="sandbox")
 
-    link_token = await provider.create_link_token(client_user_id="pinch-smoke-test")
-    assert link_token.startswith("link-sandbox-")
+    session_token = await provider.create_connect_session(client_user_id="pinch-smoke-test")
+    assert session_token.startswith("link-sandbox-")
 
-    exchanged = await provider.exchange_public_token(await _sandbox_public_token())
-    assert exchanged.access_token.startswith("access-sandbox-")
-    assert exchanged.item_id
+    result = await provider.complete_connect(await _sandbox_public_token())
+    assert result.secret is not None
+    assert result.secret.get_secret_value().startswith("access-sandbox-")
+    assert result.provider_item_id
+    # complete_connect binds the instance (M13 CP1): every verb below
+    # rides the minted credential without re-handling it.
 
-    accounts = await provider.get_accounts(exchanged.access_token)
+    accounts = await provider.get_accounts()
     assert accounts, "sandbox item should carry accounts"
     assert all(a.provider_account_id for a in accounts)
 
@@ -65,7 +88,7 @@ async def test_link_exchange_accounts_and_sync_against_sandbox() -> None:
     # worker's retry ladder waits it out — this loop plays that role here.
     for _attempt in range(24):
         try:
-            batch = await provider.sync_transactions(exchanged.access_token, cursor=None)
+            batch = await provider.sync_transactions(cursor=None)
             break
         except ProviderError as error:
             if error.code != "PRODUCT_NOT_READY":
@@ -75,7 +98,7 @@ async def test_link_exchange_accounts_and_sync_against_sandbox() -> None:
         pytest.fail("sandbox initial transaction pull never became ready (~2 min)")
     assert batch.next_cursor  # a drained cursor, ready to persist
 
-    await provider.remove_item(exchanged.access_token)
+    await provider.remove_item()
 
 
 async def test_investments_holdings_and_activities_against_sandbox() -> None:
@@ -85,13 +108,11 @@ async def test_investments_holdings_and_activities_against_sandbox() -> None:
     from datetime import date, timedelta
 
     provider = PlaidProvider(client_id=CLIENT_ID, secret=SECRET, environment="sandbox")
-    exchanged = await provider.exchange_public_token(
-        await _sandbox_public_token(products=["investments"])
-    )
+    await provider.complete_connect(await _sandbox_public_token(products=["investments"]))
 
     for _attempt in range(24):
         try:
-            batch = await provider.get_holdings(exchanged.access_token)
+            batch = await provider.get_holdings()
             break
         except ProviderError as error:
             if error.code != "PRODUCT_NOT_READY":
@@ -106,9 +127,9 @@ async def test_investments_holdings_and_activities_against_sandbox() -> None:
 
     end = date.today()
     activities = await provider.get_investment_activities(
-        exchanged.access_token, start_date=end - timedelta(days=730), end_date=end
+        start_date=end - timedelta(days=730), end_date=end
     )
     assert activities.activities, "sandbox investment item should carry activity"
     assert all(a.provider_activity_id for a in activities.activities)
 
-    await provider.remove_item(exchanged.access_token)
+    await provider.remove_item()

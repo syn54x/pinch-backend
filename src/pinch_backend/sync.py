@@ -38,7 +38,7 @@ and logged; the cursor still advances. Adopting such an account later
 """
 
 import uuid  # runtime import: pydantic resolves the dataclass annotation at runtime
-from datetime import timedelta
+from datetime import date, timedelta
 
 from ferro import transaction
 from pydantic import ConfigDict
@@ -53,8 +53,10 @@ from pinch_backend.models import (
     BalanceEntry,
     BalanceSource,
     Connection,
+    ConnectionProvider,
     ConnectionStatus,
     CorrectionActor,
+    Enrollment,
     Holding,
     InvestmentActivity,
     InvestmentActivityType,
@@ -81,9 +83,16 @@ AUTH_ERROR_CODES = {
     "PENDING_EXPIRATION",
     "PENDING_DISCONNECT",
     "INVALID_ACCESS_TOKEN",
-}
-"""Plaid codes that mean the login itself is dead — repair territory
-(update-mode link token), not retry territory."""
+} | providers.MX_REAUTH_STATUSES
+"""Codes that mean the login itself is dead — repair territory (Plaid:
+update-mode link token; MX: the reconnect-mode widget), not retry
+territory. Plaid speaks error codes; MX speaks member connection
+statuses (CHALLENGED/DENIED/LOCKED/…, raised as codes by its sync-path
+status probe, M13 CP3) — disjoint vocabularies, one verdict, and only
+ever the existing three connection statuses (PRD #86). MX's FAILED
+family is deliberately absent: those ride the transient ladder below,
+because MX self-aggregates nightly and a later attempt may find the
+member healed."""
 
 CONSENT_ERROR_CODES = {"ADDITIONAL_CONSENT_REQUIRED"}
 """The Plaid code meaning the Item lacks investments consent (M10 CP2) —
@@ -134,7 +143,6 @@ async def record_broken(connection: Connection, status: ConnectionStatus, code: 
 async def _sync_investments_guarded(
     connection: Connection,
     provider: "providers.SyncProvider",
-    access_token: str,
     accounts: list[Account],
 ) -> None:
     """A code bug in the investments phase must record, never raise: the
@@ -144,7 +152,7 @@ async def _sync_investments_guarded(
     phase's transaction), logs with the traceback, and lands as
     INTERNAL_ERROR in the phase's health field."""
     try:
-        await _sync_investments(connection, provider, access_token, accounts)
+        await _sync_investments(connection, provider, accounts)
     except Exception:
         log.exception("sync.investments_phase_crashed", connection_id=str(connection.id))
         connection.investments_error_detail = "INTERNAL_ERROR"
@@ -154,7 +162,6 @@ async def _sync_investments_guarded(
 async def _sync_investments(
     connection: Connection,
     provider: "providers.SyncProvider",
-    access_token: str,
     accounts: list[Account],
 ) -> None:
     """The investments phase (M10 CP0, issue #73; ADR 0007) — after the
@@ -181,9 +188,9 @@ async def _sync_investments(
     window_end = utcnow().date()
     window_start = window_end - timedelta(days=providers.INVESTMENTS_WINDOW_DAYS)
     try:
-        batch = await provider.get_holdings(access_token)
+        batch = await provider.get_holdings()
         activity_batch = await provider.get_investment_activities(
-            access_token, start_date=window_start, end_date=window_end
+            start_date=window_start, end_date=window_end
         )
     except providers.ProviderError as error:
         if error.code in CONSENT_ERROR_CODES:
@@ -391,22 +398,68 @@ async def _sync_investments(
     )
 
 
+async def _materialize_mx_for_sync(connection: Connection) -> "providers.SyncProvider":
+    """The MX sync binding (M13 CP3, #90): the enrollment's user guid plus
+    the connection's member guid — no per-connection secret exists (ADR
+    0009) — plus the removed-derivation's memory: a callable answering
+    which provider transaction ids Pinch holds inside the re-list window,
+    so the client can diff presence without ever seeing the database."""
+    ledger_id = connection.ledger_id
+    assert ledger_id is not None
+    enrollment = await Enrollment.where(
+        lambda e, lid=ledger_id: (e.ledger_id == lid) & (e.provider == ConnectionProvider.MX)
+    ).first()
+    if enrollment is None:
+        # Corrupted state, not a request or provider problem: MX connects
+        # only ever ride an ensured enrollment (the connections API's
+        # stance) — fail the job loudly instead of inventing a status.
+        raise RuntimeError(f"MX connection {connection.id} has no enrollment")
+    cid = connection.id
+
+    async def stored_window_ids(window_start: date) -> set[str]:
+        accounts = await Account.where(lambda a, c=cid: a.connection_id == c).all()
+        account_ids = [a.id for a in accounts]
+        if not account_ids:
+            return set()
+        rows = await Transaction.where(
+            lambda t, ids=account_ids, ws=window_start: t.account_id.in_(ids) & (t.date >= ws)
+        ).all()
+        return {r.provider_transaction_id for r in rows if r.provider_transaction_id is not None}
+
+    return providers.get_provider(
+        ConnectionProvider.MX,
+        user_guid=enrollment.provider_user_id,
+        member_guid=connection.provider_item_id,
+        stored_window_ids=stored_window_ids,
+    )
+
+
 async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutcome:
     """One sync pass. Raises ``providers.ProviderError`` on a genuine
     transient when retries remain — the job runner's retry strategy is
     the backoff; on the final attempt the failure is recorded instead.
     A not-ready pull does neither: quiet wait (M11 CP1)."""
     connection = await Connection.where(lambda c: c.id == connection_id).first()
-    if connection is None or connection.encrypted_secret is None:
-        # Deleted between defer and run (disconnect), or never completed
-        # exchange — nothing to sync, nothing to record.
+    if connection is None:
+        # Deleted between defer and run (disconnect) — nothing to sync,
+        # nothing to record.
         return SyncOutcome()
-
-    access_token = decrypt_secret(connection.encrypted_secret)
-    provider = providers.get_provider()
+    # Investments chain only where the provider delivers them: MX's
+    # capability atoms exclude holdings/activity (PRD #86), so its banking
+    # pass never sets investments_due — the chained job is Plaid's.
+    chains_investments = connection.provider is not ConnectionProvider.MX
+    if connection.provider is ConnectionProvider.MX:
+        provider = await _materialize_mx_for_sync(connection)
+    else:
+        if connection.encrypted_secret is None:
+            # Never completed exchange — nothing to sync, nothing to record.
+            return SyncOutcome()
+        provider = providers.get_provider(
+            connection.provider, secret=decrypt_secret(connection.encrypted_secret)
+        )
     try:
-        provider_accounts = await provider.get_accounts(access_token)
-        batch = await provider.sync_transactions(access_token, connection.sync_cursor)
+        provider_accounts = await provider.get_accounts()
+        batch = await provider.sync_transactions(connection.sync_cursor)
     except providers.ProviderError as error:
         if error.code in AUTH_ERROR_CODES:
             # A dead login is dead for both products — no investments
@@ -437,7 +490,7 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
             # banking product must not hold investments hostage, so the
             # ladder's end still chains the phase. Once per ladder, at
             # exhaustion, not per retry — off ``investments_due``.
-            return SyncOutcome(investments_due=True)
+            return SyncOutcome(investments_due=chains_investments)
         raise  # transient with retries remaining: the runner's backoff handles it
 
     cid = connection.id
@@ -598,16 +651,21 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
         connection.last_synced_at = utcnow()
         await connection.save()
 
-    if connection.institution_name is None:
-        # Backfill for pre-enabler rows (#39) — best-effort, outside the
-        # effects transaction: a nicety must never fail a sync.
+    if connection.institution_name is None or connection.provider_institution_id is None:
+        # Backfill for pre-enabler and pre-M13 rows (#39, #88): the name
+        # and the provider institution id ride the same lookup —
+        # best-effort, outside the effects transaction: a nicety must
+        # never fail a sync.
         try:
-            name = await provider.get_institution_name(access_token)
+            institution = await provider.get_institution()
         except providers.ProviderError as error:
             log.info("connection.institution_backfill_failed", code=error.code)
-            name = None
-        if name is not None:
-            connection.institution_name = name
+            institution = None
+        if institution is not None:
+            if connection.institution_name is None:
+                connection.institution_name = institution.name
+            if connection.provider_institution_id is None:
+                connection.provider_institution_id = institution.provider_institution_id
             await connection.save()
 
     log.info(
@@ -624,7 +682,7 @@ async def run_sync(connection_id: uuid.UUID, *, final_attempt: bool) -> SyncOutc
         created=created,
         reopened=reopened,
         invalidated=invalidated,
-        investments_due=True,
+        investments_due=chains_investments,
     )
 
 
@@ -636,10 +694,18 @@ async def run_investments_sync(connection_id: uuid.UUID) -> None:
     (CI finding); chained, banking latency and the flywheel are
     untouched. Never raises: the guarded phase records its own health."""
     connection = await Connection.where(lambda c: c.id == connection_id).first()
-    if connection is None or connection.encrypted_secret is None:
+    if connection is None:
         return  # deleted between defer and run — nothing to record
-    access_token = decrypt_secret(connection.encrypted_secret)
-    provider = providers.get_provider()
+    if connection.provider is ConnectionProvider.MX or connection.encrypted_secret is None:
+        # Explicitly per-provider (M13 CP2): MX never chains here — its
+        # capability atoms exclude holdings/activity, and its banking pass
+        # never sets investments_due. A secretless Plaid row never
+        # completed exchange. Either way: nothing to sync, nothing to
+        # record.
+        return
+    provider = providers.get_provider(
+        connection.provider, secret=decrypt_secret(connection.encrypted_secret)
+    )
     cid = connection.id
     accounts = await Account.where(lambda a, c=cid: a.connection_id == c).all()
-    await _sync_investments_guarded(connection, provider, access_token, accounts)
+    await _sync_investments_guarded(connection, provider, accounts)

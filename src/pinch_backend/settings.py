@@ -133,6 +133,22 @@ class Settings(BaseSettings):
     whenever Plaid is configured (ADR 0008): there is no webhook-less mode,
     so a Plaid instance that can't be reached must fail at startup, not
     silently never sync. Dev and self-host use a tunnel (ngrok)."""
+    mx_client_id: str = ""
+    """Instance-level, like everything MX (ADR 0009): MX holds no
+    per-connection secret — the client_id/api_key pair plus guids is the
+    whole credential story. Absent ⇒ MX endpoints refuse cleanly while
+    every other provider stands (PRD #86 story 16)."""
+    mx_api_key: str = ""
+    mx_environment: Literal["sandbox", "production"] = "sandbox"
+    """Same code path, different base URL (MX calls its sandbox the
+    integration environment — int-api.mx.com); a typo fails at startup
+    like every other misconfiguration."""
+    mx_webhook_secret: str = ""
+    """The per-instance secret URL segment authenticating MX's unsigned
+    doorbells (/webhooks/mx/{secret}, ADR 0009): MX signs nothing, so a
+    constant-time compare of this segment is the receiver's whole front
+    door. Required whenever MX is configured (the ADR 0008 validator's
+    MX analog, CP4 #91)."""
     reconcile_interval_hours: int = Field(default=24, ge=1)
     """The reconciler's tick (M11 CP3, ADR 0008): how often the periodic
     probe-then-decide pass runs. 24h default so dev machines aren't
@@ -147,6 +163,13 @@ class Settings(BaseSettings):
     @property
     def plaid_configured(self) -> bool:
         return bool(self.plaid_client_id and self.plaid_secret)
+
+    @property
+    def mx_configured(self) -> bool:
+        """MX needs no encryption key (PRD #86 story 17): the
+        ``secret_encryption_key`` requirement stays Plaid-only because MX
+        mints no per-connection secret to encrypt."""
+        return bool(self.mx_client_id and self.mx_api_key)
 
     @model_validator(mode="after")
     def _resolve_secret_key(self) -> "Settings":
@@ -171,6 +194,20 @@ class Settings(BaseSettings):
         not discover it by never syncing."""
         if self.plaid_configured and not self.plaid_webhook_url:
             raise ValueError("PINCH_PLAID_WEBHOOK_URL is required when Plaid is configured")
+        return self
+
+    @model_validator(mode="after")
+    def _require_webhook_secret_with_mx(self) -> "Settings":
+        """ADR 0008's webhook validator to MX's honest extent (ADR 0009):
+        the receiver URL itself is registered dashboard-side and the API
+        can neither probe nor heal it, so startup can only require the
+        secret that authenticates the doorbells — the setting's existence
+        is the operator's attestation that /webhooks/mx/{secret} was
+        registered. A registration mistake still can't be silent: MX
+        self-aggregates nightly, so the reconciler cries webhook.missed
+        daily at a URL nobody rings."""
+        if self.mx_configured and not self.mx_webhook_secret:
+            raise ValueError("PINCH_MX_WEBHOOK_SECRET is required when MX is configured")
         return self
 
 

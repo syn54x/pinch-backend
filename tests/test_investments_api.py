@@ -122,8 +122,16 @@ class FakeInvestmentsProvider:
         self.investments_failure: providers.ProviderError | None = None
         self.holdings_calls = 0
         self.cursor_serial = 0
+        self.secret: str | None = None
+        """The most recent materialization's bound credential."""
 
-    async def get_item_state(self, access_token: str) -> providers.ItemState:
+    def materialize(self, provider, *, secret: str | None = None) -> "FakeInvestmentsProvider":
+        """Stands in for ``get_provider`` (M13 CP1): records the bound
+        secret the method signatures no longer carry."""
+        self.secret = secret
+        return self
+
+    async def get_item_state(self) -> providers.ItemState:
         """The midnight-UTC reconcile cron (M11) can fire inside any test's
         worker window. Answer with the registered URL and no update stamps
         so the verdict is "quiet" — a no-op pass instead of an
@@ -132,23 +140,27 @@ class FakeInvestmentsProvider:
 
         return providers.ItemState(webhook=settings.plaid_webhook_url)
 
-    async def update_webhook(self, access_token: str, url: str) -> None:
+    async def update_webhook(self, url: str) -> None:
         return None
 
-    async def create_link_token(self, *, client_user_id: str, access_token: str | None = None):
+    async def create_connect_session(self, *, client_user_id: str) -> str:
         return "link-fake"
 
-    async def exchange_public_token(self, public_token: str) -> providers.ExchangedToken:
-        return providers.ExchangedToken(
-            access_token=f"access-fake-{public_token}", item_id=f"item-{public_token}"
+    async def complete_connect(self, token: str) -> providers.ConnectResult:
+        self.secret = f"access-fake-{token}"
+        return providers.ConnectResult(
+            provider_item_id=f"item-{token}",
+            provider_institution_id="ins_platypus",
+            institution_name="First Platypus Bank",
+            secret=self.secret,
         )
 
-    async def get_accounts(self, access_token: str) -> list[providers.ProviderAccount]:
+    async def get_accounts(self) -> list[providers.ProviderAccount]:
         if self.failure is not None:
             raise self.failure
         return self.accounts
 
-    async def sync_transactions(self, access_token: str, cursor: str | None):
+    async def sync_transactions(self, cursor: str | None):
         if self.failure is not None:
             raise self.failure
         if self.transactions_failure is not None:
@@ -160,7 +172,7 @@ class FakeInvestmentsProvider:
             added=[], modified=[], removed=[], next_cursor=f"cursor-{self.cursor_serial}"
         )
 
-    async def get_holdings(self, access_token: str) -> providers.InvestmentsBatch:
+    async def get_holdings(self) -> providers.InvestmentsBatch:
         self.holdings_calls += 1
         if self.investments_failure is not None:
             raise self.investments_failure
@@ -169,7 +181,7 @@ class FakeInvestmentsProvider:
         return providers.InvestmentsBatch(securities=[], holdings=[])
 
     async def get_investment_activities(
-        self, access_token: str, start_date: date, end_date: date
+        self, start_date: date, end_date: date
     ) -> providers.ActivitiesBatch:
         if self.investments_failure is not None:
             raise self.investments_failure
@@ -178,23 +190,25 @@ class FakeInvestmentsProvider:
             return self.activity_batches.pop(0)
         return providers.ActivitiesBatch(securities=[], activities=[])
 
-    async def remove_item(self, access_token: str) -> None:
+    async def remove_item(self) -> None:
         return None
 
-    async def get_institution_name(self, access_token: str) -> str | None:
-        return "First Platypus Bank"
+    async def get_institution(self) -> providers.ProviderInstitution:
+        return providers.ProviderInstitution(
+            provider_institution_id="ins_platypus", name="First Platypus Bank"
+        )
 
 
 @pytest.fixture
 def fake_provider(plaid_settings, monkeypatch):
     fake = FakeInvestmentsProvider()
-    monkeypatch.setattr(providers, "get_provider", lambda: fake)
+    monkeypatch.setattr(providers, "get_provider", fake.materialize)
     return fake
 
 
 async def _connect(client) -> dict:
     response = await client.post(
-        CONNECTIONS, json={"public_token": "public-abc"}, headers=await _csrf(client)
+        CONNECTIONS, json={"provider": "plaid", "token": "public-abc"}, headers=await _csrf(client)
     )
     assert response.status_code == 201, response.text
     return response.json()
@@ -246,7 +260,7 @@ async def test_banking_only_connection_never_calls_investments(
     """The billing gate (PRD #72): no investment-kind accounts, no
     investments call — cost surface equals value surface."""
     fake = FakeInvestmentsProvider(with_brokerage=False)
-    monkeypatch.setattr(providers, "get_provider", lambda: fake)
+    monkeypatch.setattr(providers, "get_provider", fake.materialize)
 
     await _signup(client)
     await _connect(client)
@@ -665,7 +679,8 @@ async def test_missing_consent_flags_connection_and_banking_stands(
 
     brokerage = next(a for a in body["accounts"] if a["kind"] == "investment")
     entries = (await client.get(f"/api/v1/accounts/{brokerage['id']}/balance-entries")).json()
-    assert len(entries["items"]) == 1  # the banking phase committed
+    # Connect-time observation (M13 CP2) + the banking phase's commit.
+    assert len(entries["items"]) == 2
 
 
 async def test_consent_flag_clears_after_consented_resync(client, db, fake_provider, run_jobs):

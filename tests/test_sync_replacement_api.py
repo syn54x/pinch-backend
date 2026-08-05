@@ -97,7 +97,11 @@ class FakeSyncProvider:
         self.batches: list[providers.SyncBatch] = []
         self.cursor_serial = 0
 
-    async def get_item_state(self, access_token: str) -> providers.ItemState:
+    def materialize(self, provider, *, secret: str | None = None) -> "FakeSyncProvider":
+        """Stands in for ``get_provider`` (M13 CP1)."""
+        return self
+
+    async def get_item_state(self) -> providers.ItemState:
         """The midnight-UTC reconcile cron (M11) can fire inside any test's
         worker window. Answer with the registered URL and no update stamps
         so the verdict is "quiet" — a no-op pass instead of an
@@ -106,37 +110,42 @@ class FakeSyncProvider:
 
         return providers.ItemState(webhook=settings.plaid_webhook_url)
 
-    async def update_webhook(self, access_token: str, url: str) -> None:
+    async def update_webhook(self, url: str) -> None:
         return None
 
-    async def create_link_token(self, *, client_user_id: str, access_token: str | None = None):
+    async def create_connect_session(self, *, client_user_id: str) -> str:
         return "link-fake"
 
-    async def get_institution_name(self, access_token: str) -> str | None:
-        return "First Platypus Bank"
-
-    async def exchange_public_token(self, public_token: str) -> providers.ExchangedToken:
-        return providers.ExchangedToken(
-            access_token=f"access-fake-{public_token}", item_id=f"item-{public_token}"
+    async def get_institution(self) -> providers.ProviderInstitution:
+        return providers.ProviderInstitution(
+            provider_institution_id="ins_platypus", name="First Platypus Bank"
         )
 
-    async def get_accounts(self, access_token: str) -> list[providers.ProviderAccount]:
+    async def complete_connect(self, token: str) -> providers.ConnectResult:
+        return providers.ConnectResult(
+            provider_item_id=f"item-{token}",
+            provider_institution_id="ins_platypus",
+            institution_name="First Platypus Bank",
+            secret=f"access-fake-{token}",
+        )
+
+    async def get_accounts(self) -> list[providers.ProviderAccount]:
         return self.accounts
 
-    async def sync_transactions(self, access_token: str, cursor: str | None):
+    async def sync_transactions(self, cursor: str | None):
         if self.batches:
             return self.batches.pop(0)
         self.cursor_serial += 1
         return _batch(cursor=f"cursor-auto-{self.cursor_serial}")
 
-    async def remove_item(self, access_token: str) -> None:
+    async def remove_item(self) -> None:
         return None
 
 
 @pytest.fixture
 def fake_provider(plaid_settings, monkeypatch):
     fake = FakeSyncProvider()
-    monkeypatch.setattr(providers, "get_provider", lambda: fake)
+    monkeypatch.setattr(providers, "get_provider", fake.materialize)
     return fake
 
 
@@ -145,7 +154,7 @@ async def _connect_and_sync(client, fake, first_batch) -> dict:
     scripted, then run it."""
     fake.batches = [first_batch]
     response = await client.post(
-        CONNECTIONS, json={"public_token": "public-abc"}, headers=await _csrf(client)
+        CONNECTIONS, json={"provider": "plaid", "token": "public-abc"}, headers=await _csrf(client)
     )
     assert response.status_code == 201, response.text
     return response.json()

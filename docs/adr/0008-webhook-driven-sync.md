@@ -25,3 +25,7 @@ cost tracks failures, not users — the sweep-all-nightly alternative was
 rejected as polling readmitted through the service door. Readiness
 polling dies with this: PRODUCT_NOT_READY becomes a quiet wait for the
 doorbell instead of a retry ladder ending in a parked error.
+
+Amended by ADR 0009: the webhook laws are provider-universal; the
+enforcement mechanisms (registration, verification, healing) are
+per-provider, to each provider's honest extent.

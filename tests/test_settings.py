@@ -114,6 +114,44 @@ def test_plaid_configured_with_key() -> None:
     assert s.plaid_environment == "sandbox"
 
 
+def test_mx_unconfigured_by_default() -> None:
+    s = Settings()
+    assert s.mx_configured is False
+    assert s.mx_environment == "sandbox"
+
+
+def test_mx_configured_needs_both_credentials() -> None:
+    """The pair is the credential (ADR 0009): half a pair is unconfigured,
+    never half-working."""
+    assert Settings(mx_client_id="cid").mx_configured is False
+    assert Settings(mx_api_key="key").mx_configured is False
+    assert Settings(mx_client_id="cid", mx_api_key="key", mx_webhook_secret="s").mx_configured
+
+
+def test_mx_configured_requires_webhook_secret() -> None:
+    """The ADR 0008 validator's MX analog (CP4, #91), to MX's honest
+    extent: the URL is dashboard-registered and unprobeable, so the
+    secret authenticating the doorbells is what startup can require —
+    loud at boot, never discovered by a receiver that 401s everything."""
+    with pytest.raises(ValueError, match="PINCH_MX_WEBHOOK_SECRET"):
+        Settings(mx_client_id="cid", mx_api_key="key")
+
+
+def test_mx_unconfigured_needs_no_webhook_secret() -> None:
+    """Half a credential pair is unconfigured (never half-working), so it
+    must not drag the webhook-secret requirement in either."""
+    assert Settings(mx_client_id="cid").mx_webhook_secret == ""
+
+
+def test_mx_needs_no_encryption_key() -> None:
+    """An MX-only instance skips Plaid-only machinery (PRD #86 story 17):
+    MX mints no per-connection secret, so the encryption-key requirement
+    stays Plaid's."""
+    s = Settings(mx_client_id="cid", mx_api_key="key", mx_webhook_secret="hook-secret")
+    assert s.mx_configured is True
+    assert s.secret_encryption_key == ""
+
+
 def test_reconcile_interval_defaults_dev_friendly() -> None:
     """24h default so dev machines aren't ticking hourly for no one
     (PRD #77 story 17); production sets PINCH_RECONCILE_INTERVAL_HOURS=1."""

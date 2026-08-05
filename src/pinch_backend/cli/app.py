@@ -232,18 +232,18 @@ def plaid_item(connection_id: str | None = None) -> None:
             await disconnect_database()
 
     async def _probe_connections() -> None:
-        query = Connection.where(lambda c: c.encrypted_secret != None)  # noqa: E711
+        from pinch_backend.models import ConnectionProvider
+
+        # A Plaid diagnostic probes Plaid connections only (M13 CP1).
+        query = Connection.where(
+            lambda c: (c.provider == ConnectionProvider.PLAID) & (c.encrypted_secret != None)  # noqa: E711
+        )
         if connection_id:  # empty string = the justfile's "all" default
             wanted = uuid_module.UUID(connection_id)
             query = query.where(lambda c, w=wanted: c.id == w)
         connections = await query.all()
         if not connections:
             raise SystemExit("no matching connections with credentials")
-        provider = providers.PlaidProvider(
-            client_id=settings.plaid_client_id,
-            secret=settings.plaid_secret,
-            environment=settings.plaid_environment,
-        )
         for connection in connections:
             print(
                 f"connection {connection.id} · "
@@ -254,8 +254,16 @@ def plaid_item(connection_id: str | None = None) -> None:
                 f"consent_required={connection.investments_consent_required}"
             )
             assert connection.encrypted_secret is not None
+            # Constructed per connection (M13 CP1): credentials ride the
+            # constructor, so each probe binds its own Plaid instance.
+            provider = providers.PlaidProvider(
+                client_id=settings.plaid_client_id,
+                secret=settings.plaid_secret,
+                environment=settings.plaid_environment,
+                access_token=decrypt_secret(connection.encrypted_secret),
+            )
             try:
-                report = await provider.get_item_status(decrypt_secret(connection.encrypted_secret))
+                report = await provider.get_item_status()
             except providers.ProviderError as error:
                 print(f"  probe failed: {error.code}")
                 continue
