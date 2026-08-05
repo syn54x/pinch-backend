@@ -1,11 +1,17 @@
+from typing import TYPE_CHECKING
+
 from litestar import Litestar, get
 from litestar.config.cors import CORSConfig
 from litestar.config.csrf import CSRFConfig
 from litestar.di import Provide
+from litestar.exceptions import HTTPException
 from litestar.middleware import DefineMiddleware
 from litestar.openapi import OpenAPIConfig
 from litestar.openapi.plugins import ScalarRenderPlugin, SwaggerRenderPlugin, YamlRenderPlugin
 from litestar.openapi.spec import Components, SecurityScheme
+
+if TYPE_CHECKING:
+    from litestar.types import Scope
 
 from pinch_backend import __version__
 from pinch_backend.api.accounts import accounts_router
@@ -34,10 +40,12 @@ from pinch_backend.auth.guards import (
 from pinch_backend.auth.routes import auth_router
 from pinch_backend.db import FerroSessionMiddleware, connect_database, disconnect_database
 from pinch_backend.jobs import close_job_app, ensure_job_schema, open_job_app
-from pinch_backend.observability import configure_observability
+from pinch_backend.observability import configure_observability, get_logger
 from pinch_backend.settings import settings
 
 configure_observability(service_name="pinch-backend-api")
+
+log = get_logger(__name__)
 
 API_DESCRIPTION = """\
 The Pinch developer API: anything the app can do, a script can do.
@@ -67,6 +75,25 @@ exhausted. An unparseable cursor answers 400 in the error envelope.
 @get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "version": __version__}
+
+
+async def log_unhandled_exception(exc: Exception, scope: "Scope") -> None:
+    """Every unhandled 500 logs its traceback into the structlog stream.
+
+    Litestar's default only logs tracebacks in debug mode
+    (``log_exceptions="debug"``), which Pinch never runs — without this
+    hook a production 500 is one silent access-log line (found the hard
+    way in the M13 smoke test). HTTPExceptions are the expected error
+    envelope, already surfaced to the client — logging them here would
+    double every 4xx."""
+    if isinstance(exc, HTTPException):
+        return
+    log.error(
+        "request.unhandled_exception",
+        method=scope.get("method"),
+        path=scope.get("path"),
+        exc_info=exc,
+    )
 
 
 def create_app(*, manage_database: bool = True) -> Litestar:
@@ -177,6 +204,7 @@ def create_app(*, manage_database: bool = True) -> Litestar:
         # succeeded import commit into a client-visible 500.
         on_startup=[connect_database, open_job_app, ensure_job_schema] if manage_database else [],
         on_shutdown=[close_job_app, disconnect_database] if manage_database else [],
+        after_exception=[log_unhandled_exception],
     )
 
 

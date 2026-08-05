@@ -33,6 +33,11 @@ def pytest_configure() -> None:
     # the settings object directly.
     os.environ.setdefault("PINCH_PLAID_CLIENT_ID", "")
     os.environ.setdefault("PINCH_PLAID_SECRET", "")
+    # The environment knob too, not only the credentials: a post-cutover
+    # developer .env says production, and Settings() in tests must answer
+    # the sandbox default (empty is not an option — the field is a
+    # Literal, and "" would refuse to construct).
+    os.environ.setdefault("PINCH_PLAID_ENVIRONMENT", "sandbox")
     os.environ.setdefault("PINCH_MX_CLIENT_ID", "")
     os.environ.setdefault("PINCH_MX_API_KEY", "")
     # A live-smoke opt-in makes the provider *configured*, which arms its
@@ -74,6 +79,9 @@ def pytest_configure() -> None:
     # Same hermetic stance for the cookie flag: developer .envs flip it off
     # for plain-http Safari dev; the suite tests the secure default.
     os.environ["PINCH_SESSION_COOKIE_SECURE"] = "true"
+    # And the frontend origin: the CORS tests assert the default; a
+    # developer .env carries the https dev origin (F1 Safari setup).
+    os.environ.setdefault("PINCH_FRONTEND_BASE_URL", "http://localhost:5173")
 
 
 def _test_database_url() -> str:

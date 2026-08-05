@@ -202,3 +202,28 @@ async def test_the_error_envelope_is_documented_as_the_contract(client) -> None:
     description = schema["info"]["description"]
     for term in ("status_code", "detail", "extra"):
         assert term in description, f"error envelope field {term} undocumented"
+
+
+async def test_unhandled_exceptions_log_a_traceback_event() -> None:
+    """The M13 smoke-test lesson: Litestar's default logs tracebacks only
+    in debug mode, so without the after_exception hook a production 500
+    is one silent access-log line. The hook logs into the structlog
+    stream; expected HTTPExceptions (the error envelope) stay unlogged —
+    they would double every 4xx."""
+    import structlog
+    from litestar.exceptions import NotFoundException
+
+    from pinch_backend.api.app import create_app, log_unhandled_exception
+
+    assert log_unhandled_exception in create_app(manage_database=False).after_exception
+
+    scope = {"method": "POST", "path": "/api/v1/connections/connect-session"}
+    with structlog.testing.capture_logs() as captured:
+        await log_unhandled_exception(RuntimeError("boom"), scope)  # type: ignore[arg-type]
+        await log_unhandled_exception(NotFoundException(), scope)  # type: ignore[arg-type]
+    assert len(captured) == 1
+    event = captured[0]
+    assert event["event"] == "request.unhandled_exception"
+    assert event["log_level"] == "error"
+    assert event["path"] == "/api/v1/connections/connect-session"
+    assert isinstance(event["exc_info"], RuntimeError)
