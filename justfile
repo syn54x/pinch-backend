@@ -1,4 +1,7 @@
 set dotenv-load := true
+# Recipes get the local file; the app itself resolves its own via PINCH_ENV
+# (settings.py) — prod work exports PINCH_ENV=prod and reads .env.prod.
+set dotenv-filename := ".env.local"
 
 default:
     @just --list
