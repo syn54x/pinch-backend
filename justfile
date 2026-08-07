@@ -6,6 +6,9 @@ set dotenv-filename := ".env.local"
 default:
     @just --list
 
+claude *args:
+    claude --add-dir ~/github/pinch-finance/pinch --add-dir ~/github/pinch-finance/pinch-frontend {{args}}
+
 setup:
     uv sync
     uv run prek install
