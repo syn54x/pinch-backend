@@ -320,7 +320,11 @@ async def receive_mx_webhook(request: Request, secret: str) -> None:
         return
     member_guid = payload.get("member_guid")
     if not isinstance(member_guid, str) or not member_guid:
-        log.info("webhook.unmatched_item", provider="mx", webhook_type=webhook_type)
+        # Distinct from the no-such-connection case below: one is a stale
+        # member (benign), the other says MX's payload doesn't carry the
+        # key these docs-derived shapes expect — which would silently drop
+        # LIVE doorbells too. One shared log line couldn't tell them apart.
+        log.info("webhook.missing_member_guid", provider="mx", webhook_type=webhook_type)
         return
     # Scoped by (provider, provider_item_id) — ids are only unique per
     # provider (M13 CP1); this receiver is MX's door.

@@ -1063,6 +1063,48 @@ async def test_mx_create_user_posts_the_ledger_id() -> None:
     assert seen["user"] == {"id": "pinch-lid-1"}
 
 
+async def test_mx_list_users_walks_every_page() -> None:
+    """The relic hunt reads whole collections: a client with more than one
+    page of users is exactly the client whose relics matter, so stopping
+    at page 1 would under-report where it counts."""
+    pages = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params["page"])
+        pages.append(page)
+        return httpx.Response(
+            200,
+            json={
+                "users": [{"guid": f"USR-{page}"}],
+                "pagination": {"current_page": page, "total_pages": 3},
+            },
+        )
+
+    users = await _mx(handler).list_users()
+    assert [u["guid"] for u in users] == ["USR-1", "USR-2", "USR-3"]
+    assert pages == [1, 2, 3]
+
+
+async def test_mx_list_members_is_scoped_to_the_named_user() -> None:
+    """The walk passes each guid in rather than reading the binding — an
+    unbound diagnostic instance has none to read."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        return httpx.Response(
+            200,
+            json={
+                "members": [{"guid": "MBR-1", "name": "MX Bank"}],
+                "pagination": {"current_page": 1, "total_pages": 1},
+            },
+        )
+
+    members = await _mx(handler).list_members("USR-xyz")
+    assert [m["guid"] for m in members] == ["MBR-1"]
+    assert seen["path"] == "/users/USR-xyz/members"
+
+
 async def test_mx_connect_session_mints_a_widget_url() -> None:
     """The spike-verified request shape under the enrollment user; the
     answer is the hosted widget URL — the opaque string the frontend's
