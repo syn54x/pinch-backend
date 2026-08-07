@@ -45,22 +45,48 @@ def test_importing_settings_puts_dotenv_on_the_process_environment(tmp_path) -> 
     logfire, never from Settings — pydantic-settings' own .env read fills
     that object and leaves the environment untouched, which is what left
     `uv run pinch-dev` without an API key while `just` recipes worked."""
-    (tmp_path / ".env").write_text(f"{PROBE}=from-dotenv\n")
+    (tmp_path / ".env.local").write_text(f"{PROBE}=from-dotenv\n")
 
     assert _probe_after_importing_settings(tmp_path) == "from-dotenv"
 
 
+def test_pinch_env_selects_the_dotenv_file(tmp_path) -> None:
+    """PINCH_ENV partitions the config: local → .env.local (the default),
+    prod → .env.prod — so a cutover swaps a knob, never overwrites the one
+    shared file (the 2026-08-02 failure mode)."""
+    (tmp_path / ".env.local").write_text(f"{PROBE}=from-local\n")
+    (tmp_path / ".env.prod").write_text(f"{PROBE}=from-prod\n")
+
+    assert _probe_after_importing_settings(tmp_path, PINCH_ENV="prod") == "from-prod"
+    assert _probe_after_importing_settings(tmp_path, PINCH_ENV="local") == "from-local"
+
+
+def test_a_bare_dotenv_is_no_longer_read(tmp_path) -> None:
+    """The unpartitioned file is retired: a leftover .env warns at import
+    and contributes nothing."""
+    (tmp_path / ".env").write_text(f"{PROBE}=from-legacy-dotenv\n")
+
+    assert _probe_after_importing_settings(tmp_path) == ""
+
+
+def test_an_unknown_pinch_env_refuses_at_import(tmp_path) -> None:
+    """A typo'd environment fails loudly at startup, like every other
+    misconfiguration."""
+    with pytest.raises(subprocess.CalledProcessError):
+        _probe_after_importing_settings(tmp_path, PINCH_ENV="staging")
+
+
 def test_the_dotenv_read_is_relative_to_the_working_directory(tmp_path) -> None:
     """Pins the explicit path argument: bare `load_dotenv()` walks up from
-    the calling module's directory, so it would read the repo's own .env
+    the calling module's directory, so it would read the repo's own file
     from anywhere — and disagree with `env_file`, which is cwd-relative."""
-    assert _probe_after_importing_settings(tmp_path) == ""  # no .env here
+    assert _probe_after_importing_settings(tmp_path) == ""  # no .env.local here
 
 
 def test_a_real_environment_variable_beats_the_dotenv_file(tmp_path) -> None:
     """Same precedence pydantic-settings uses: the environment wins, so an
     inline `FOO=bar uv run ...` override still means what it says."""
-    (tmp_path / ".env").write_text(f"{PROBE}=from-dotenv\n")
+    (tmp_path / ".env.local").write_text(f"{PROBE}=from-dotenv\n")
 
     assert _probe_after_importing_settings(tmp_path, **{PROBE: "from-shell"}) == "from-shell"
 

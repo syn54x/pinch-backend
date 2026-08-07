@@ -1,30 +1,61 @@
+import logging
+import os
 import secrets
 from datetime import timedelta
+from pathlib import Path
 from typing import Literal
 
 from dotenv import load_dotenv
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# .env onto the process environment, not just onto Settings. Some
-# credentials are deliberately not Pinch settings: pydantic-ai reads the
-# provider key (ANTHROPIC_API_KEY, PYDANTIC_AI_GATEWAY_API_KEY) straight
-# from os.environ, as does logfire (LOGFIRE_TOKEN) — the instance
+# PINCH_ENV selects which dotenv file backs this process. It can only come
+# from the process environment — it decides which file to read, so no file
+# may set it. Default `local`: a machine that forgets the knob gets local
+# credentials, never production ones (the failure mode is loud — a prod
+# deploy without PINCH_ENV=prod finds no .env.prod values and refuses at
+# startup — instead of quiet, which is how the 2026-08-02 cutover broke
+# every sandbox-dependent e2e spec by overwriting the one shared .env).
+_ENV_FILES = {"local": ".env.local", "dev": ".env.dev", "prod": ".env.prod"}
+_pinch_env = os.environ.get("PINCH_ENV", "local")
+if _pinch_env not in _ENV_FILES:
+    raise ValueError(f"PINCH_ENV must be one of {sorted(_ENV_FILES)}, got {_pinch_env!r}")
+_env_file = _ENV_FILES[_pinch_env]
+
+# The selected file onto the process environment, not just onto Settings.
+# Some credentials are deliberately not Pinch settings: pydantic-ai reads
+# the provider key (ANTHROPIC_API_KEY, PYDANTIC_AI_GATEWAY_API_KEY)
+# straight from os.environ, as does logfire (LOGFIRE_TOKEN) — the instance
 # configures *which model*, never the credential (M9). pydantic-settings
-# fills this class from .env and never touches the environment, so those
-# keys reached the process only when something else exported them; `just`
-# recipes do (`set dotenv-load := true`), a bare `uv run pinch-dev` did
+# fills this class from the file and never touches the environment, so
+# those keys reached the process only when something else exported them;
+# `just` recipes do (`set dotenv-filename`), a bare `uv run pinch-dev` did
 # not, and a missing key degrades to an abstain that still scores.
 # The path is explicit: bare load_dotenv() resolves via find_dotenv(),
 # which walks up from the calling module's directory and would disagree
 # with env_file below about which file it means. override=False keeps the
 # shell ahead of the file, the precedence pydantic-settings already uses.
-load_dotenv(".env", override=False)
+load_dotenv(_env_file, override=False)
+# Stamp the resolved value back so Settings.env below always reports the
+# file actually loaded, even if a dotenv file smuggled in a PINCH_ENV.
+os.environ["PINCH_ENV"] = _pinch_env
+
+if Path(".env").exists():
+    logging.getLogger(__name__).warning(
+        "A bare .env exists but is no longer read; Pinch loads %s (PINCH_ENV=%s). "
+        "Rename it to .env.local / .env.dev / .env.prod.",
+        _env_file,
+        _pinch_env,
+    )
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="PINCH_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="PINCH_", env_file=_env_file, extra="ignore")
 
+    env: Literal["local", "dev", "prod"] = "local"
+    """Which dotenv file backs this process (resolved above, before this
+    class exists — the field is introspection, not a knob you can set in a
+    file)."""
     debug: bool = False
     log_level: str = "INFO"
     environment: str = "development"
