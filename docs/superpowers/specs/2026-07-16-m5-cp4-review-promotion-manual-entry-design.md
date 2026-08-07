@@ -1,6 +1,6 @@
 # M5 CP4 — Review surface, rule promotion, manual transaction entry
 
-**Issue:** [#22](https://github.com/syn54x/pinch-backend/issues/22) (sub-issue of PRD M5 #18)
+**Issue:** [#22](https://github.com/pinch-finance/pinch-backend/issues/22) (sub-issue of PRD M5 #18)
 **Branch:** `m5-classification` / PR #23 (accumulating all of M5 — CP4 is the last box)
 **Status:** design approved 2026-07-16
 

@@ -61,7 +61,7 @@ jobs:
         with:
           app-id: ${{ vars.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          owner: syn54x
+          owner: pinch-finance
           repositories: pinch-backend
 
       - uses: actions/checkout@v5
@@ -163,7 +163,7 @@ jobs:
         with:
           app-id: ${{ vars.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          owner: syn54x
+          owner: pinch-finance
           repositories: pinch-backend
 
       - uses: actions/download-artifact@v4

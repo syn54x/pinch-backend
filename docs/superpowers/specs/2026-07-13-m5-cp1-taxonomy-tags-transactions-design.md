@@ -1,6 +1,6 @@
 # M5 CP1 — Taxonomy, tags, and the transaction user-data surface
 
-**Issue:** [#19](https://github.com/syn54x/pinch-backend/issues/19) (sub-issue of PRD M5 #18)
+**Issue:** [#19](https://github.com/pinch-finance/pinch-backend/issues/19) (sub-issue of PRD M5 #18)
 **Branch:** `m5-classification` (single branch/PR for all of M5; one commit per sub-issue)
 **Status:** design approved 2026-07-13
 

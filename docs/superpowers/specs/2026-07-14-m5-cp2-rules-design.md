@@ -1,6 +1,6 @@
 # M5 CP2 — Rules: model, condition evaluator, CRUD, preview
 
-**Issue:** [#20](https://github.com/syn54x/pinch-backend/issues/20) (sub-issue of PRD M5 #18)
+**Issue:** [#20](https://github.com/pinch-finance/pinch-backend/issues/20) (sub-issue of PRD M5 #18)
 **Branch:** `m5-classification` / PR #23 (accumulating all of M5)
 **Status:** design approved 2026-07-14
 
