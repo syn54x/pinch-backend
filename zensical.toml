@@ -1,6 +1,6 @@
 [project]
 site_name = "pinch-backend"
-site_url = "https://syn54x.github.io/pinch-backend/"
+site_url = "https://pinch-finance.github.io/pinch-backend/"
 site_description = "Pinch backend: Litestar API, Penny (pydantic-ai) agents, and a private developer CLI"
 docs_dir = "docs/pages"
 site_dir = "site"

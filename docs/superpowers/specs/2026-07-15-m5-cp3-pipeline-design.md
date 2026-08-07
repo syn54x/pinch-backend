@@ -1,6 +1,6 @@
 # M5 CP3 — Pipeline core: Procrastinate, proposals, correction log, auto-file
 
-**Issue:** [#21](https://github.com/syn54x/pinch-backend/issues/21) (sub-issue of PRD M5 #18)
+**Issue:** [#21](https://github.com/pinch-finance/pinch-backend/issues/21) (sub-issue of PRD M5 #18)
 **Branch:** `m5-classification` / PR #23 (accumulating all of M5)
 **Status:** design approved 2026-07-15
 

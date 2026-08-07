@@ -9,7 +9,7 @@ uv add pinch-backend            # as a dependency
 ## From source
 
 ```bash
-git clone https://github.com/syn54x/pinch-backend
+git clone https://github.com/pinch-finance/pinch-backend
 cd pinch-backend
 uv sync
 ```

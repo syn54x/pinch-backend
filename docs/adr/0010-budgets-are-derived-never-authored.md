@@ -39,4 +39,4 @@ buried in a transfer, is invisible to spending); and folding goals in now
 (a goal is a legitimately user-authored destination measured against the
 derived trajectory — a different concept, deferred whole rather than
 smuggled in). The full concept, user stories, and vocabulary live in the
-F9 PRD: https://github.com/syn54x/pinch-frontend/issues/78.
+F9 PRD: https://github.com/pinch-finance/pinch-frontend/issues/78.
