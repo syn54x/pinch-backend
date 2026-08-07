@@ -127,6 +127,28 @@ def test_the_toggles_are_environment_config(monkeypatch) -> None:
     assert loaded.turnstile_enabled is False  # reserved, nothing reads it yet
 
 
+async def test_csrf_cookie_domain_widens_to_the_configured_domain(db, monkeypatch) -> None:
+    """Split-subdomain deployments (app.X calling api.X): the frontend's JS
+    must read the token the API set, so the CSRF cookie carries the shared
+    Domain. Host-only by default — the assertion pair proves the setting is
+    the only thing that widens it."""
+    monkeypatch.setattr(settings, "csrf_cookie_domain", ".pinch.cash")
+    async with AsyncTestClient(
+        create_app(manage_database=False), base_url="https://testserver.local"
+    ) as c:
+        response = await c.get("/health")
+        cookie = response.headers.get("set-cookie", "")
+        assert "csrftoken" in cookie
+        assert "domain=.pinch.cash" in cookie.lower()
+
+
+async def test_csrf_cookie_is_host_only_by_default(client) -> None:
+    response = await client.get("/health")
+    cookie = response.headers.get("set-cookie", "")
+    assert "csrftoken" in cookie
+    assert "domain=" not in cookie.lower()
+
+
 # --- Secrets discipline (PRD story 14) -----------------------------------------
 
 

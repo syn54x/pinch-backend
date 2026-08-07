@@ -83,6 +83,15 @@ class Settings(BaseSettings):
     no signing key). Required outside development; development generates an
     ephemeral per-process key, which only invalidates in-flight CSRF tokens
     on restart."""
+    csrf_cookie_domain: str = ""
+    """Domain attribute for the CSRF cookie (e.g. ".pinch.cash"). The
+    double-submit echo requires the frontend's JS to read the token the API
+    set, and a host-only cookie is invisible across subdomains — so a
+    split-subdomain deployment (app.X calling api.X) must widen it to the
+    shared registrable domain. Empty (the default) keeps the cookie
+    host-only, which is right same-origin and in development, where both
+    dev servers share the host ``localhost``. The session cookie never
+    widens: it is read by the API host alone."""
     session_cookie_name: str = "pinch_session"
     session_cookie_secure: bool = True
     """Secure default even in development — browsers exempt localhost.

@@ -185,6 +185,7 @@ def create_app(*, manage_database: bool = True) -> Litestar:
                     secret=settings.secret_key,
                     cookie_secure=settings.session_cookie_secure,
                     cookie_samesite="lax",
+                    cookie_domain=settings.csrf_cookie_domain or None,
                 ),
             ),
         ],
