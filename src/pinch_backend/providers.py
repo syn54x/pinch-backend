@@ -879,6 +879,37 @@ class MXProvider:
         data = await self._request("POST", "/users", json={"user": {"id": f"pinch-{ledger_id}"}})
         return data["user"]["guid"]
 
+    async def _paginate(self, path: str, key: str) -> list[dict]:
+        """MX pages every collection; a diagnostic that reads page 1 and
+        stops would under-report exactly when it matters most (a client
+        with many relics). Bounded: MX reports ``total_pages``."""
+        records: list[dict] = []
+        page = 1
+        while True:
+            data = await self._request(
+                "GET", path, params={"page": str(page), "records_per_page": "100"}
+            )
+            records.extend(data.get(key) or [])
+            total = (data.get("pagination") or {}).get("total_pages") or 1
+            if page >= int(total):
+                return records
+            page += 1
+
+    async def list_users(self) -> list[dict]:
+        """Every user container these client credentials own (GET /users) —
+        the client-scoped diagnostic behind ``pinch-dev mx-users``. Unbound
+        on purpose: guids are what it is looking for, so requiring one
+        would defeat it. Read-only, and outside the ``SyncProvider``
+        protocol like ``get_item_status`` — fakes owe it nothing."""
+        return await self._paginate("/users", "users")
+
+    async def list_members(self, user_guid: str) -> list[dict]:
+        """One user's members — the connections MX will keep aggregating
+        (and ringing the doorbell about) until they are deleted. Takes the
+        guid as an argument rather than reading the binding: the caller is
+        walking ``list_users``' output, not serving one enrollment."""
+        return await self._paginate(f"/users/{user_guid}/members", "members")
+
     async def create_connect_session(self, *, client_user_id: str) -> str:
         """One widget-URL mint under the enrollment user (CP0 spike:
         request/response shapes verified live). ``client_user_id`` is

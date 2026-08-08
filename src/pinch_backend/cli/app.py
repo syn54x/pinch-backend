@@ -200,6 +200,88 @@ def reconcile() -> None:
     asyncio.run(_run())
 
 
+@app.command(name="mx-users")
+def mx_users() -> None:
+    """List every MX user and member these instance credentials own, each
+    marked against THIS database's enrollments and connections — the
+    relic hunt behind ``webhook.unmatched_item``. MX aggregates members
+    for as long as they exist client-side, so members from a retired
+    environment keep ringing a doorbell that can never match. Read-only:
+    it names what to delete, it never deletes."""
+    import asyncio
+
+    from ferro import engines
+
+    from pinch_backend import providers
+    from pinch_backend.db import connect_database, disconnect_database
+    from pinch_backend.models import Connection, ConnectionProvider, Enrollment
+    from pinch_backend.settings import settings
+
+    if not settings.mx_configured:
+        raise SystemExit("MX is not configured (PINCH_MX_CLIENT_ID / _API_KEY)")
+
+    async def _list() -> None:
+        await connect_database()
+        try:
+            async with engines.session():
+                await _list_users()
+        finally:
+            await disconnect_database()
+
+    async def _list_users() -> None:
+        # The membership question is "does THIS database know it?", so the
+        # answer is only as meaningful as the database this process points
+        # at — name it, because reading prod's relics against a local
+        # database would mark every live member a relic.
+        print(f"env={settings.env} · mx_environment={settings.mx_environment}")
+        known_users = {e.provider_user_id for e in await _mx_enrollments()}
+        known_members = {c.provider_item_id for c in await _mx_connections()}
+        provider = providers.MXProvider(
+            client_id=settings.mx_client_id,
+            api_key=settings.mx_api_key,
+            environment=settings.mx_environment,
+        )
+        users = await provider.list_users()
+        if not users:
+            print("no MX users under these credentials")
+            return
+        orphan_members = 0
+        for user in users:
+            guid = user.get("guid") or "?"
+            mark = "known" if guid in known_users else "UNMATCHED"
+            print(f"\nuser {guid} · id={user.get('id') or '—'} · {mark}")
+            for member in await provider.list_members(guid):
+                member_guid = member.get("guid") or "?"
+                member_mark = "known" if member_guid in known_members else "UNMATCHED"
+                if member_mark != "known":
+                    orphan_members += 1
+                print(
+                    f"  member {member_guid} · "
+                    f"{member.get('name') or 'unnamed'} · "
+                    f"institution={member.get('institution_code') or '—'} · "
+                    f"status={member.get('connection_status') or '—'} · "
+                    f"{member_mark}"
+                )
+        if orphan_members:
+            print(
+                f"\n{orphan_members} member(s) unknown to this database — "
+                "the source of webhook.unmatched_item. Delete them MX-side "
+                "(dashboard, or DELETE /users/{user_guid}) to stop the noise."
+            )
+
+    async def _mx_enrollments() -> list[Enrollment]:
+        return await Enrollment.where(
+            lambda e: e.provider == ConnectionProvider.MX,
+        ).all()
+
+    async def _mx_connections() -> list[Connection]:
+        return await Connection.where(
+            lambda c: c.provider == ConnectionProvider.MX,
+        ).all()
+
+    asyncio.run(_list())
+
+
 @app.command(name="plaid-item")
 def plaid_item(connection_id: str | None = None) -> None:
     """Probe Plaid's /item/get for one connection (or all of them):
