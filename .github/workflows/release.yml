@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   gate:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v5
 
@@ -41,7 +41,7 @@ jobs:
 
   release:
     needs: gate
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
@@ -141,7 +141,7 @@ jobs:
 
   publish:
     needs: release
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     environment:
       name: pypi
       url: https://pypi.org/p/pinch-cli
@@ -156,7 +156,7 @@ jobs:
 
   github-release:
     needs: [release, publish]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/create-github-app-token@v1
         id: app-token
