@@ -1487,7 +1487,7 @@ requires-dist = [
     { name = "litestar", extras = ["standard"], specifier = ">=2" },
     { name = "logfire", specifier = ">=4,<5" },
     { name = "procrastinate", specifier = ">=3.9" },
-    { name = "pydantic", extras = ["email"], specifier = ">=2.0" },
+    { name = "pydantic", extras = ["email"], specifier = ">=2.13.4" },
     { name = "pydantic-ai", specifier = ">=2,<3" },
     { name = "pydantic-settings", specifier = ">=2.0" },
     { name = "python-dotenv", specifier = ">=1" },

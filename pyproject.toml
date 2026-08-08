@@ -7,7 +7,7 @@ readme = "README.md"
 authors = [{ name = "Taylor", email = "taylor@x54.sh" }]
 requires-python = ">=3.14"
 dependencies = [
-    "pydantic[email]>=2.0",
+    "pydantic[email]>=2.13.4",
     "pydantic-settings>=2.0",
     # Direct dependency, not merely pydantic-settings': settings.py loads
     # .env onto os.environ so provider keys reach pydantic-ai and logfire.
