@@ -21,18 +21,34 @@ from pinch_backend.crypto import encrypt_secret
 from pinch_backend.models import (
     Account,
     AccountKind,
+    BalanceEntry,
     Category,
     Connection,
     ConnectionProvider,
     Conversation,
+    CorrectionLogEntry,
     Enrollment,
+    Holding,
+    Import,
+    ImportProfile,
+    ImportRow,
+    InvestmentActivity,
+    InvestmentActivityType,
     Ledger,
     LedgerMember,
+    Proposal,
+    ProposalTag,
+    RecurringCadence,
+    RecurringSeries,
     Rule,
+    Security,
+    SplitLine,
     Tag,
     Transaction,
     TransactionTag,
+    Transfer,
     User,
+    utcnow,
 )
 
 if TYPE_CHECKING:
@@ -56,6 +72,17 @@ async def _signup(client, email: str = "taylor@example.com") -> None:
     assert response.status_code == 201, response.text
 
 
+async def _delete_me(client, password: str = PASSWORD):
+    """DELETE with a body rides ``request`` — httpx's ``delete`` takes no
+    payload. The password is the fresh-possession proof (PR #113 review)."""
+    return await client.request(
+        "DELETE",
+        "/api/v1/auth/me",
+        json={"current_password": password},
+        headers=await _csrf(client),
+    )
+
+
 class FakeEraseProvider:
     """Scriptable both-providers fake at the registry seam: one instance
     answers every materialization, recording bindings; per-kind error
@@ -67,6 +94,9 @@ class FakeEraseProvider:
         self.users_deleted: list[str] = []
         self.remove_error: str | None = None
         self.delete_user_error: str | None = None
+        self.on_remove = None
+        """Async hook fired inside remove_item — the seam for racing a
+        write into the revocation window (the mid-erasure connect)."""
         self._binding: dict = {}
 
     def materialize(
@@ -88,6 +118,8 @@ class FakeEraseProvider:
         return self
 
     async def remove_item(self) -> None:
+        if self.on_remove is not None:
+            await self.on_remove()
         if self.remove_error is not None:
             raise providers.ProviderError(code=self.remove_error, message="scripted")
         self.removed.append(dict(self._binding))
@@ -124,7 +156,9 @@ async def _user_and_ledger(email: str) -> tuple[User, Ledger]:
 
 
 async def _seed_domain(ledger: Ledger) -> None:
-    """A wide slice of the ledger graph, including both RESTRICT FKs
+    """Every ledger-owned table gets at least one row (enforced against
+    the registry by the happy-path test — an unseeded table would make
+    its emptiness assertion vacuous), including both RESTRICT FKs
     (rule → category, child category → parent) that a naive ledger
     cascade would trip over."""
     await Enrollment.create(ledger=ledger, provider=ConnectionProvider.MX, provider_user_id="USR-1")
@@ -153,6 +187,44 @@ async def _seed_domain(ledger: Ledger) -> None:
     tag = await Tag.create(ledger=ledger, name="Trip", name_fold="trip")
     await TransactionTag.create(ledger=ledger, transaction=txn, tag=tag)
     await Conversation.create(ledger=ledger, title="hi penny", messages=[{"role": "user"}])
+    await BalanceEntry.create(
+        ledger=ledger, account=account, amount_minor=100_00, currency="USD", as_of=utcnow()
+    )
+    security = await Security.create(
+        ledger=ledger, provider_security_id="SEC-1", name="ACME", type="equity"
+    )
+    await Holding.create(
+        ledger=ledger, account=account, security=security, quantity=2.0, currency="USD"
+    )
+    await InvestmentActivity.create(
+        ledger=ledger,
+        account=account,
+        provider_activity_id="ACT-1",
+        date=date(2026, 1, 6),
+        name="BUY ACME",
+        amount_minor=-200_00,
+        type=InvestmentActivityType.BUY,
+        currency="USD",
+    )
+    batch = await Import.create(
+        ledger=ledger, account=account, filename="jan.csv", file_bytes=b"date,amount\n"
+    )
+    await ImportRow.create(ledger=ledger, import_batch=batch, row_index=0, raw_cells=["x", "y"])
+    await ImportProfile.create(
+        ledger=ledger, shape_key="k", header_tuple=["date", "amount"], delimiter=",", mapping={}
+    )
+    await RecurringSeries.create(
+        ledger=ledger,
+        account=account,
+        payee="coffee shop",
+        direction=-1,
+        cadence=RecurringCadence.MONTHLY,
+    )
+    await SplitLine.create(ledger=ledger, transaction=txn, amount_minor=-250)
+    await Transfer.create(ledger=ledger, outflow_transaction=txn)
+    proposal = await Proposal.create(ledger=ledger, transaction=txn)
+    await ProposalTag.create(ledger=ledger, proposal=proposal, name="trip")
+    await CorrectionLogEntry.create(ledger=ledger, transaction_id=txn.id)
 
 
 def _models_with(column: str) -> list[type[Model]]:
@@ -190,6 +262,30 @@ async def test_delete_me_erases_everything_and_revokes_upstream(client, fake):
     await _signup(client)
     user, ledger = await _user_and_ledger("taylor@example.com")
     await _seed_domain(ledger)
+    # Seed the user-owned auth tables too: a PAT (via the API) and a
+    # password-reset token; signup already minted the verification token,
+    # membership, and session.
+    pat = await client.post(
+        "/api/v1/auth/pats",
+        json={"name": "ci", "scopes": ["read"]},
+        headers=await _csrf(client),
+    )
+    assert pat.status_code == 201, pat.text
+    reset = await client.post(
+        "/api/v1/auth/password-reset/request",
+        json={"email": "taylor@example.com"},
+        headers=await _csrf(client),
+    )
+    assert reset.status_code == 202, reset.text
+    # The vacuity guard (PR #113 review): every model the emptiness sweep
+    # will assert over must actually hold a row now, or its assertion
+    # proves nothing. A future table failing here is the feature.
+    for model in _models_with("ledger_id"):
+        rows = await model.where(lambda m, lid=ledger.id: m.ledger_id == lid).all()
+        assert rows != [], f"{model.__name__} unseeded — its emptiness assertion would be vacuous"
+    for model in _models_with("user_id"):
+        rows = await model.where(lambda m, uid=user.id: m.user_id == uid).all()
+        assert rows != [], f"{model.__name__} unseeded — its emptiness assertion would be vacuous"
     # A second user is the collateral-damage canary.
     other_client_email = "neighbor@example.com"
     await client.post("/api/v1/auth/logout", headers=await _csrf(client))
@@ -204,7 +300,7 @@ async def test_delete_me_erases_everything_and_revokes_upstream(client, fake):
         headers=await _csrf(client),
     )
     assert login.status_code == 200
-    response = await client.delete("/api/v1/auth/me", headers=await _csrf(client))
+    response = await _delete_me(client)
     assert response.status_code == 204, response.text
 
     # Upstream first: the Plaid Item by its decrypted token, the MX
@@ -246,7 +342,7 @@ async def test_delete_me_purges_email_keyed_rate_limit_rows(client, fake):
         headers=await _csrf(client),
     )
     assert good.status_code == 200
-    assert (await client.delete("/api/v1/auth/me", headers=await _csrf(client))).status_code == 204
+    assert (await _delete_me(client)).status_code == 204
     assert await AuthAttempt.where(lambda a, k=key: a.key == k).all() == []
 
 
@@ -259,7 +355,7 @@ async def test_provider_refusal_deletes_nothing_and_retry_converges(client, fake
     await _seed_domain(ledger)
 
     fake.remove_error = "INSTITUTION_DOWN"
-    refused = await client.delete("/api/v1/auth/me", headers=await _csrf(client))
+    refused = await _delete_me(client)
     assert refused.status_code == 502
     assert "INSTITUTION_DOWN" in refused.json()["detail"]
     # Nothing local died: the user, the ledger, every connection.
@@ -268,7 +364,7 @@ async def test_provider_refusal_deletes_nothing_and_retry_converges(client, fake
     assert len(connections) == 2
     # The refusal did not kill the acting session either — the user can retry.
     fake.remove_error = None
-    retried = await client.delete("/api/v1/auth/me", headers=await _csrf(client))
+    retried = await _delete_me(client)
     assert retried.status_code == 204, retried.text
     assert user.id is not None and ledger.id is not None
     await _assert_identity_erased(user.id, ledger.id)
@@ -281,7 +377,7 @@ async def test_already_gone_upstream_counts_as_revoked(client, fake):
     # Every removal answers "no such thing" — the erasure's success case.
     fake.remove_error = "ITEM_NOT_FOUND"
     fake.delete_user_error = "USER_NOT_FOUND"
-    response = await client.delete("/api/v1/auth/me", headers=await _csrf(client))
+    response = await _delete_me(client)
     assert response.status_code == 204, response.text
 
 
@@ -295,12 +391,95 @@ async def test_unconfigured_provider_refuses_erasure(client, fake, monkeypatch):
     # silent skip would orphan a live Item, so erasure refuses instead.
     monkeypatch.setattr(settings, "plaid_client_id", "")
     monkeypatch.setattr(settings, "plaid_secret", "")
-    response = await client.delete("/api/v1/auth/me", headers=await _csrf(client))
+    response = await _delete_me(client)
     assert response.status_code == 502
     assert "PROVIDER_NOT_CONFIGURED" in response.json()["detail"]
+    # The refusal short-circuits before the transaction: nothing died.
+    user, _ = await _user_and_ledger("taylor@example.com")
+    assert user is not None
+    connections = await Connection.where(lambda c, lid=ledger.id: c.ledger_id == lid).all()
+    assert len(connections) == 2
+
+
+async def test_undecryptable_secret_is_a_named_refusal(client, fake):
+    """A rotated/lost PINCH_SECRET_ENCRYPTION_KEY must refuse with a
+    code, never crash into a 500 that bypasses the failure design."""
+    await _signup(client)
+    _, ledger = await _user_and_ledger("taylor@example.com")
+    await Connection.create(
+        ledger=ledger,
+        provider=ConnectionProvider.PLAID,
+        provider_item_id="item-bad",
+        encrypted_secret=b"not-a-fernet-blob",
+    )
+    response = await _delete_me(client)
+    assert response.status_code == 502
+    assert "SECRET_UNDECRYPTABLE" in response.json()["detail"]
+    assert await User.where(lambda u: u.email == "taylor@example.com").all() != []
+
+
+async def test_mx_connection_without_enrollment_is_a_named_refusal(client, fake):
+    """Corrupted state refuses observably instead of a mid-sweep 500 —
+    and the other provider's revocation is still attempted first."""
+    await _signup(client)
+    _, ledger = await _user_and_ledger("taylor@example.com")
+    await Connection.create(
+        ledger=ledger,
+        provider=ConnectionProvider.PLAID,
+        provider_item_id="item-1",
+        encrypted_secret=encrypt_secret("access-token-1"),
+    )
+    await Connection.create(
+        ledger=ledger, provider=ConnectionProvider.MX, provider_item_id="MBR-orphan"
+    )
+    response = await _delete_me(client)
+    assert response.status_code == 502
+    assert "ENROLLMENT_MISSING" in response.json()["detail"]
+    # One refusal did not hide the other connection's attempt.
+    assert [r["secret"] for r in fake.removed] == ["access-token-1"]
+    assert await Ledger.get_or_none(ledger.id) is not None
+
+
+async def test_connection_minted_mid_erasure_refuses_then_retry_converges(client, fake):
+    """The revocation window is real: a connection created while the
+    sweep runs (a second tab finishing a Link exchange) must refuse —
+    cascading it away unrevoked would orphan a live provider token."""
+    await _signup(client)
+    _, ledger = await _user_and_ledger("taylor@example.com")
+    await _seed_domain(ledger)
+
+    async def _mint_mid_sweep() -> None:
+        fake.on_remove = None
+        await Connection.create(
+            ledger=ledger,
+            provider=ConnectionProvider.PLAID,
+            provider_item_id="item-raced",
+            encrypted_secret=encrypt_secret("access-raced"),
+        )
+
+    fake.on_remove = _mint_mid_sweep
+    refused = await _delete_me(client)
+    assert refused.status_code == 502
+    assert "CREATED_DURING_ERASURE" in refused.json()["detail"]
+    assert await Ledger.get_or_none(ledger.id) is not None
+    # The retry's sweep sees the newcomer and revokes it too.
+    retried = await _delete_me(client)
+    assert retried.status_code == 204, retried.text
+    assert "access-raced" in [r["secret"] for r in fake.removed]
 
 
 # --- the credential fence --------------------------------------------------
+
+
+async def test_wrong_password_refuses_erasure(client, fake):
+    """A live session alone is not enough (PR #113 review): the most
+    destructive verb demands fresh possession, like change_password."""
+    await _signup(client)
+    response = await _delete_me(client, password="not the password")
+    assert response.status_code == 401
+    assert await User.where(lambda u: u.email == "taylor@example.com").all() != []
+    # The right password still works afterwards.
+    assert (await _delete_me(client)).status_code == 204
 
 
 async def test_pat_cannot_delete_the_account(client, fake):
@@ -312,7 +491,12 @@ async def test_pat_cannot_delete_the_account(client, fake):
     )
     assert created.status_code == 201, created.text
     token = created.json()["token"]
-    response = await client.delete("/api/v1/auth/me", headers={"authorization": f"Bearer {token}"})
+    response = await client.request(
+        "DELETE",
+        "/api/v1/auth/me",
+        json={"current_password": PASSWORD},
+        headers={"authorization": f"Bearer {token}"},
+    )
     assert response.status_code == 401
     assert await User.where(lambda u: u.email == "taylor@example.com").all() != []
 
@@ -325,7 +509,7 @@ async def test_unverified_user_can_still_delete_themselves(client, fake, monkeyp
     # The hosted gate holds the domain surface closed...
     assert (await client.get("/api/v1/accounts")).status_code == 403
     # ...but never the exit.
-    response = await client.delete("/api/v1/auth/me", headers=await _csrf(client))
+    response = await _delete_me(client)
     assert response.status_code == 204, response.text
 
 
@@ -339,7 +523,7 @@ async def test_queued_classification_job_tolerates_an_erased_ledger(
 
     await _signup(client)
     _, ledger = await _user_and_ledger("taylor@example.com")
-    assert (await client.delete("/api/v1/auth/me", headers=await _csrf(client))).status_code == 204
+    assert (await _delete_me(client)).status_code == 204
     await classify_ledger.defer_async(ledger_id=str(ledger.id))
     # A sweep deferred before (or during) erasure must no-op quietly,
     # not traceback through five retries over a deliberately gone row.

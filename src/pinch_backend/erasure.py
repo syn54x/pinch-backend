@@ -23,6 +23,7 @@ as revoked.
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from cryptography.fernet import InvalidToken
 from ferro import transaction
 
 from pinch_backend import providers
@@ -81,14 +82,31 @@ class ErasureReceipt:
     sessions_revoked: int
 
 
-async def _revoke_providers(ledger_id: uuid.UUID) -> tuple[int, list[RevocationFailure]]:
+@dataclass(frozen=True)
+class RevocationSweep:
+    """One pass over the provider-side surface: what was revoked, what
+    refused, and exactly which rows the pass saw — the recheck set the
+    delete transaction compares against (a connection minted mid-sweep
+    must refuse, never cascade away unrevoked)."""
+
+    revoked: int
+    failures: list[RevocationFailure]
+    connection_ids: frozenset[uuid.UUID]
+    enrollment_ids: frozenset[uuid.UUID]
+
+
+async def _revoke_providers(ledger_id: uuid.UUID) -> RevocationSweep:
     """Tear down every provider-side connection, then every MX user
     container (members do not cascade user-scope — providers.delete_user).
 
     An unconfigured provider is a refusal, not a skip: erasure reporting
     success while a live provider-side token exists is the one lie this
     endpoint must never tell. The operator restores the credentials and
-    the user retries — observable and finite, unlike a silent orphan."""
+    the user retries — observable and finite, unlike a silent orphan.
+    An undecryptable secret (rotated/lost PINCH_SECRET_ENCRYPTION_KEY)
+    is the same stance: a named refusal, not a crash — though recovering
+    it needs the operator runbook (provider-dashboard removal), not a
+    retry; S8 documents that escape hatch."""
     failures: list[RevocationFailure] = []
     revoked = 0
     connections = await Connection.where(lambda c, lid=ledger_id: c.ledger_id == lid).all()
@@ -102,19 +120,24 @@ async def _revoke_providers(ledger_id: uuid.UUID) -> tuple[int, list[RevocationF
             continue
         if connection.provider is ConnectionProvider.MX:
             # An MX connection without its enrollment is corrupted state
-            # (connects only ever ride an ensured enrollment) — loud, per
-            # AGENTS I-1.
+            # (connects only ever ride an ensured enrollment) — but a
+            # mid-sweep raise would hide every later connection's refusal,
+            # so it reports as a named refusal instead of a 500.
             if mx_user_guid is None:
-                raise RuntimeError(f"MX connection {connection.id} has no enrollment")
+                failures.append(RevocationFailure(connection.provider, "ENROLLMENT_MISSING"))
+                continue
             provider = providers.get_provider(
                 connection.provider,
                 user_guid=mx_user_guid,
                 member_guid=connection.provider_item_id,
             )
         elif connection.encrypted_secret is not None:
-            provider = providers.get_provider(
-                connection.provider, secret=decrypt_secret(connection.encrypted_secret)
-            )
+            try:
+                secret = decrypt_secret(connection.encrypted_secret)
+            except InvalidToken:
+                failures.append(RevocationFailure(connection.provider, "SECRET_UNDECRYPTABLE"))
+                continue
+            provider = providers.get_provider(connection.provider, secret=secret)
         else:
             # No provider-side binding ever existed (no secret to revoke).
             revoked += 1
@@ -140,7 +163,12 @@ async def _revoke_providers(ledger_id: uuid.UUID) -> tuple[int, list[RevocationF
         except providers.ProviderError as error:
             if error.code not in _ALREADY_GONE:
                 failures.append(RevocationFailure(enrollment.provider, error.code))
-    return revoked, failures
+    return RevocationSweep(
+        revoked=revoked,
+        failures=failures,
+        connection_ids=frozenset(c.id for c in connections),
+        enrollment_ids=frozenset(e.id for e in enrollments),
+    )
 
 
 async def erase_account(user: User) -> ErasureReceipt:
@@ -169,13 +197,31 @@ async def erase_account(user: User) -> ErasureReceipt:
             raise RuntimeError(
                 f"ledger {ledger_id} has other members; erasure of shared ledgers is undesigned"
             )
-        connections_revoked, failures = await _revoke_providers(ledger_id)
-        if failures:
-            raise RevocationRefused(failures)
+        sweep = await _revoke_providers(ledger_id)
+        connections_revoked = sweep.revoked
+        if sweep.failures:
+            raise RevocationRefused(sweep.failures)
     transactions_deleted = 0
     async with transaction():
         if ledger_id is not None:
             lid = ledger_id
+            # The revocation window is seconds wide (one provider HTTP
+            # call per connection): a connection or enrollment minted
+            # meanwhile — a second tab finishing a Link exchange — was
+            # never revoked, and letting the cascade take it would orphan
+            # a live provider-side token forever. Recheck-and-refuse; the
+            # retry's sweep picks the newcomer up and converges.
+            raced = [
+                RevocationFailure(c.provider, "CREATED_DURING_ERASURE")
+                for c in await Connection.where(lambda c, lid=lid: c.ledger_id == lid).all()
+                if c.id not in sweep.connection_ids
+            ] + [
+                RevocationFailure(e.provider, "CREATED_DURING_ERASURE")
+                for e in await Enrollment.where(lambda e, lid=lid: e.ledger_id == lid).all()
+                if e.id not in sweep.enrollment_ids
+            ]
+            if raced:
+                raise RevocationRefused(raced)
             # Two RESTRICT FKs would abort the ledger cascade mid-flight
             # (RESTRICT checks immediately, even when the referencing row
             # dies in the same statement): rules pin categories via
@@ -193,8 +239,10 @@ async def erase_account(user: User) -> ErasureReceipt:
             await Ledger.where(lambda ledger, lid=lid: ledger.id == lid).delete()
         # Rate-limit rows are keyed by opaque strings, not FKs
         # (auth.models.AuthAttempt) — the email-keyed shapes carry the
-        # user's address and go with the account. IP-keyed rows name no
-        # one and age out on their own.
+        # user's address and go with the account. IP-keyed rows are
+        # pruned only when their key is hit again (rate_limit.py), so
+        # they can outlive the account; S8's retention schedule names
+        # them as a retained artifact with that lifetime.
         for key in (f"login:email:{email}", f"verify:email:{email}", f"reset:email:{email}"):
             await AuthAttempt.where(lambda a, k=key: a.key == k).delete()
         sessions_revoked = await Session.where(lambda s, uid=user_id: s.user_id == uid).delete()

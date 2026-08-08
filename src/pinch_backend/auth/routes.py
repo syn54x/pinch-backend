@@ -532,20 +532,52 @@ async def change_password(
     return Response(None, cookies=[session_cookie(secret)])
 
 
+class MeDeleteIn(BaseModel):
+    """Erasure demands fresh proof of possession, not just a live cookie
+    (PR #113 review): a session alone — an unattended browser, a stolen
+    cookie — must not be enough to destroy the account. The
+    change_password stance, applied to the strictly more destructive
+    verb."""
+
+    model_config = ConfigDict(use_attribute_docstrings=True)
+
+    current_password: SecretStr
+
+
 @delete("/me")
-async def delete_me(current_session: NamedDependency[Session]) -> Response[None]:
+async def delete_me(data: MeDeleteIn, current_session: NamedDependency[Session]) -> Response[None]:
     """Full-account erasure (Q11's enforcement, epic #97 issue #101):
     revoke every provider-side connection, then hard-delete the ledger
     graph, the auth surface, and the user row. Nothing is retained.
 
-    Cookie-session only, via ``current_session`` — the change_password
-    fence: a leaked PAT must never destroy the account it rides on.
+    Cookie-session only, via ``current_session``, plus possession of the
+    current password — the full change_password fence: a leaked PAT
+    cannot reach it, and a live session alone cannot pass it.
 
     All-or-nothing (pinch_backend.erasure): any provider refusing
     revocation aborts with a 502 before a single local row dies, naming
     the provider codes; a retry converges because already-revoked
     providers answer "gone", which counts as success."""
     user = await User.get(current_session.user_id)
+    await require_within_limit(
+        f"delete-me:user:{user.id}",
+        limit=settings.auth_rate_limit_per_email,
+        window=settings.auth_rate_limit_window,
+    )
+    current = data.current_password.get_secret_value()
+    if user.password_hash is None:
+        # A passwordless account has no password to prove (the
+        # change_password decoy stance); a future non-password login
+        # method must bring its own erasure proof before shipping.
+        verify_password(decoy_hash(), current)
+        password_ok = False
+    else:
+        password_ok = verify_password(user.password_hash, current)
+    if not password_ok:
+        # The login convention: 401 after the verify runs, never a
+        # distinguishable 400.
+        log.info("auth.me.delete_failed", user_id=str(user.id))
+        raise NotAuthorizedException(detail="Invalid credentials")
     try:
         receipt = await erasure.erase_account(user)
     except erasure.RevocationRefused as refusal:
