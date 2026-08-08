@@ -65,9 +65,15 @@ async def classify_ledger(ledger_id: str, auto_file_import_id: str | None = None
     correctness guard; the lock just cuts violation noise)."""
     from pinch_backend.classification.detection import detect_transfers
     from pinch_backend.classification.pipeline import sweep_ledger
+    from pinch_backend.models import Ledger
     from pinch_backend.recurring import detect_recurring
 
     async with engines.session():
+        if await Ledger.get_or_none(uuid.UUID(ledger_id)) is None:
+            # Erased between defer and run (DELETE /me, issue #101) —
+            # nothing to sweep, and the run_sync precedent: quiet no-op,
+            # never five retried tracebacks over a deliberately gone row.
+            return
         await sweep_ledger(
             uuid.UUID(ledger_id),
             auto_file_import_id=uuid.UUID(auto_file_import_id) if auto_file_import_id else None,

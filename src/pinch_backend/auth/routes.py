@@ -26,9 +26,11 @@ from litestar.status_codes import (
     HTTP_204_NO_CONTENT,
     HTTP_400_BAD_REQUEST,
     HTTP_409_CONFLICT,
+    HTTP_502_BAD_GATEWAY,
 )
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr
 
+from pinch_backend import erasure
 from pinch_backend.api.pagination import (
     DEFAULT_PAGE_LIMIT,
     CursorParam,
@@ -530,6 +532,38 @@ async def change_password(
     return Response(None, cookies=[session_cookie(secret)])
 
 
+@delete("/me")
+async def delete_me(current_session: NamedDependency[Session]) -> Response[None]:
+    """Full-account erasure (Q11's enforcement, epic #97 issue #101):
+    revoke every provider-side connection, then hard-delete the ledger
+    graph, the auth surface, and the user row. Nothing is retained.
+
+    Cookie-session only, via ``current_session`` — the change_password
+    fence: a leaked PAT must never destroy the account it rides on.
+
+    All-or-nothing (pinch_backend.erasure): any provider refusing
+    revocation aborts with a 502 before a single local row dies, naming
+    the provider codes; a retry converges because already-revoked
+    providers answer "gone", which counts as success."""
+    user = await User.get(current_session.user_id)
+    try:
+        receipt = await erasure.erase_account(user)
+    except erasure.RevocationRefused as refusal:
+        raise HTTPException(
+            detail=f"Provider revocation failed: {refusal}",
+            status_code=HTTP_502_BAD_GATEWAY,
+        ) from refusal
+    log.info(
+        "auth.me.deleted",
+        user_id=str(user.id),
+        ledger_id=str(receipt.ledger_id) if receipt.ledger_id else None,
+        connections_revoked=receipt.connections_revoked,
+        transactions_deleted=receipt.transactions_deleted,
+        sessions_revoked=receipt.sessions_revoked,
+    )
+    return Response(None, cookies=[clear_session_cookie()])
+
+
 auth_router = Router(
     path="/api/v1/auth",
     route_handlers=[
@@ -538,6 +572,7 @@ auth_router = Router(
         logout,
         me,
         update_me,
+        delete_me,
         list_sessions,
         revoke_session,
         create_pat,

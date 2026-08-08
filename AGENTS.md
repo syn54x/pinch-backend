@@ -51,7 +51,13 @@ other path to a ledger silently bypasses policy. A handler that seems to
 need domain data without a ledger is a design smell to raise, not a case to
 work around.
 
-One carved-out exception (ADR 0008): the webhook receiver
+Two carved-out exceptions. First (issue #101): full-account erasure
+(`pinch_backend.erasure`, behind `DELETE /me`) resolves membership directly —
+the hosted verification gate lives on `current_ledger`, and it must never
+hold an unverified account hostage to its own deletion (GDPR/CCPA); erasure
+is also the one verb where "no ledger" is a state to proceed through, not a
+500. The route still rides `current_session`, so every other auth policy
+holds. Second (ADR 0008): the webhook receiver
 (`pinch_backend.api.webhooks`) is provider plumbing, not Developer API — no
 user is acting, so there is no session to resolve a ledger from. Its
 authentication is the provider's signed JWT, its reach is exactly one
