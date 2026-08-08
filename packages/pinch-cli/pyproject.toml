@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [{ name = "Taylor", email = "taylor@x54.sh" }]
 requires-python = ">=3.14"
 dependencies = [
-    "cyclopts>=4",
+    "cyclopts>=4.22.5",
     "httpx>=0.28",
     "platformdirs>=4",
 ]
