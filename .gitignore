@@ -234,3 +234,9 @@ openapi.json
 # Real-ledger eval exports stay local (PRD M9): promote scrubbed cases by hand
 evals/exports/
 .env.bak*
+
+# macOS Finder droppings — never intentional, and they land in any directory
+.DS_Store
+
+# Playwright-MCP page snapshots: browser-session scratch, regenerated per run
+.playwright-mcp/
