@@ -34,6 +34,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 from litestar import Request, Router, post
 from litestar.exceptions import NotAuthorizedException
+from litestar.params import FromPath
 from litestar.status_codes import HTTP_200_OK
 
 from pinch_backend import providers
@@ -293,7 +294,7 @@ def _verify_mx_secret(secret: str) -> None:
 
 
 @post("/mx/{secret:str}", include_in_schema=False, exclude_from_csrf=True, status_code=HTTP_200_OK)
-async def receive_mx_webhook(request: Request, secret: str) -> None:
+async def receive_mx_webhook(request: Request, secret: FromPath[str]) -> None:
     """Authenticate, dispatch, 200 — the Plaid receiver's shape with MX's
     front door. Past the door everything is tolerant: the payload shapes
     are docs-derived, so unknown types, missing guids, and unparseable
