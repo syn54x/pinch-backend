@@ -1484,7 +1484,7 @@ requires-dist = [
     { name = "cyclopts", specifier = ">=4" },
     { name = "ferro-orm", specifier = ">=0.17.1" },
     { name = "httpx", specifier = ">=0.28" },
-    { name = "litestar", extras = ["standard"], specifier = ">=2" },
+    { name = "litestar", extras = ["standard"], specifier = ">=2.24.0" },
     { name = "logfire", specifier = ">=4,<5" },
     { name = "procrastinate", specifier = ">=3.9" },
     { name = "pydantic", extras = ["email"], specifier = ">=2.0" },
