@@ -879,6 +879,22 @@ class MXProvider:
         data = await self._request("POST", "/users", json={"user": {"id": f"pinch-{ledger_id}"}})
         return data["user"]["guid"]
 
+    async def delete_user(self) -> None:
+        """Drop the enrollment's provider-side container (DELETE
+        /users/{guid} → 204, verified in the CP0 spike) — ``create_user``'s
+        inverse, and like it MX-only plumbing outside the universal
+        protocol. Full erasure (issue #101) needs it because member
+        deletion does not cascade MX's user-scope lists (recorded at
+        ``remove_item``): dropping members alone leaves the container and
+        its aggregated data alive. A 404 surfaces as USER_NOT_FOUND — the
+        container already being gone is the caller's success case."""
+        try:
+            await self._request("DELETE", f"/users/{self._user}")
+        except ProviderError as error:
+            if error.code == "HTTP_404":
+                raise ProviderError(code="USER_NOT_FOUND", message="user already gone") from error
+            raise
+
     async def _paginate(self, path: str, key: str) -> list[dict]:
         """MX pages every collection; a diagnostic that reads page 1 and
         stops would under-report exactly when it matters most (a client

@@ -26,9 +26,11 @@ from litestar.status_codes import (
     HTTP_204_NO_CONTENT,
     HTTP_400_BAD_REQUEST,
     HTTP_409_CONFLICT,
+    HTTP_502_BAD_GATEWAY,
 )
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr
 
+from pinch_backend import erasure
 from pinch_backend.api.pagination import (
     DEFAULT_PAGE_LIMIT,
     CursorParam,
@@ -530,6 +532,70 @@ async def change_password(
     return Response(None, cookies=[session_cookie(secret)])
 
 
+class MeDeleteIn(BaseModel):
+    """Erasure demands fresh proof of possession, not just a live cookie
+    (PR #113 review): a session alone — an unattended browser, a stolen
+    cookie — must not be enough to destroy the account. The
+    change_password stance, applied to the strictly more destructive
+    verb."""
+
+    model_config = ConfigDict(use_attribute_docstrings=True)
+
+    current_password: SecretStr
+
+
+@delete("/me")
+async def delete_me(data: MeDeleteIn, current_session: NamedDependency[Session]) -> Response[None]:
+    """Full-account erasure (Q11's enforcement, epic #97 issue #101):
+    revoke every provider-side connection, then hard-delete the ledger
+    graph, the auth surface, and the user row. Nothing is retained.
+
+    Cookie-session only, via ``current_session``, plus possession of the
+    current password — the full change_password fence: a leaked PAT
+    cannot reach it, and a live session alone cannot pass it.
+
+    All-or-nothing (pinch_backend.erasure): any provider refusing
+    revocation aborts with a 502 before a single local row dies, naming
+    the provider codes; a retry converges because already-revoked
+    providers answer "gone", which counts as success."""
+    user = await User.get(current_session.user_id)
+    await require_within_limit(
+        f"delete-me:user:{user.id}",
+        limit=settings.auth_rate_limit_per_email,
+        window=settings.auth_rate_limit_window,
+    )
+    current = data.current_password.get_secret_value()
+    if user.password_hash is None:
+        # A passwordless account has no password to prove (the
+        # change_password decoy stance); a future non-password login
+        # method must bring its own erasure proof before shipping.
+        verify_password(decoy_hash(), current)
+        password_ok = False
+    else:
+        password_ok = verify_password(user.password_hash, current)
+    if not password_ok:
+        # The login convention: 401 after the verify runs, never a
+        # distinguishable 400.
+        log.info("auth.me.delete_failed", user_id=str(user.id))
+        raise NotAuthorizedException(detail="Invalid credentials")
+    try:
+        receipt = await erasure.erase_account(user)
+    except erasure.RevocationRefused as refusal:
+        raise HTTPException(
+            detail=f"Provider revocation failed: {refusal}",
+            status_code=HTTP_502_BAD_GATEWAY,
+        ) from refusal
+    log.info(
+        "auth.me.deleted",
+        user_id=str(user.id),
+        ledger_id=str(receipt.ledger_id) if receipt.ledger_id else None,
+        connections_revoked=receipt.connections_revoked,
+        transactions_deleted=receipt.transactions_deleted,
+        sessions_revoked=receipt.sessions_revoked,
+    )
+    return Response(None, cookies=[clear_session_cookie()])
+
+
 auth_router = Router(
     path="/api/v1/auth",
     route_handlers=[
@@ -538,6 +604,7 @@ auth_router = Router(
         logout,
         me,
         update_me,
+        delete_me,
         list_sessions,
         revoke_session,
         create_pat,
