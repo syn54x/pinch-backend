@@ -55,6 +55,24 @@ jobs:
           PINCH_TEST_DATABASE_URL: postgres://postgres:password@localhost:5432/postgres
         run: uv run pytest
 
+  # Fails on any known-vulnerable dependency (Q8: the gate blocks merges,
+  # it doesn't just file advisories). Suppressions go in .pip-audit-ignore
+  # via --ignore-vuln flags added here, each with a written justification.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.14"
+
+      - name: Export locked dependencies
+        run: uv export --frozen --all-groups --no-emit-project --no-emit-workspace -o requirements-audit.txt
+
+      - name: pip-audit
+        run: uvx pip-audit --strict -r requirements-audit.txt --disable-pip
+
   pr-title:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
