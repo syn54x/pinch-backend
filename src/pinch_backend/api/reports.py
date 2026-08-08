@@ -191,7 +191,7 @@ def _delta(now_value: int, reference: int) -> Delta:
 @get("/net-worth")
 async def net_worth_report(
     current_ledger: NamedDependency[Ledger],
-    range_: Annotated[RangeName, QueryParameter(query="range")] = "6m",
+    range_: Annotated[RangeName, QueryParameter(name="range")] = "6m",
     as_of: Annotated[date | None, QueryParameter()] = None,
 ) -> NetWorthOut:
     """Net worth, its history, and the run-rate projection — computed on

@@ -204,6 +204,37 @@ async def test_the_error_envelope_is_documented_as_the_contract(client) -> None:
         assert term in description, f"error envelope field {term} undocumented"
 
 
+def test_no_handler_declares_a_parameter_the_deprecated_way() -> None:
+    """Litestar announces the old parameter styles per handler, at app-build
+    time, into a stream nobody reads — three had accumulated unnoticed. The
+    convention is the current spelling everywhere: ``FromQuery``/
+    ``QueryParameter(name=...)`` for query, ``FromPath``/``PathParameter``
+    for path, never the bare-annotation or ``Parameter(query=...)`` forms.
+
+    Building the app is the whole assertion: every route handler's signature
+    is parsed here, so a deprecated declaration anywhere reddens this test
+    instead of whispering. A Litestar upgrade that deprecates something new
+    will also land here — that is the point, not a false positive.
+    """
+    import warnings
+
+    from litestar.exceptions import LitestarDeprecationWarning
+
+    from pinch_backend.api.app import create_app
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        create_app(manage_database=False)
+
+    offenders = [
+        str(w.message)
+        for w in caught
+        if issubclass(w.category, (LitestarDeprecationWarning, DeprecationWarning))
+        and "litestar" in f"{w.filename}{w.message}".lower()
+    ]
+    assert not offenders, "deprecated Litestar parameter declarations:\n" + "\n".join(offenders)
+
+
 async def test_unhandled_exceptions_log_a_traceback_event() -> None:
     """The M13 smoke-test lesson: Litestar's default logs tracebacks only
     in debug mode, so without the after_exception hook a production 500
